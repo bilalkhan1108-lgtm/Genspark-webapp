@@ -877,3 +877,192 @@ button, a, label, select, input[type="file"] + label, [role="button"] {
   letter-spacing: 0.3px;
   margin-top: 2px;
 }
+
+/* ── My Assigned Jobs bar (staff) ──────────────────────────────────────────── */
+.my-jobs-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #fff;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+.btn-my-assigned {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 20px;
+  border: 1.5px solid #1E88E5;
+  background: #fff;
+  color: #1E88E5;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 36px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.btn-my-assigned:active { transform: scale(0.96); }
+.btn-my-active {
+  background: #1E88E5 !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(30,136,229,.3);
+}
+.btn-my-clear {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 12px;
+  border-radius: 20px;
+  border: 1.5px solid #E53935;
+  background: #fff;
+  color: #E53935;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 36px;
+  transition: all 0.15s;
+}
+.btn-my-clear:active { background: #FFEBEE; }
+
+/* ── Notification badge (pending requests dot) ─────────────────────────────── */
+.nav-badge-wrap { position: relative; display: inline-flex; }
+.nav-dot {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #43A047;
+  border: 1.5px solid #1a1a2e;
+  animation: pulse-dot 1.8s infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%       { transform: scale(1.3); opacity: 0.8; }
+}
+
+/* ── Complaint quick-tags ──────────────────────────────────────────────────── */
+.complaint-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 4px;
+}
+.ctag {
+  padding: 5px 11px;
+  border-radius: 16px;
+  border: 1.5px solid #E53935;
+  background: #fff;
+  color: #E53935;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.ctag:active { background: #FFEBEE; transform: scale(0.96); }
+
+/* ── Mobile touch improvements ─────────────────────────────────────────────── */
+.filter-chip {
+  min-height: 36px;
+  padding: 7px 14px;
+}
+.btn-sm {
+  min-height: 36px;
+}
+.form-input {
+  min-height: 44px;
+}
+.status-sel {
+  min-height: 38px;
+  font-size: 13px;
+}
+.audio-player {
+  height: 36px;
+}
+
+/* ── Mobile UI refinements (Patch 5) ──────────────────────────────────────── */
+
+/* Smooth scroll on all scrollable areas */
+.vlist-wrap, .view-pad, .filter-bar, .stats-bar {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+/* Better job row: larger thumbnail, tighter layout */
+.job-row {
+  padding: 14px 12px;
+  gap: 14px;
+  min-height: 84px;
+}
+.job-row-thumb {
+  width: 60px;
+  height: 60px;
+  border-radius: 14px;
+}
+.job-name {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 2px 0;
+}
+.job-id { font-size: 12px; }
+.status-chip { font-size: 11px; padding: 3px 9px; }
+
+/* Machine card — cleaner, more breathing room */
+.machine-card {
+  padding: 14px;
+  margin-bottom: 10px;
+  border-radius: 14px;
+  box-shadow: 0 1px 6px rgba(0,0,0,.08);
+}
+.machine-name { font-size: 15px; font-weight: 700; }
+.machine-complaint { font-size: 13px; color: #666; margin-top: 3px; }
+.machine-staff { font-size: 12px; color: #1E88E5; margin-top: 3px; }
+
+/* Bigger action buttons */
+.action-btn {
+  min-height: 44px;
+  padding: 10px 16px;
+  font-size: 13px;
+  border-radius: 12px;
+}
+
+/* Better form spacing */
+.form-group { margin-bottom: 14px; }
+.form-label { font-size: 13px; font-weight: 600; margin-bottom: 5px; display: block; }
+
+/* Card header improvements */
+.card { border-radius: 18px; padding: 16px; margin-bottom: 14px; }
+
+/* Larger modal */
+.modal-sheet {
+  max-height: 90vh;
+}
+
+/* Better image thumbnails grid */
+.images-row {
+  gap: 8px;
+  padding: 8px 0 4px;
+}
+.img-wrap {
+  width: 72px;
+  height: 72px;
+}
+.img-thumb {
+  width: 72px;
+  height: 72px;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+/* Smooth header shadow on scroll */
+.app-header {
+  box-shadow: 0 1px 8px rgba(0,0,0,.18);
+}

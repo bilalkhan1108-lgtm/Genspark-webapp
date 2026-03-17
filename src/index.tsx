@@ -46,6 +46,15 @@ async function seedAdmin(db: D1Database) {
       'INSERT OR IGNORE INTO users(name,email,password_hash,role,active) VALUES(?,?,?,?,1)'
     ).bind('Bilal Khan', 'bilalkhan1108@gmail.com', hash, 'admin').run()
   }
+  // Ensure app_settings table exists (idempotent)
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `).run()
+  await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('job_prefix','C')").run()
+  await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('job_seq_digits','3')").run()
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
@@ -59,6 +68,8 @@ const authMiddleware = async (c: any, next: any) => {
     c.set('userRole', payload.role as string)
     c.set('userEmail',payload.email as string)
     c.set('userName', payload.name  as string)
+    // Ensure app_settings table exists (runs once per Worker instance)
+    await ensureDbSchema(c.env.DB)
     await next()
   } catch {
     return c.json({ error: 'Invalid token' }, 401)
@@ -67,6 +78,18 @@ const authMiddleware = async (c: any, next: any) => {
 const adminOnly = async (c: any, next: any) => {
   if (c.get('userRole') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
   await next()
+}
+
+// ── Lazy DB init: ensure app_settings table on first request ─────────────────
+let _dbInited = false
+async function ensureDbSchema(db: D1Database) {
+  if (_dbInited) return
+  try {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`).run()
+    await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('job_prefix','C')").run()
+    await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('job_seq_digits','3')").run()
+    _dbInited = true
+  } catch (_) {}
 }
 
 // ── Job status auto-update ────────────────────────────────────────────────────
@@ -175,9 +198,11 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   if (!isAdmin) {
     conds.push("j.status != 'delivered'")
   }
-  if (staffId && isAdmin) {
+  // staff_id filter: admin can filter by any staff; staff can only filter by self
+  if (staffId) {
+    const filterStaff = isAdmin ? staffId : String(userId)
     conds.push(`EXISTS (SELECT 1 FROM machines ms2 WHERE ms2.job_id=j.id AND ms2.assigned_staff_id=?)`)
-    params.push(staffId)
+    params.push(filterStaff)
   }
   if (search) {
     conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.id LIKE ?)')

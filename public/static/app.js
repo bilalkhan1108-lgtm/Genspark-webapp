@@ -31,6 +31,7 @@ const S = {
   search : '',
   fromDate: '',
   toDate  : '',
+  myJobsOnly: false,
   audioStream  : null,
   audioRecorder: null,
   audioChunks  : [],
@@ -114,7 +115,7 @@ function closeModal() {
 window.closeModal = closeModal;
 // Expose global helpers used in inline onclick attributes
 window.setFilter  = setFilter;
-window.filterAll    = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; loadJobs(); };
+window.filterAll    = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0; loadJobs(); };
 window.filterActive = function() { setFilter('under_repair'); S.fromDate = ''; S.toDate = ''; loadJobs(); };
 window.filterDone   = function() { setFilter('delivered');    S.fromDate = ''; S.toDate = ''; loadJobs(); };
 window.filterToday  = function() {
@@ -364,7 +365,7 @@ function bottomNavHTML() {
   const tabs = [
     { id:'dashboard', icon:'fa-list-ul',    label:'Jobs'    },
     ...(isAdmin() ? [{ id:'newjob', icon:'fa-plus-circle', label:'New Job' }] : []),
-    ...(isAdmin() ? [{ id:'requests', icon:'fa-bell', label:'Requests' }] : []),
+    ...(isAdmin() ? [{ id:'requests', icon:'fa-bell', label:'Requests', badge: true }] : []),
     ...(isAdmin() ? [{ id:'staff',    icon:'fa-users',     label:'Staff'   }] : []),
     { id:'reports',  icon:'fa-chart-bar', label:'Reports' },
     { id:'settings',  icon:'fa-cog',         label:'More'    },
@@ -373,7 +374,9 @@ function bottomNavHTML() {
   <nav class="bottom-nav">
     ${tabs.map(t => `
     <button class="nav-btn ${S.view===t.id?'nav-active':''}" data-nav="${t.id}">
-      <i class="fas ${t.icon} nav-icon"></i>
+      ${t.badge
+        ? `<span class="nav-badge-wrap"><i class="fas ${t.icon} nav-icon"></i><span class="nav-dot" id="req-dot" style="display:none"></span></span>`
+        : `<i class="fas ${t.icon} nav-icon"></i>`}
       <span class="nav-label">${t.label}</span>
     </button>`).join('')}
   </nav>`;
@@ -402,6 +405,14 @@ function bindView() {
   document.querySelectorAll('[data-nav]').forEach(btn => {
     btn.addEventListener('click', () => navigate(btn.dataset.nav), { passive: true });
   });
+
+  // Poll pending requests count for admin notification dot
+  if (isAdmin()) {
+    API.get('/api/requests/count').then(r => {
+      const dot = document.getElementById('req-dot');
+      if (dot) dot.style.display = r.data.count > 0 ? 'block' : 'none';
+    }).catch(() => {});
+  }
 
   switch (S.view) {
     case 'dashboard': loadJobs();                                               break;
@@ -434,6 +445,14 @@ function dashboardHTML() {
         style="--chip-color:${f.s ? sc(f.s) : '#1a1a2e'}"
         data-filter="${f.s}">${f.label}</button>`).join('')}
     </div>
+    ${!isAdmin() ? `
+    <div class="my-jobs-bar">
+      <button id="btn-my-assigned" class="btn-my-assigned ${S.myJobsOnly ? 'btn-my-active' : ''}">
+        <i class="fas fa-user-check"></i>
+        ${S.myJobsOnly ? 'My Assigned Jobs ✓' : 'My Assigned Jobs'}
+      </button>
+      ${S.myJobsOnly ? `<button id="btn-clear-my" class="btn-my-clear"><i class="fas fa-times"></i> All Jobs</button>` : ''}
+    </div>` : ''}
     <div class="search-wrap">
       <i class="fas fa-search search-icon"></i>
       <input id="dash-search" type="search" class="search-input"
@@ -444,46 +463,75 @@ function dashboardHTML() {
   </div>`;
 }
 
-async function loadJobs() {
-  const wrap = document.getElementById('vlist-wrap');
-  if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
-  // Load analytics stats in background (non-blocking)
-  API.get('/api/analytics').then(r => {
+// Analytics 30-second cache to avoid duplicate calls on filter/search
+let _analyticsCache = null;
+let _analyticsCacheTs = 0;
+function loadAnalytics(force) {
+  const now = Date.now();
+  if (!force && _analyticsCache && (now - _analyticsCacheTs) < 30000) {
+    // Use cached value
+    const d = _analyticsCache;
     const sb = document.getElementById('stats-bar');
-    if (!sb) return;
-    const d = r.data;
-    sb.innerHTML = `
-      <div class="stat-chip" onclick="filterAll()">
-        <span class="stat-num">${d.total}</span><span class="stat-lbl">Total</span>
-      </div>
-      <div class="stat-chip" onclick="filterActive()">
-        <span class="stat-num" style="color:#E53935">${d.pending}</span><span class="stat-lbl">Active</span>
-      </div>
-      <div class="stat-chip" onclick="filterDone()">
-        <span class="stat-num" style="color:#43A047">${d.completed}</span><span class="stat-lbl">Done</span>
-      </div>
-      <div class="stat-chip" onclick="filterToday()">
-        <span class="stat-num" style="color:#1E88E5">${d.today}</span><span class="stat-lbl">Today</span>
-      </div>
-      <div class="stat-chip" onclick="filterMonth()">
-        <span class="stat-num" style="color:#FB8C00">${d.thisMonth}</span><span class="stat-lbl">Month</span>
-      </div>`;
+    if (sb) _renderStatsBar(d, sb);
+    return;
+  }
+  API.get('/api/analytics').then(r => {
+    _analyticsCache = r.data;
+    _analyticsCacheTs = Date.now();
+    const sb = document.getElementById('stats-bar');
+    if (sb) _renderStatsBar(r.data, sb);
   }).catch(() => {
     const sb = document.getElementById('stats-bar');
     if (sb) sb.style.display = 'none';
   });
+}
+function _renderStatsBar(d, sb) {
+  sb.innerHTML = `
+    <div class="stat-chip" onclick="filterAll()">
+      <span class="stat-num">${d.total}</span><span class="stat-lbl">Total</span>
+    </div>
+    <div class="stat-chip" onclick="filterActive()">
+      <span class="stat-num" style="color:#E53935">${d.pending}</span><span class="stat-lbl">Active</span>
+    </div>
+    <div class="stat-chip" onclick="filterDone()">
+      <span class="stat-num" style="color:#43A047">${d.completed}</span><span class="stat-lbl">Done</span>
+    </div>
+    <div class="stat-chip" onclick="filterToday()">
+      <span class="stat-num" style="color:#1E88E5">${d.today}</span><span class="stat-lbl">Today</span>
+    </div>
+    <div class="stat-chip" onclick="filterMonth()">
+      <span class="stat-num" style="color:#FB8C00">${d.thisMonth}</span><span class="stat-lbl">Month</span>
+    </div>`;
+}
+
+async function loadJobs() {
+  const wrap = document.getElementById('vlist-wrap');
+  if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+  // Load analytics stats in background — use cache to avoid redundant calls
+  loadAnalytics();
   try {
     const params = {};
-    if (S.filter)   params.status = S.filter;
-    if (S.search)   params.q      = S.search;
-    if (S.fromDate) params.from   = S.fromDate;
-    if (S.toDate)   params.to     = S.toDate;
+    if (S.filter)     params.status   = S.filter;
+    if (S.search)     params.q        = S.search;
+    if (S.fromDate)   params.from     = S.fromDate;
+    if (S.toDate)     params.to       = S.toDate;
+    if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
     const r = await API.get('/api/jobs', { params });
     S.jobs = r.data;
     renderVList();
   } catch {
     if (wrap) wrap.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Error loading jobs</p></div>`;
   }
+
+  // My Assigned Jobs toggle (staff only)
+  document.getElementById('btn-my-assigned')?.addEventListener('click', () => {
+    S.myJobsOnly = !S.myJobsOnly;
+    S.fromDate = ''; S.toDate = ''; setFilter('');
+    render();
+  }, { passive: true });
+  document.getElementById('btn-clear-my')?.addEventListener('click', () => {
+    S.myJobsOnly = false; render();
+  }, { passive: true });
 
   document.querySelectorAll('[data-filter]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -495,7 +543,7 @@ async function loadJobs() {
   const dSearch = debounce(() => {
     S.search = document.getElementById('dash-search')?.value.trim() || '';
     loadJobs();
-  }, 10);
+  }, 300);
   document.getElementById('dash-search')?.addEventListener('input', dSearch);
 }
 
@@ -528,7 +576,14 @@ function renderVList() {
   }
 
   paint();
-  wrap.addEventListener('scroll', () => { paint(); requestAnimationFrame(() => applyAuthImages(wrap)); }, { passive: true });
+  // Remove old scroll listener before re-attaching to prevent accumulation
+  const newWrap = document.getElementById('vlist-wrap');
+  if (newWrap) {
+    const onScroll = () => { paint(); requestAnimationFrame(() => applyAuthImages(newWrap)); };
+    newWrap._scrollHandler && newWrap.removeEventListener('scroll', newWrap._scrollHandler);
+    newWrap._scrollHandler = onScroll;
+    newWrap.addEventListener('scroll', onScroll, { passive: true });
+  }
   setTimeout(() => applyAuthImages(wrap), 50);
 }
 
@@ -1285,6 +1340,16 @@ function showAddMachineModal(jobId) {
     </div>
     <div class="form-group">
       <label class="form-label">Complaint / Issue <span class="req">*</span></label>
+      <div class="complaint-tags" id="am-ctags">
+        <span class="ctag" data-t="Motor Issue">⚙️ Motor Issue</span>
+        <span class="ctag" data-t="Power Issue">🔌 Power Issue</span>
+        <span class="ctag" data-t="Blade Problem">🔪 Blade Problem</span>
+        <span class="ctag" data-t="Heating Issue">🌡️ Heating Issue</span>
+        <span class="ctag" data-t="Noise Issue">🔊 Noise Issue</span>
+        <span class="ctag" data-t="Not Working">❌ Not Working</span>
+        <span class="ctag" data-t="Charging Issue">🔋 Charging Issue</span>
+        <span class="ctag" data-t="Speed Problem">💨 Speed Problem</span>
+      </div>
       <textarea id="am-comp" class="form-input" rows="2" placeholder="Issue description…"></textarea>
     </div>
     <div class="form-row-2">
@@ -1321,6 +1386,48 @@ function showAddMachineModal(jobId) {
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
       <button id="am-save" class="btn-primary">Save Machine</button>
     </div>`);
+
+  // Quick complaint tags — tap to append or set
+  document.querySelectorAll('#am-ctags .ctag').forEach(tag => {
+    tag.addEventListener('click', () => {
+      const comp = document.getElementById('am-comp');
+      if (!comp) return;
+      const cur = comp.value.trim();
+      const t   = tag.dataset.t;
+      comp.value = cur ? `${cur}, ${t}` : t;
+      tag.style.background = '#FFEBEE';
+      setTimeout(() => { tag.style.background = ''; }, 600);
+    }, { passive: true });
+  });
+
+  // Smart tag filter based on product name input
+  document.getElementById('am-prod')?.addEventListener('input', debounce(e => {
+    const name  = e.target.value.toLowerCase();
+    const tagEl = document.getElementById('am-ctags');
+    if (!tagEl) return;
+    const clipperTags  = ['⚙️ Motor Issue','🔪 Blade Problem','🔊 Noise Issue','💨 Speed Problem','❌ Not Working'];
+    const dryerTags    = ['🌡️ Heating Issue','🔌 Power Issue','💨 Speed Problem','🔊 Noise Issue','❌ Not Working'];
+    const trimmerTags  = ['⚙️ Motor Issue','🔋 Charging Issue','🔪 Blade Problem','🔌 Power Issue','❌ Not Working'];
+    const acTags       = ['🌡️ Heating Issue','🔌 Power Issue','🔊 Noise Issue','💨 Speed Problem','❌ Not Working'];
+    const genericTags  = ['⚙️ Motor Issue','🔌 Power Issue','🔪 Blade Problem','🌡️ Heating Issue','🔊 Noise Issue','❌ Not Working','🔋 Charging Issue','💨 Speed Problem'];
+    let tags = genericTags;
+    if (/clipper|cliper/.test(name))          tags = clipperTags;
+    else if (/dryer|drier|blower/.test(name)) tags = dryerTags;
+    else if (/trimmer|trim/.test(name))       tags = trimmerTags;
+    else if (/ac|air/.test(name))             tags = acTags;
+    tagEl.innerHTML = tags.map(t => {
+      const raw = t.replace(/[^a-zA-Z ]/g,'').trim();
+      return `<span class="ctag" data-t="${raw}">${t}</span>`;
+    }).join('');
+    tagEl.querySelectorAll('.ctag').forEach(tag => {
+      tag.addEventListener('click', () => {
+        const comp = document.getElementById('am-comp');
+        if (!comp) return;
+        const cur = comp.value.trim();
+        comp.value = cur ? `${cur}, ${tag.dataset.t}` : tag.dataset.t;
+      }, { passive: true });
+    });
+  }, 200));
 
   document.getElementById('am-img')?.addEventListener('change', e => {
     const file = e.target.files[0];
@@ -1636,22 +1743,52 @@ async function generateAndShareJobCard(j, shareMode) {
     canvas.toBlob(async blob => {
       const file = new File([blob], `AES_${j.id}.jpg`, { type: 'image/jpeg' });
       const text = shareText(j);
-      if (shareMode && navigator.share && navigator.canShare?.({ files: [file] })) {
-        try { await navigator.share({ files: [file], title: `Job ${j.id}`, text }); return; }
-        catch (_) { /* fall through */ }
+
+      if (shareMode) {
+        // ── WhatsApp share flow ─────────────────────────────────────────────
+        // 1st try: Web Share API with file (Android Chrome / modern WebView)
+        if (navigator.share && navigator.canShare?.({ files: [file] })) {
+          try { await navigator.share({ files: [file], title: `Job ${j.id}`, text }); return; }
+          catch (e) { if (e.name !== 'AbortError') { /* fall through */ } else { return; } }
+        }
+
+        // 2nd try: Download image + open WhatsApp with prefilled phone + text
+        // User gets image saved and WA opens with message ready
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl; a.download = `AES_${j.id}.jpg`;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+
+        // Build WhatsApp deep-link: wa.me with phone + text
+        const phone    = (j.snap_mobile || '').replace(/\D/g, '');
+        const waPhone  = phone.startsWith('91') ? phone : '91' + phone;
+        const waText   = encodeURIComponent(text);
+        const waUrl    = phone
+          ? `https://wa.me/${waPhone}?text=${waText}`
+          : `https://wa.me/?text=${waText}`;
+
+        setTimeout(() => {
+          // Try WhatsApp Business app first, fall back to wa.me web
+          const waBusinessUrl = `whatsapp://send?phone=${waPhone}&text=${waText}`;
+          window.location.href = waBusinessUrl;
+          // Fallback: if app not installed, open wa.me after 1.5s
+          setTimeout(() => { if (document.hasFocus()) window.open(waUrl, '_blank'); }, 1500);
+        }, 400);
+
+        toast('Image saved — WhatsApp opening…', 'success');
+        return;
       }
+
+      // Download-only mode
       const url = URL.createObjectURL(blob);
       const a   = document.createElement('a');
       a.href = url; a.download = `AES_${j.id}.jpg`;
       document.body.appendChild(a); a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1500);
-      if (shareMode) {
-        try { await navigator.clipboard.writeText(text); toast('Card saved & text copied!', 'success'); }
-        catch (_) { toast('Card downloaded', 'success'); }
-      } else {
-        toast('Job card downloaded', 'success');
-      }
+      toast('Job card downloaded', 'success');
     }, 'image/jpeg', 0.92);
   } catch (e) {
     console.error(e);
@@ -1660,14 +1797,19 @@ async function generateAndShareJobCard(j, shareMode) {
 }
 
 function shareText(j) {
-  const balance = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
+  const balance    = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
+  const custName   = j.snap_name || 'Valued Customer';
+  const machines   = (j.machines||[]).map(m => `• ${m.product_name}`).join('\n') || '';
+
   if (j.status === 'delivered') {
     const method   = j.delivery_method === 'courier' ? 'via Courier' : 'in person';
     const receiver = j.delivery_receiver_name ? `\nReceived by: *${j.delivery_receiver_name}*` : '';
-    const tracking  = j.delivery_tracking ? `\nTracking: *${j.delivery_tracking}*` : '';
-    return `🌟 *Successful Delivery!*\n\n✅ Your product(s) under *Job No. ${j.id}* have been successfully delivered ${method}.${receiver}${tracking}\n\n💰 Total: ${fmtRs(j.total_charges||0)} | Received: ${fmtRs(j.received_amount||0)} | Balance: *${fmtRs(balance)}*\n\n🙏 Thank you for your business!\n\n— *ADITION ELECTRIC SOLUTION*\n✨ _adition™ since 1984_ 📍 Gheekanta, Ahmedabad`;
+    const tracking = j.delivery_tracking ? `\nTracking: *${j.delivery_tracking}*` : '';
+    return `Hello *${custName}*,\n\n✅ Your repair job *#${j.id}* has been delivered ${method}.${receiver}${tracking}\n\n💰 Total: ${fmtRs(j.total_charges||0)} | Received: ${fmtRs(j.received_amount||0)} | Balance: *${fmtRs(balance)}*\n\nThank you for your business!\n\n— *Adition Electric Works*\n✨ _adition™ since 1984_ 📍 Gheekanta, Ahmedabad`;
   }
-  return `🌟 *Dear Customer,*\n\n✅ Your product(s) have been successfully registered under *Job No. ${j.id}*\n\n📦 Kindly collect your machine(s) within *25 days* from the date of this message.\n\n⚠️ *Note:* After 25 days, we shall not be held liable for any claims, loss, or damage.\n\n🙏 Thank you for choosing *ADITION ELECTRIC SOLUTION*!\n— *Bilal Pathan* | Operations Manager\n✨ _adition™ since 1984_ 📍 Gheekanta, Ahmedabad`;
+
+  const statusLabel = sl(j.status);
+  return `Hello *${custName}*,\n\nYour repair job *#${j.id}* is currently: *${statusLabel}*\n${machines ? '\nDevices:\n' + machines + '\n' : ''}\nPlease see the attached job card for details.\n\nKindly collect within *25 days* of this message.\n\n— *Adition Electric Works*\n✨ _adition™ since 1984_ 📍 Gheekanta, Ahmedabad`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
