@@ -687,7 +687,12 @@ app.delete('/api/staff/:id', authMiddleware, adminOnly, async (c) => {
   const id = c.req.param('id')
   // Prevent deleting self
   if (parseInt(id) === c.get('userId')) return c.json({ error: 'Cannot delete yourself' }, 400)
-  await c.env.DB.prepare('UPDATE users SET active=0 WHERE id=?').bind(id).run()
+  // Null out staff references in machines (preserve job data)
+  await c.env.DB.prepare(`UPDATE machines SET assigned_staff_id=NULL WHERE assigned_staff_id=?`).bind(id).run()
+  // Remove pending assignment requests for this staff
+  await c.env.DB.prepare(`DELETE FROM assignment_requests WHERE staff_id=?`).bind(id).run()
+  // Hard-delete the user account
+  await c.env.DB.prepare('DELETE FROM users WHERE id=?').bind(id).run()
   return c.json({ ok: true })
 })
 

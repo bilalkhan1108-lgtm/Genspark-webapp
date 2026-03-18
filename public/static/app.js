@@ -1673,33 +1673,26 @@ function jobCardPrintHTML(j) {
           </div>
           <div style="text-align:right;flex-shrink:0;margin-left:16px">
             <div style="background:${sc(m.status)};color:#fff;border-radius:8px;padding:6px 16px;font-size:17px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
-            <div style="font-size:22px;font-weight:800;color:#E53935;margin-top:6px">${fmtRs(m.charges)}</div>
           </div>
         </div>
         ${(m.images||[]).length ? `
         <div style="display:flex;gap:10px;margin-top:14px;overflow:hidden">
-          ${(m.images||[]).slice(0,3).map(img => `<img src="${img.url}" crossorigin="anonymous" style="width:110px;height:110px;border-radius:10px;object-fit:cover" onerror="this.style.display='none'">`).join('')}
+          ${(m.images||[]).slice(0,3).map(img => `<img src="${img.url}" style="width:110px;height:110px;border-radius:10px;object-fit:cover" onerror="this.style.display='none'">`).join('')}
         </div>` : ''}
       </div>`).join('')}
     </div>
 
-    <!-- Itemized Financial Summary (admin JPG — always included) -->
+    <!-- Financial Summary (Total / Received / Balance only) -->
     <div style="margin:0 60px 20px;background:#f8f9fa;border-radius:14px;padding:22px 26px;flex-shrink:0">
       <div style="font-size:18px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">Financial Summary</div>
-      ${(j.machines||[]).map(m => `
-      <div style="display:flex;justify-content:space-between;font-size:19px;padding:4px 0;color:#666">
-        <span>${esc(m.product_name)}${m.quantity>1?` ×${m.quantity}`:''}</span>
-        <span style="font-weight:600;color:#1a1a2e">${fmtRs(m.charges)}</span>
-      </div>`).join('')}
-      ${(j.machines||[]).length > 1 ? `<div style="border-top:1px solid #e0e0e0;margin:8px 0"></div>` : ''}
-      <div style="display:flex;justify-content:space-between;font-size:22px;padding:6px 0;border-bottom:1px solid #e0e0e0">
-        <span style="color:#555">= Total Amount</span><span style="font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
+      <div style="display:flex;justify-content:space-between;font-size:24px;padding:8px 0;border-bottom:1px solid #e0e0e0">
+        <span style="color:#555;font-weight:600">Total Amount</span><span style="font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:22px;padding:6px 0;border-bottom:1px solid #e0e0e0">
-        <span style="color:#555">Received</span><span style="font-weight:800;color:#43A047">${fmtRs(received)}</span>
+      <div style="display:flex;justify-content:space-between;font-size:24px;padding:8px 0;border-bottom:1px solid #e0e0e0">
+        <span style="color:#555;font-weight:600">Amount Received</span><span style="font-weight:800;color:#43A047">${fmtRs(received)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:26px;padding:8px 0">
-        <span style="font-weight:700;color:#1a1a2e">Balance Due</span>
+      <div style="display:flex;justify-content:space-between;font-size:28px;padding:10px 0">
+        <span style="font-weight:700;color:#1a1a2e">Amount Due</span>
         <span style="font-weight:900;color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
       </div>
     </div>
@@ -1727,57 +1720,81 @@ async function generateAndShareJobCard(j, shareMode) {
     const el = document.getElementById('job-card-print');
     if (!el) { toast('Card element missing', 'error'); return; }
 
-    // Ensure all images have crossOrigin set
-    el.querySelectorAll('img').forEach(img => { img.crossOrigin = 'anonymous'; });
+    // Pre-load all authenticated images as blob URLs so html2canvas can paint them
+    const blobUrls = [];
+    const imgEls = Array.from(el.querySelectorAll('img'));
+    await Promise.allSettled(imgEls.map(img => {
+      const src = img.getAttribute('src') || img.getAttribute('data-auth-src') || '';
+      if (!src) return Promise.resolve();
+      if (src.startsWith('blob:') || src.startsWith('data:')) { img.crossOrigin = 'anonymous'; return Promise.resolve(); }
+      return new Promise(resolve => {
+        fetch(src, { headers: { Authorization: `Bearer ${S.token}` } })
+          .then(r => r.ok ? r.blob() : null)
+          .then(b => {
+            if (b) { const bu = URL.createObjectURL(b); blobUrls.push(bu); img.src = bu; }
+            img.crossOrigin = 'anonymous';
+            resolve();
+          })
+          .catch(resolve);
+      });
+    }));
 
     const canvas = await html2canvas(el, {
       scale: 2,
       useCORS: true,
-      allowTaint: true,
+      allowTaint: false,
       width: 1080,
       height: 1920,
       backgroundColor: '#ffffff',
       logging: false,
-      imageTimeout: 15000,
+      imageTimeout: 20000,
     });
+
+    // Revoke blob URLs after capture
+    blobUrls.forEach(u => URL.revokeObjectURL(u));
+
     canvas.toBlob(async blob => {
       const file = new File([blob], `AES_${j.id}.jpg`, { type: 'image/jpeg' });
       const text = shareText(j);
 
       if (shareMode) {
         // ── WhatsApp share flow ─────────────────────────────────────────────
+        const phone   = (j.snap_mobile || '').replace(/\D/g, '');
+        const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+        const waText  = encodeURIComponent(text);
+
         // 1st try: Web Share API with file (Android Chrome / modern WebView)
         if (navigator.share && navigator.canShare?.({ files: [file] })) {
           try { await navigator.share({ files: [file], title: `Job ${j.id}`, text }); return; }
-          catch (e) { if (e.name !== 'AbortError') { /* fall through */ } else { return; } }
+          catch (e) { if (e.name === 'AbortError') return; /* fall through */ }
         }
 
-        // 2nd try: Download image + open WhatsApp with prefilled phone + text
-        // User gets image saved and WA opens with message ready
+        // 2nd try: Download image then open WhatsApp Business deep-link
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl; a.download = `AES_${j.id}.jpg`;
         document.body.appendChild(a); a.click();
         document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
 
-        // Build WhatsApp deep-link: wa.me with phone + text
-        const phone    = (j.snap_mobile || '').replace(/\D/g, '');
-        const waPhone  = phone.startsWith('91') ? phone : '91' + phone;
-        const waText   = encodeURIComponent(text);
-        const waUrl    = phone
+        // Open WhatsApp Business with phone pre-selected and message pre-filled
+        const waUrl = waPhone
           ? `https://wa.me/${waPhone}?text=${waText}`
           : `https://wa.me/?text=${waText}`;
 
         setTimeout(() => {
-          // Try WhatsApp Business app first, fall back to wa.me web
-          const waBusinessUrl = `whatsapp://send?phone=${waPhone}&text=${waText}`;
-          window.location.href = waBusinessUrl;
-          // Fallback: if app not installed, open wa.me after 1.5s
-          setTimeout(() => { if (document.hasFocus()) window.open(waUrl, '_blank'); }, 1500);
-        }, 400);
+          // Try native WA Business app deep-link first
+          if (waPhone) {
+            const nativeUrl = `whatsapp://send?phone=${waPhone}&text=${waText}`;
+            window.location.href = nativeUrl;
+            // Fallback to wa.me if native app doesn't catch it
+            setTimeout(() => { try { window.open(waUrl, '_blank'); } catch(_){} }, 1800);
+          } else {
+            window.open(waUrl, '_blank');
+          }
+        }, 600);
 
-        toast('Image saved — WhatsApp opening…', 'success');
+        toast('Image saved — opening WhatsApp…', 'success');
         return;
       }
 
@@ -1797,19 +1814,8 @@ async function generateAndShareJobCard(j, shareMode) {
 }
 
 function shareText(j) {
-  const balance    = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
-  const custName   = j.snap_name || 'Valued Customer';
-  const machines   = (j.machines||[]).map(m => `• ${m.product_name}`).join('\n') || '';
-
-  if (j.status === 'delivered') {
-    const method   = j.delivery_method === 'courier' ? 'via Courier' : 'in person';
-    const receiver = j.delivery_receiver_name ? `\nReceived by: *${j.delivery_receiver_name}*` : '';
-    const tracking = j.delivery_tracking ? `\nTracking: *${j.delivery_tracking}*` : '';
-    return `Hello *${custName}*,\n\n✅ Your repair job *#${j.id}* has been delivered ${method}.${receiver}${tracking}\n\n💰 Total: ${fmtRs(j.total_charges||0)} | Received: ${fmtRs(j.received_amount||0)} | Balance: *${fmtRs(balance)}*\n\nThank you for your business!\n\n— *Adition Electric Works*\n✨ _adition™ since 1984_ 📍 Gheekanta, Ahmedabad`;
-  }
-
-  const statusLabel = sl(j.status);
-  return `Hello *${custName}*,\n\nYour repair job *#${j.id}* is currently: *${statusLabel}*\n${machines ? '\nDevices:\n' + machines + '\n' : ''}\nPlease see the attached job card for details.\n\nKindly collect within *25 days* of this message.\n\n— *Adition Electric Works*\n✨ _adition™ since 1984_ 📍 Gheekanta, Ahmedabad`;
+  const custName = j.snap_name || 'Valued Customer';
+  return `Hello ${custName},\nYour job #${j.id} is updated.\nPlease check your job card.\n\nAdition Electric Works`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1945,6 +1951,9 @@ function renderStaffList() {
               data-role="${s.role}" data-active="${s.active}">
         <i class="fas fa-edit"></i>
       </button>
+      <button class="btn-sm btn-red btn-del-staff" data-sid="${s.id}" data-name="${esc(s.name)}" title="Delete staff">
+        <i class="fas fa-trash"></i>
+      </button>
     </div>
   </div>`).join('');
   document.querySelectorAll('.btn-edit-staff').forEach(btn => {
@@ -1953,6 +1962,19 @@ function renderStaffList() {
       email: btn.dataset.email, role: btn.dataset.role,
       active: parseInt(btn.dataset.active)
     }));
+  });
+  document.querySelectorAll('.btn-del-staff').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const name = btn.dataset.name || 'this staff member';
+      if (!confirm(`Delete "${name}"?\n\nTheir job data will be preserved. This will permanently remove their account.`)) return;
+      try {
+        await API.delete(`/api/staff/${btn.dataset.sid}`);
+        toast(`${name} deleted`, 'success');
+        await loadStaff();
+      } catch (e) {
+        toast(e.response?.data?.error || 'Delete failed', 'error');
+      }
+    });
   });
 }
 function showAddStaffModal() {
