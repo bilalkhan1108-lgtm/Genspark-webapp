@@ -115,9 +115,10 @@ function closeModal() {
 window.closeModal = closeModal;
 // Expose global helpers used in inline onclick attributes
 window.setFilter  = setFilter;
-window.filterAll    = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0; loadJobs(); };
-window.filterActive = function() { setFilter('under_repair'); S.fromDate = ''; S.toDate = ''; loadJobs(); };
-window.filterDone   = function() { setFilter('delivered');    S.fromDate = ''; S.toDate = ''; loadJobs(); };
+window.filterAll       = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0; loadJobs(); };
+window.filterActive    = function() { setFilter('under_repair'); S.fromDate = ''; S.toDate = ''; loadJobs(); };
+window.filterDone      = function() { setFilter('delivered');    S.fromDate = ''; S.toDate = ''; loadJobs(); };
+window.filterByStatus  = function(st) { setFilter(st); S.fromDate = ''; S.toDate = ''; loadJobs(); };
 window.filterToday  = function() {
   const t = new Date().toISOString().split('T')[0];
   setFilter(''); S.fromDate = t; S.toDate = t; loadJobs();
@@ -304,17 +305,16 @@ function loginHTML() {
       <div class="form-group">
         <label class="form-label">Email</label>
         <input id="l-email" type="email" class="form-input" placeholder="admin@example.com"
-               value="bilalkhan1108@gmail.com" autocomplete="username">
+               autocomplete="username">
       </div>
       <div class="form-group">
         <label class="form-label">Password</label>
         <input id="l-pass" type="password" class="form-input" placeholder="••••••••"
-               value="0010" autocomplete="current-password">
+               autocomplete="current-password">
       </div>
       <button id="l-btn" class="btn-primary btn-full">
         <i class="fas fa-sign-in-alt"></i> Sign In
       </button>
-      <p class="login-hint">Admin: bilalkhan1108@gmail.com / 0010</p>
     </div>
     <p class="login-footer">✨ adition™ since 1984 · Gheekanta, Ahmedabad</p>
   </div>`;
@@ -352,6 +352,7 @@ function headerHTML() {
       </div>
     </div>
     <div class="hdr-right">
+      ${window._pwaInstallPrompt ? `<button class="icon-btn pwa-install-btn" id="hdr-install-btn" title="Install App" style="color:#43A047"><i class="fas fa-download"></i></button>` : ''}
       <span class="role-badge ${isAdmin()?'role-admin':'role-staff'}">${esc((S.user?.name||'').split(' ')[0])}</span>
       <button class="icon-btn" id="hdr-logout-btn" title="Sign out"><i class="fas fa-sign-out-alt"></i></button>
     </div>
@@ -402,6 +403,12 @@ const deniedHTML = () => `<div class="empty-state"><i class="fas fa-lock fa-3x">
 function bindView() {
   document.getElementById('hdr-back-btn')?.addEventListener('click', () => navigate('dashboard'));
   document.getElementById('hdr-logout-btn')?.addEventListener('click', logout);
+  document.getElementById('hdr-install-btn')?.addEventListener('click', () => {
+    if (window._pwaInstallPrompt) {
+      window._pwaInstallPrompt.prompt();
+      window._pwaInstallPrompt.userChoice.then(() => { window._pwaInstallPrompt = null; render(); });
+    }
+  });
   document.querySelectorAll('[data-nav]').forEach(btn => {
     btn.addEventListener('click', () => navigate(btn.dataset.nav), { passive: true });
   });
@@ -488,19 +495,22 @@ function loadAnalytics(force) {
 function _renderStatsBar(d, sb) {
   sb.innerHTML = `
     <div class="stat-chip" onclick="filterAll()">
-      <span class="stat-num">${d.total}</span><span class="stat-lbl">Total</span>
+      <span class="stat-num">${d.total}</span><span class="stat-lbl">All</span>
     </div>
-    <div class="stat-chip" onclick="filterActive()">
-      <span class="stat-num" style="color:#E53935">${d.pending}</span><span class="stat-lbl">Active</span>
+    <div class="stat-chip" onclick="filterByStatus('under_repair')">
+      <span class="stat-num" style="color:#E53935">${d.underRepair||0}</span><span class="stat-lbl">Under Repair</span>
+    </div>
+    <div class="stat-chip" onclick="filterByStatus('repaired')">
+      <span class="stat-num" style="color:#FB8C00">${d.repaired||0}</span><span class="stat-lbl">Repaired</span>
+    </div>
+    <div class="stat-chip" onclick="filterByStatus('returned')">
+      <span class="stat-num" style="color:#1E88E5">${d.returned||0}</span><span class="stat-lbl">Returned</span>
     </div>
     <div class="stat-chip" onclick="filterDone()">
-      <span class="stat-num" style="color:#43A047">${d.completed}</span><span class="stat-lbl">Done</span>
+      <span class="stat-num" style="color:#43A047">${d.completed}</span><span class="stat-lbl">Delivered</span>
     </div>
     <div class="stat-chip" onclick="filterToday()">
-      <span class="stat-num" style="color:#1E88E5">${d.today}</span><span class="stat-lbl">Today</span>
-    </div>
-    <div class="stat-chip" onclick="filterMonth()">
-      <span class="stat-num" style="color:#FB8C00">${d.thisMonth}</span><span class="stat-lbl">Month</span>
+      <span class="stat-num" style="color:#9C27B0">${d.today}</span><span class="stat-lbl">Today</span>
     </div>`;
 }
 
@@ -728,6 +738,44 @@ function bindNewJob() {
   }
   mobileIn?.addEventListener('blur', lookupMobile);
 
+  // Smart name autofill — suggest existing customers as user types
+  const nameIn = document.getElementById('nj-name');
+  let _suggestTimeout = null;
+  nameIn?.addEventListener('input', () => {
+    clearTimeout(_suggestTimeout);
+    const q = nameIn.value.trim();
+    if (q.length < 2) { removeSuggestBox(); return; }
+    _suggestTimeout = setTimeout(async () => {
+      try {
+        const r = await API.get('/api/customers/search', { params: { q } });
+        const list = r.data || [];
+        if (!list.length) { removeSuggestBox(); return; }
+        let box = document.getElementById('nj-suggest-box');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'nj-suggest-box';
+          box.style.cssText = 'position:absolute;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.12);z-index:1000;max-height:220px;overflow-y:auto;left:0;right:0;top:100%';
+          nameIn.parentElement.style.position = 'relative';
+          nameIn.parentElement.appendChild(box);
+        }
+        box.innerHTML = list.map(c => `
+          <div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #f0f0f0;font-size:14px"
+               onmousedown="event.preventDefault()"
+               onclick="(function(){
+                 document.getElementById('nj-name').value='${esc(c.name)}';
+                 document.getElementById('nj-mobile').value='${c.mobile||''}';
+                 document.getElementById('nj-mobile2').value='${c.mobile2||''}';
+                 document.getElementById('nj-address').value='${esc(c.address||'')}';
+                 document.getElementById('nj-suggest-box')?.remove();
+               })()">
+            <b>${esc(c.name)}</b> <span style="color:#888;font-size:12px">${c.mobile||''}</span>
+          </div>`).join('');
+      } catch (_) {}
+    }, 300);
+  });
+  nameIn?.addEventListener('blur', () => { setTimeout(removeSuggestBox, 200); });
+  function removeSuggestBox() { document.getElementById('nj-suggest-box')?.remove(); }
+
   // Image preview
   const imgInput = document.getElementById('nj-img');
   imgInput?.addEventListener('change', async e => {
@@ -866,6 +914,15 @@ function renderDetail() {
         <i class="fas fa-calendar info-icon" style="color:${color}"></i>
         <span class="info-val text-muted">${fmtDate(j.created_at)}</span>
       </div>
+      ${isAdmin() && j.snap_mobile ? `
+      <div class="info-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <button id="btn-cust-history" class="btn-sm" style="background:#7B1FA2;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer">
+          <i class="fas fa-history"></i> Customer History
+        </button>
+        <button id="btn-wa-reminder" class="btn-sm" style="background:#25D366;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer">
+          <i class="fab fa-whatsapp"></i> Send Reminder
+        </button>
+      </div>` : ''}
     </div>
 
     <!-- Financial Panel
@@ -964,10 +1021,10 @@ function renderDetail() {
       </div>
     </div>
 
-    <!-- Hidden 9:16 print element for html2canvas -->
+    <!-- Hidden print element for html2canvas — dynamic height, no overflow -->
     <div id="job-card-print"
-         style="position:fixed;left:-99999px;top:0;width:1080px;height:1920px;
-                background:#fff;overflow:hidden;pointer-events:none;z-index:-1">
+         style="position:fixed;left:-99999px;top:0;width:1080px;
+                background:#fff;pointer-events:none;z-index:-1">
       ${jobCardPrintHTML(j)}
     </div>`;
 
@@ -1014,6 +1071,8 @@ function machineCardHTML(m, currentUserId) {
       <div style="flex:1;min-width:0">
         <div class="machine-name">${esc(m.product_name)}${m.quantity>1?` <span class="machine-qty">×${m.quantity}</span>`:''}</div>
         ${m.product_complaint ? `<div class="machine-complaint">${esc(m.product_complaint)}</div>` : ''}
+        ${m.work_done ? `<div class="machine-complaint" style="color:#2E7D32">✅ Work done: ${esc(m.work_done)}</div>` : ''}
+        ${m.return_reason ? `<div class="machine-complaint" style="color:#E65100">↩ Returned: ${esc(m.return_reason)}</div>` : ''}
         ${m.staff_name ? `<div class="machine-staff"><i class="fas fa-user-cog"></i> ${esc(m.staff_name)}</div>` : ''}
       </div>
       <div class="machine-right">
@@ -1079,13 +1138,54 @@ function bindDetail(j) {
   // Status selects — only for assigned staff / admin
   document.querySelectorAll('.status-sel').forEach(sel => {
     sel.addEventListener('change', async e => {
+      const mid      = e.target.dataset.mid;
+      const newStatus = e.target.value;
+      const prevStatus = e.target.dataset.prev || 'under_repair';
+
+      // Show optional note modal for meaningful transitions
+      const needsNote = (prevStatus === 'under_repair' && newStatus === 'repaired')
+                     || (prevStatus === 'under_repair' && newStatus === 'returned')
+                     || (newStatus === 'repaired')
+                     || (newStatus === 'returned');
+
+      if (needsNote) {
+        const label    = newStatus === 'repaired' ? 'Work Done (optional)' : 'Return Reason (optional)';
+        const pholder  = newStatus === 'repaired' ? 'e.g. Replaced motor, cleaned blade…' : 'e.g. Customer collected unrepaired…';
+        const noteKey  = newStatus === 'repaired' ? 'work_done' : 'return_reason';
+        showModal(`
+          <h3 class="modal-title"><i class="fas fa-clipboard-check" style="color:#43A047"></i> ${newStatus === 'repaired' ? 'Mark as Repaired' : 'Mark as Returned'}</h3>
+          <div class="form-group">
+            <label class="form-label">${label}</label>
+            <textarea id="status-note-input" class="form-input" rows="3" placeholder="${pholder}" style="resize:vertical"></textarea>
+          </div>
+          <div class="modal-footer">
+            <button onclick="closeModal()" class="btn-ghost">Cancel</button>
+            <button id="status-note-save" class="btn-primary">Confirm</button>
+          </div>`);
+        document.getElementById('status-note-save')?.addEventListener('click', async () => {
+          const noteVal = document.getElementById('status-note-input')?.value.trim() || null;
+          closeModal();
+          try {
+            await API.put(`/api/machines/${mid}`, { status: newStatus, [noteKey]: noteVal });
+            toast('Status updated', 'success');
+            await loadDetail();
+          } catch (err) {
+            toast(err.response?.data?.error || 'Update failed', 'error');
+            e.target.value = prevStatus;
+          }
+        });
+        // On cancel, revert select
+        document.querySelector('.modal-overlay')?.addEventListener('click', () => { e.target.value = prevStatus; }, { once: true });
+        return;
+      }
+
       try {
-        await API.put(`/api/machines/${e.target.dataset.mid}`, { status: e.target.value });
+        await API.put(`/api/machines/${mid}`, { status: newStatus });
         toast('Status updated', 'success');
         await loadDetail();
       } catch (err) {
         toast(err.response?.data?.error || 'Update failed', 'error');
-        e.target.value = e.target.dataset.prev || 'under_repair';
+        e.target.value = prevStatus;
       }
     });
     sel.dataset.prev = sel.value;
@@ -1193,6 +1293,71 @@ function bindDetail(j) {
 
   // WhatsApp share (admin only)
   document.getElementById('btn-share')?.addEventListener('click', () => generateAndShareJobCard(j, true));
+
+  // Customer History (admin only)
+  document.getElementById('btn-cust-history')?.addEventListener('click', () => showCustomerHistory(j.snap_mobile, j.snap_name));
+
+  // WhatsApp Reminder (admin only)
+  document.getElementById('btn-wa-reminder')?.addEventListener('click', () => {
+    const phone   = (j.snap_mobile || '').replace(/\D/g, '');
+    const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+    const text    = encodeURIComponent(`Reminder: Your job #${j.id} is ready.\nPlease complete payment to proceed with delivery.\n\nADITION ELECTRIC SOLUTION`);
+    const url     = waPhone ? `https://wa.me/${waPhone}?text=${text}` : `https://wa.me/?text=${text}`;
+    if (waPhone) {
+      window.location.href = `whatsapp://send?phone=${waPhone}&text=${text}`;
+      setTimeout(() => { try { window.open(url, '_blank'); } catch(_){} }, 1800);
+    } else {
+      window.open(url, '_blank');
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMER HISTORY MODAL
+// ─────────────────────────────────────────────────────────────────────────────
+async function showCustomerHistory(mobile, name) {
+  showModal(`
+    <h3 class="modal-title"><i class="fas fa-history" style="color:#7B1FA2"></i> Customer History — ${esc(name||mobile)}</h3>
+    <div id="ch-list" style="max-height:60vh;overflow-y:auto">
+      <div class="loader-wrap"><i class="fas fa-spinner fa-spin"></i></div>
+    </div>
+    <div class="modal-footer" style="flex-wrap:wrap;gap:8px">
+      <button id="ch-ledger-a" class="btn-sm btn-blue"><i class="fas fa-file-excel"></i> Ledger (Summary)</button>
+      <button id="ch-ledger-b" class="btn-sm" style="background:#9C27B0;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer"><i class="fas fa-file-excel"></i> Ledger (Detailed)</button>
+      <button onclick="closeModal()" class="btn-ghost" style="margin-left:auto">Close</button>
+    </div>`);
+
+  try {
+    const r = await API.get('/api/customers/history', { params: { mobile } });
+    const jobs = r.data || [];
+    const el   = document.getElementById('ch-list');
+    if (!el) return;
+    if (!jobs.length) { el.innerHTML = `<p class="text-muted text-center" style="padding:16px">No jobs found</p>`; return; }
+    el.innerHTML = jobs.map(j => `
+      <div style="padding:12px 0;border-bottom:1px solid #f0f0f0;cursor:pointer" onclick="closeModal();navigate('detail',{jobId:'${j.id}'})">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:700;color:#1a1a2e">${j.id}</span>
+          <span class="status-chip" style="background:${sb(j.status)};color:${sc(j.status)};border:1px solid ${sc(j.status)};font-size:12px;padding:2px 10px;border-radius:6px">${sl(j.status)}</span>
+        </div>
+        <div style="font-size:13px;color:#666;margin-top:4px">${fmtDate(j.created_at)} · ${j.products||'—'}</div>
+        <div style="font-size:13px;color:#E53935;font-weight:600">Due: ${fmtRs(Math.max(0,(j.total_charges||0)-(j.received_amount||0)))}</div>
+      </div>`).join('');
+  } catch { document.getElementById('ch-list').innerHTML = `<p class="text-muted text-center" style="padding:16px">Failed to load history</p>`; }
+
+  // Ledger export buttons
+  const dlLedger = async (mode) => {
+    try {
+      const resp = await API.get('/api/reports/ledger', { params: { mobile, mode }, responseType: 'blob' });
+      const url  = URL.createObjectURL(resp.data);
+      const a    = document.createElement('a'); a.href = url;
+      a.download = `AES_ledger_${mobile}_${mode}.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      toast('Ledger downloaded', 'success');
+    } catch { toast('Export failed', 'error'); }
+  };
+  document.getElementById('ch-ledger-a')?.addEventListener('click', () => dlLedger('A'));
+  document.getElementById('ch-ledger-b')?.addEventListener('click', () => dlLedger('B'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1598,22 +1763,23 @@ function showDeliveryModal(j) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JOB CARD PRINT HTML  (1080×1920 — 9:16 HD)
-// Smart JPG: itemized prices admin-only, hide 25d notice if Delivered
-// html2canvas with allowTaint:true + useCORS:true for R2 images
+// JOB CARD PRINT HTML  — Dynamic height, ALL products, no overflow truncation
+// Multi-page: generateAndShareJobCard slices long cards into 1080×1920 pages
 // ─────────────────────────────────────────────────────────────────────────────
 function jobCardPrintHTML(j) {
-  const total    = j.total_charges   || 0;
-  const received = j.received_amount || 0;
-  const balance  = Math.max(0, total - received);
-  const color    = sc(j.status);
+  const total      = j.total_charges   || 0;
+  const received   = j.received_amount || 0;
+  const balance    = Math.max(0, total - received);
+  const color      = sc(j.status);
   const isDelivered = j.status === 'delivered';
+  const isRepaired  = j.status === 'repaired';
+  const showPayment = isRepaired && balance > 0;
 
   const deliveryBlock = isDelivered ? `
-    <div style="margin:0 50px 30px;background:#E3F2FD;border:3px solid #1E88E5;border-radius:16px;padding:28px;flex-shrink:0">
+    <div style="margin:0 50px 30px;background:#E3F2FD;border:3px solid #1E88E5;border-radius:16px;padding:28px">
       <div style="font-size:24px;font-weight:800;color:#1565C0;margin-bottom:14px">📦 Delivery Information</div>
       <table style="width:100%;border-collapse:collapse;font-size:20px">
-        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:6px 0;width:200px">Received By</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
+        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:6px 0;width:220px">Received By</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
         ${j.delivery_receiver_mobile ? `<tr><td style="color:#555;padding:6px 0">Mobile</td><td style="font-weight:700;color:#1565C0">${j.delivery_receiver_mobile}</td></tr>` : ''}
         ${j.delivery_method          ? `<tr><td style="color:#555;padding:6px 0">Method</td><td style="font-weight:700;color:#1a1a2e">${j.delivery_method==='courier'?'Courier':'In Person'}</td></tr>` : ''}
         ${j.delivery_courier_name    ? `<tr><td style="color:#555;padding:6px 0">Courier</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_courier_name)}</td></tr>` : ''}
@@ -1621,7 +1787,7 @@ function jobCardPrintHTML(j) {
         ${j.delivered_at             ? `<tr><td style="color:#555;padding:6px 0">Date</td><td style="font-weight:700;color:#1a1a2e">${fmtDate(j.delivered_at)}</td></tr>` : ''}
       </table>
     </div>` : `
-    <div style="margin:0 50px 30px;background:#fff8e1;border:3px solid #FFC107;border-radius:16px;padding:28px;flex-shrink:0">
+    <div style="margin:0 50px 30px;background:#fff8e1;border:3px solid #FFC107;border-radius:16px;padding:28px">
       <div style="font-size:24px;font-weight:800;color:#e65100;margin-bottom:10px">⚠️ Collection Notice</div>
       <div style="font-size:20px;color:#5D4037;line-height:1.65">
         Kindly collect your machine(s) within <strong>25 days</strong> from the date of this notice.
@@ -1629,61 +1795,69 @@ function jobCardPrintHTML(j) {
       </div>
     </div>`;
 
-  return `
-  <div style="width:1080px;height:1920px;background:#fff;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;overflow:hidden">
-    <!-- Header -->
-    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);padding:48px 60px 40px;text-align:center;flex-shrink:0">
-      <div style="width:100px;height:100px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:24px;margin:0 auto 20px;display:flex;align-items:center;justify-content:center;font-size:60px">⚡</div>
-      <div style="color:#fff;font-size:38px;font-weight:900;letter-spacing:3px">ADITION ELECTRIC</div>
-      <div style="color:rgba(255,255,255,.65);font-size:20px;margin-top:6px;letter-spacing:1px">SERVICE MANAGEMENT SYSTEM</div>
+  // Payment block — shown only when Repaired + balance due
+  const paymentBlock = showPayment ? `
+    <div style="margin:0 50px 30px;background:#E8F5E9;border:3px solid #43A047;border-radius:16px;padding:30px">
+      <div style="font-size:26px;font-weight:900;color:#2E7D32;margin-bottom:18px;text-align:center">💳 Complete Payment to Proceed</div>
+      <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap">
+        <!-- QR Code via Google Charts API (works offline after first load) -->
+        <div style="text-align:center;flex-shrink:0">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:200px;height:200px;border-radius:12px;border:2px solid #43A047" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:16px;color:#555;margin-top:8px">Scan to Pay ₹${balance}</div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:20px;font-weight:800;color:#1a1a2e;margin-bottom:12px">UPI / Bank Details</div>
+          <table style="border-collapse:collapse;font-size:18px;width:100%">
+            <tr><td style="color:#555;padding:5px 0;width:120px">UPI</td><td style="font-weight:700;color:#1a1a2e">9375940444@okbizaxis</td></tr>
+            <tr><td style="color:#555;padding:5px 0">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+            <tr><td colspan="2" style="padding:10px 0 4px"><hr style="border:1px solid #ccc"></td></tr>
+            <tr><td style="color:#555;padding:5px 0">Bank</td><td style="font-weight:700">State Bank Of India</td></tr>
+            <tr><td style="color:#555;padding:5px 0">Name</td><td style="font-weight:700">ADITION ELECTRIC SOLUTION</td></tr>
+            <tr><td style="color:#555;padding:5px 0">A/C No.</td><td style="font-weight:700;color:#1a1a2e">37321811864</td></tr>
+            <tr><td style="color:#555;padding:5px 0">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
+            <tr><td style="color:#555;padding:5px 0">Branch</td><td style="font-weight:700">Patharkuva</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>` : '';
+
+  // Header (repeated on each page via CSS — actually used once; pages split in JS)
+  const headerBlock = `
+    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);padding:44px 60px 36px;text-align:center">
+      <div style="width:90px;height:90px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:20px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:52px">⚡</div>
+      <div style="color:#fff;font-size:36px;font-weight:900;letter-spacing:3px">ADITION ELECTRIC SOLUTION</div>
+      <div style="color:rgba(255,255,255,.65);font-size:18px;margin-top:6px;letter-spacing:1px">SERVICE MANAGEMENT SYSTEM</div>
     </div>
+    <div style="background:${color};padding:20px 60px;display:flex;justify-content:space-between;align-items:center">
+      <div style="color:#fff;font-size:48px;font-weight:900;letter-spacing:4px">${j.id}</div>
+      <div style="color:#fff;font-size:22px;font-weight:700;background:rgba(0,0,0,.2);padding:8px 20px;border-radius:10px">${sl(j.status)}</div>
+    </div>`;
 
-    <!-- Job ID Banner -->
-    <div style="background:${color};padding:22px 60px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
-      <div style="color:#fff;font-size:52px;font-weight:900;letter-spacing:4px">${j.id}</div>
-      <div style="color:#fff;font-size:24px;font-weight:700;background:rgba(0,0,0,.2);padding:8px 20px;border-radius:10px">${sl(j.status)}</div>
-    </div>
-
-    <!-- Customer Info -->
-    <div style="padding:36px 60px 20px;flex-shrink:0">
-      <div style="font-size:18px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px">Customer Details</div>
-      <table style="width:100%;border-collapse:collapse">
-        <tr><td style="font-size:20px;color:#555;padding:8px 0;width:180px">Name</td>
-            <td style="font-size:26px;font-weight:800;color:#1a1a2e">${esc(j.snap_name)}</td></tr>
-        <tr><td style="font-size:20px;color:#555;padding:8px 0">Mobile</td>
-            <td style="font-size:24px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?' / '+j.snap_mobile2:''}</td></tr>
-        ${j.snap_address ? `<tr><td style="font-size:20px;color:#555;padding:8px 0">Address</td>
-            <td style="font-size:20px;color:#333">${esc(j.snap_address)}</td></tr>` : ''}
-        <tr><td style="font-size:20px;color:#555;padding:8px 0">Date</td>
-            <td style="font-size:20px;color:#555">${fmtDate(j.created_at)}</td></tr>
-      </table>
-    </div>
-
-    <div style="border-top:2px solid #f0f0f0;margin:0 60px;flex-shrink:0"></div>
-
-    <!-- Machines List (with images via useCORS) -->
-    <div style="padding:24px 60px;flex:1;overflow:hidden">
-      <div style="font-size:18px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px">Products Registered</div>
+  // All machines — NO height limit, NO overflow:hidden, NO slice
+  const machinesBlock = `
+    <div style="padding:24px 60px 0">
+      <div style="font-size:18px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px">Products Registered (${(j.machines||[]).length})</div>
       ${(j.machines||[]).map((m,i) => `
-      <div style="background:#f8f9fa;border-radius:14px;padding:22px 26px;margin-bottom:14px;border-left:6px solid ${sc(m.status)}">
+      <div style="background:#f8f9fa;border-radius:14px;padding:20px 24px;margin-bottom:14px;border-left:6px solid ${sc(m.status)}">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
           <div style="flex:1;min-width:0">
-            <div style="font-size:26px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` ×${m.quantity}`:''}</div>
-            ${m.product_complaint ? `<div style="font-size:19px;color:#666;margin-top:4px">${esc(m.product_complaint)}</div>` : ''}
+            <div style="font-size:24px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` ×${m.quantity}`:''}</div>
+            ${m.product_complaint ? `<div style="font-size:18px;color:#666;margin-top:4px">${esc(m.product_complaint)}</div>` : ''}
+            ${m.work_done ? `<div style="font-size:17px;color:#2E7D32;margin-top:4px">✅ Work done: ${esc(m.work_done)}</div>` : ''}
           </div>
           <div style="text-align:right;flex-shrink:0;margin-left:16px">
-            <div style="background:${sc(m.status)};color:#fff;border-radius:8px;padding:6px 16px;font-size:17px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
+            <div style="background:${sc(m.status)};color:#fff;border-radius:8px;padding:6px 14px;font-size:16px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
           </div>
         </div>
         ${(m.images||[]).length ? `
-        <div style="display:flex;gap:10px;margin-top:14px;overflow:hidden">
-          ${(m.images||[]).slice(0,3).map(img => `<img src="${img.url}" style="width:110px;height:110px;border-radius:10px;object-fit:cover" onerror="this.style.display='none'">`).join('')}
+        <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+          ${(m.images||[]).slice(0,4).map(img => `<img src="${img.url}" style="width:100px;height:100px;border-radius:10px;object-fit:cover" onerror="this.style.display='none'">`).join('')}
         </div>` : ''}
       </div>`).join('')}
-    </div>
+    </div>`;
 
-    <!-- Financial Summary (Total / Received / Balance only) -->
-    <div style="margin:0 60px 20px;background:#f8f9fa;border-radius:14px;padding:22px 26px;flex-shrink:0">
+  const financialBlock = `
+    <div style="margin:20px 60px;background:#f8f9fa;border-radius:14px;padding:22px 26px">
       <div style="font-size:18px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">Financial Summary</div>
       <div style="display:flex;justify-content:space-between;font-size:24px;padding:8px 0;border-bottom:1px solid #e0e0e0">
         <span style="color:#555;font-weight:600">Total Amount</span><span style="font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
@@ -1695,30 +1869,59 @@ function jobCardPrintHTML(j) {
         <span style="font-weight:700;color:#1a1a2e">Amount Due</span>
         <span style="font-weight:900;color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
       </div>
+    </div>`;
+
+  const noteBlock = j.note ? `<div style="margin:0 60px 16px;background:#fffde7;border-radius:10px;padding:18px 22px;font-size:19px;color:#795548"><b>Note:</b> ${esc(j.note)}</div>` : '';
+
+  const footerBlock = `
+    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:30px 60px;margin-top:auto">
+      <div style="color:#fff;font-size:20px;font-weight:700">✨ adition™ since 1984</div>
+      <div style="color:rgba(255,255,255,.65);font-size:16px;margin-top:6px">Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001</div>
+      <div style="color:rgba(255,255,255,.4);font-size:14px;margin-top:4px">Subjected to Ahmedabad Jurisdiction only</div>
+    </div>`;
+
+  // Customer info block
+  const custBlock = `
+    <div style="padding:30px 60px 16px">
+      <div style="font-size:17px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px">Customer Details</div>
+      <table style="width:100%;border-collapse:collapse">
+        <tr><td style="font-size:19px;color:#555;padding:7px 0;width:180px">Name</td>
+            <td style="font-size:24px;font-weight:800;color:#1a1a2e">${esc(j.snap_name)}</td></tr>
+        <tr><td style="font-size:19px;color:#555;padding:7px 0">Mobile</td>
+            <td style="font-size:22px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?' / '+j.snap_mobile2:''}</td></tr>
+        ${j.snap_address ? `<tr><td style="font-size:19px;color:#555;padding:7px 0">Address</td>
+            <td style="font-size:19px;color:#333">${esc(j.snap_address)}</td></tr>` : ''}
+        <tr><td style="font-size:19px;color:#555;padding:7px 0">Date</td>
+            <td style="font-size:19px;color:#555">${fmtDate(j.created_at)}</td></tr>
+      </table>
     </div>
+    <div style="border-top:2px solid #f0f0f0;margin:0 60px 4px"></div>`;
 
-    ${j.note ? `<div style="margin:0 60px 16px;background:#fffde7;border-radius:10px;padding:18px 22px;font-size:19px;color:#795548;flex-shrink:0"><b>Note:</b> ${esc(j.note)}</div>` : ''}
-
-    <!-- Conditional: hide 25d notice if Delivered; show delivery info instead -->
+  // Single long scrollable page — JS will slice into 1920px segments
+  return `
+  <div style="width:1080px;background:#fff;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column">
+    ${headerBlock}
+    ${custBlock}
+    ${machinesBlock}
+    ${financialBlock}
+    ${noteBlock}
+    ${paymentBlock}
     ${deliveryBlock}
-
-    <!-- Footer -->
-    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:32px 60px;flex-shrink:0;margin-top:auto">
-      <div style="color:#fff;font-size:22px;font-weight:700">✨ adition™ since 1984</div>
-      <div style="color:rgba(255,255,255,.65);font-size:17px;margin-top:6px">Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001</div>
-      <div style="color:rgba(255,255,255,.4);font-size:15px;margin-top:4px">Subjected to Ahmedabad Jurisdiction only</div>
-    </div>
+    ${footerBlock}
   </div>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GENERATE + SHARE JOB CARD  (html2canvas scale:2 → allowTaint+useCORS)
+// GENERATE + SHARE JOB CARD  (html2canvas — multi-page slice for long cards)
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateAndShareJobCard(j, shareMode) {
   toast('Generating job card…', 'info');
   try {
     const el = document.getElementById('job-card-print');
     if (!el) { toast('Card element missing', 'error'); return; }
+
+    // Temporarily make print element visible to measure actual height
+    el.style.left = '-99999px'; el.style.top = '0';
 
     // Pre-load all authenticated images as blob URLs so html2canvas can paint them
     const blobUrls = [];
@@ -1739,83 +1942,114 @@ async function generateAndShareJobCard(j, shareMode) {
       });
     }));
 
-    const canvas = await html2canvas(el, {
+    // Wait for images to paint
+    await new Promise(r => setTimeout(r, 300));
+
+    const actualH = el.scrollHeight || el.offsetHeight || 1920;
+    const PAGE_H  = 1920; // pixels per page at scale:1
+
+    // Capture full long canvas
+    const fullCanvas = await html2canvas(el, {
       scale: 2,
       useCORS: true,
       allowTaint: false,
       width: 1080,
-      height: 1920,
+      height: actualH,
       backgroundColor: '#ffffff',
       logging: false,
-      imageTimeout: 20000,
+      imageTimeout: 25000,
     });
 
     // Revoke blob URLs after capture
     blobUrls.forEach(u => URL.revokeObjectURL(u));
 
-    canvas.toBlob(async blob => {
-      const file = new File([blob], `AES_${j.id}.jpg`, { type: 'image/jpeg' });
-      const text = shareText(j);
+    // Slice into 1080×1920 page canvases (scale:2 → each page = 2160×3840 raw)
+    const pageH_scaled = PAGE_H * 2;
+    const pageW_scaled = 1080  * 2;
+    const totalPages   = Math.ceil(fullCanvas.height / pageH_scaled);
+    const pageBlobs    = [];
 
-      if (shareMode) {
-        // ── WhatsApp share flow ─────────────────────────────────────────────
-        const phone   = (j.snap_mobile || '').replace(/\D/g, '');
-        const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
-        const waText  = encodeURIComponent(text);
+    for (let p = 0; p < totalPages; p++) {
+      const srcY   = p * pageH_scaled;
+      const srcH   = Math.min(pageH_scaled, fullCanvas.height - srcY);
+      const pc     = document.createElement('canvas');
+      pc.width     = pageW_scaled;
+      pc.height    = pageH_scaled;
+      const ctx    = pc.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, pc.width, pc.height);
+      ctx.drawImage(fullCanvas, 0, srcY, pageW_scaled, srcH, 0, 0, pageW_scaled, srcH);
+      await new Promise(res => pc.toBlob(b => { pageBlobs.push(b); res(); }, 'image/jpeg', 0.92));
+    }
 
-        // 1st try: Web Share API with file (Android Chrome / modern WebView)
-        if (navigator.share && navigator.canShare?.({ files: [file] })) {
-          try { await navigator.share({ files: [file], title: `Job ${j.id}`, text }); return; }
-          catch (e) { if (e.name === 'AbortError') return; /* fall through */ }
-        }
+    const text     = shareText(j, totalPages > 1);
+    const phone    = (j.snap_mobile || '').replace(/\D/g, '');
+    const waPhone  = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+    const waText   = encodeURIComponent(text);
+    const waUrl    = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
-        // 2nd try: Download image then open WhatsApp Business deep-link
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl; a.download = `AES_${j.id}.jpg`;
-        document.body.appendChild(a); a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
+    if (shareMode) {
+      // ── WhatsApp share flow ─────────────────────────────────────────────────
+      const files = pageBlobs.map((b, i) =>
+        new File([b], totalPages > 1 ? `AES_${j.id}_p${i+1}.jpg` : `AES_${j.id}.jpg`, { type: 'image/jpeg' })
+      );
 
-        // Open WhatsApp Business with phone pre-selected and message pre-filled
-        const waUrl = waPhone
-          ? `https://wa.me/${waPhone}?text=${waText}`
-          : `https://wa.me/?text=${waText}`;
-
-        setTimeout(() => {
-          // Try native WA Business app deep-link first
-          if (waPhone) {
-            const nativeUrl = `whatsapp://send?phone=${waPhone}&text=${waText}`;
-            window.location.href = nativeUrl;
-            // Fallback to wa.me if native app doesn't catch it
-            setTimeout(() => { try { window.open(waUrl, '_blank'); } catch(_){} }, 1800);
-          } else {
-            window.open(waUrl, '_blank');
-          }
-        }, 600);
-
-        toast('Image saved — opening WhatsApp…', 'success');
-        return;
+      // 1st try: Web Share API with file(s) — Android Chrome / modern WebView
+      if (navigator.share && navigator.canShare?.({ files })) {
+        try { await navigator.share({ files, title: `Job ${j.id}`, text }); return; }
+        catch (e) { if (e.name === 'AbortError') return; }
       }
 
-      // Download-only mode
-      const url = URL.createObjectURL(blob);
+      // 2nd: Download page(s) then open WhatsApp
+      for (let i = 0; i < pageBlobs.length; i++) {
+        const bUrl = URL.createObjectURL(pageBlobs[i]);
+        const a    = document.createElement('a');
+        a.href = bUrl;
+        a.download = pageBlobs.length > 1 ? `AES_${j.id}_p${i+1}.jpg` : `AES_${j.id}.jpg`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        await new Promise(r => setTimeout(r, 400));
+        URL.revokeObjectURL(bUrl);
+      }
+
+      setTimeout(() => {
+        if (waPhone) {
+          window.location.href = `whatsapp://send?phone=${waPhone}&text=${waText}`;
+          setTimeout(() => { try { window.open(waUrl, '_blank'); } catch(_){} }, 1800);
+        } else {
+          window.open(waUrl, '_blank');
+        }
+      }, 600);
+
+      toast(`${pageBlobs.length > 1 ? pageBlobs.length + ' pages' : 'Image'} saved — opening WhatsApp…`, 'success');
+      return;
+    }
+
+    // Download-only mode
+    for (let i = 0; i < pageBlobs.length; i++) {
+      const url = URL.createObjectURL(pageBlobs[i]);
       const a   = document.createElement('a');
-      a.href = url; a.download = `AES_${j.id}.jpg`;
-      document.body.appendChild(a); a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
-      toast('Job card downloaded', 'success');
-    }, 'image/jpeg', 0.92);
+      a.href = url;
+      a.download = pageBlobs.length > 1 ? `AES_${j.id}_p${i+1}.jpg` : `AES_${j.id}.jpg`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      await new Promise(r => setTimeout(r, 400));
+      URL.revokeObjectURL(url);
+    }
+    toast(`Job card downloaded (${pageBlobs.length} page${pageBlobs.length > 1 ? 's' : ''})`, 'success');
   } catch (e) {
     console.error(e);
     toast('Failed to generate card', 'error');
   }
 }
 
-function shareText(j) {
+function shareText(j, multiPage) {
   const custName = j.snap_name || 'Valued Customer';
-  return `Hello ${custName},\nYour job #${j.id} is updated.\nPlease check your job card.\n\nAdition Electric Works`;
+  const balance  = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
+  const isRepaired = j.status === 'repaired';
+
+  if (isRepaired && balance > 0) {
+    return `Hello ${custName},\nYour job #${j.id} is ready.\n\nTo process delivery kindly complete the payment.\nPayment details are given in the job card.\n\nADITION ELECTRIC SOLUTION`;
+  }
+  return `Hello ${custName},\nYour job #${j.id} is updated.\nPlease check your job card.\n\nADITION ELECTRIC SOLUTION`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2350,5 +2584,18 @@ if (document.readyState === 'loading') {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
+
+// Capture PWA install prompt (Chrome/Edge/Android)
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  window._pwaInstallPrompt = e;
+  // Show install button in header if user is logged in
+  const installBtn = document.getElementById('hdr-install-btn');
+  if (!installBtn) {
+    // Re-render header to show install button
+    const headerEl = document.querySelector('.app-header');
+    if (headerEl) { const h = headerEl.outerHTML; headerEl.outerHTML = headerHTML(); bindView(); }
+  }
+});
 
 })();

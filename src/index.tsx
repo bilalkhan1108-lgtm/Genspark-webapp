@@ -88,6 +88,9 @@ async function ensureDbSchema(db: D1Database) {
     await db.prepare(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`).run()
     await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('job_prefix','C')").run()
     await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('job_seq_digits','3')").run()
+    // Add work_done / return_reason columns if not exist (idempotent)
+    await db.prepare(`ALTER TABLE machines ADD COLUMN work_done TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN return_reason TEXT`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
@@ -154,7 +157,8 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   const today = new Date().toISOString().split('T')[0]
   const monthStart = today.substring(0, 8) + '01'
 
-  const [total, pending, completed, todayCount, monthCount, byStatus, byStaff] = await Promise.all([
+  const [total, pending, completed, todayCount, monthCount, byStatus, byStaff,
+         urCount, repCount, retCount] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin}`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status IN ('under_repair','repaired','returned')`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='delivered'`).first<any>(),
@@ -168,6 +172,9 @@ app.get('/api/analytics', authMiddleware, async (c) => {
       FROM machines m JOIN users u ON m.assigned_staff_id=u.id
       GROUP BY u.id, u.name ORDER BY cnt DESC LIMIT 10
     `).all<any>() : { results: [] },
+    c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='under_repair'`).first<any>(),
+    c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='repaired'`).first<any>(),
+    c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='returned'`).first<any>(),
   ])
 
   return c.json({
@@ -176,6 +183,9 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     completed: completed?.cnt || 0,
     today: todayCount?.cnt || 0,
     thisMonth: monthCount?.cnt || 0,
+    underRepair: urCount?.cnt || 0,
+    repaired: repCount?.cnt || 0,
+    returned: retCount?.cnt || 0,
     byStatus: isAdmin ? byStatus.results : [],
     byStaff: isAdmin ? byStaff.results : [],
   })
@@ -399,8 +409,13 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
     if (machine.assigned_staff_id !== userId)
       return c.json({ error: 'Not assigned to this machine' }, 403)
     if ('status' in body) {
-      await c.env.DB.prepare(`UPDATE machines SET status=?,updated_at=datetime('now') WHERE id=?`)
-        .bind(body.status, id).run()
+      const extraFields: string[] = []
+      const extraVals: any[] = []
+      if ('work_done' in body)    { extraFields.push('work_done=?');    extraVals.push(body.work_done) }
+      if ('return_reason' in body){ extraFields.push('return_reason=?'); extraVals.push(body.return_reason) }
+      const setClause = ['status=?', ...extraFields, `updated_at=datetime('now')`].join(',')
+      await c.env.DB.prepare(`UPDATE machines SET ${setClause} WHERE id=?`)
+        .bind(body.status, ...extraVals, id).run()
       await updateJobStatus(c.env.DB, machine.job_id)
       return c.json({ ok: true })
     }
@@ -409,7 +424,7 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
 
   const fields: string[] = []
   const vals: any[] = []
-  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges']
+  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges','work_done','return_reason']
   for (const k of allowed) {
     if (k in body) { fields.push(`${k}=?`); vals.push(body[k]) }
   }
@@ -912,6 +927,116 @@ app.get('/api/reports/customers', authMiddleware, adminOnly, async (c) => {
     headers: {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'Content-Disposition': `attachment; filename="AES_customers_${date}.xlsx"`
+    }
+  })
+})
+
+// ── API: Customer search by name/mobile ──────────────────────────────────────
+app.get('/api/customers/search', authMiddleware, async (c) => {
+  const q = (c.req.query('q') || '').trim()
+  if (q.length < 2) return c.json([])
+  const term = `%${q}%`
+  const { results } = await c.env.DB.prepare(`
+    SELECT DISTINCT c.name, c.mobile, c.mobile2, c.address
+    FROM customers c
+    WHERE c.name LIKE ? OR c.mobile LIKE ? OR c.mobile2 LIKE ?
+    ORDER BY c.name LIMIT 8
+  `).bind(term, term, term).all<any>()
+  return c.json(results)
+})
+
+// ── API: Customer History (all jobs by phone) ─────────────────────────────────
+app.get('/api/customers/history', authMiddleware, async (c) => {
+  const mobile = c.req.query('mobile') || ''
+  if (!mobile) return c.json({ error: 'mobile required' }, 400)
+  const { results } = await c.env.DB.prepare(`
+    SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.created_at,
+           j.received_amount,
+           (SELECT SUM(charges) FROM machines WHERE job_id=j.id) AS total_charges,
+           (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
+           (SELECT GROUP_CONCAT(product_name,', ') FROM machines WHERE job_id=j.id) AS products
+    FROM jobs j
+    WHERE j.snap_mobile=? OR j.snap_mobile2=?
+    ORDER BY j.created_at DESC
+    LIMIT 100
+  `).bind(mobile, mobile).all<any>()
+  return c.json(results)
+})
+
+// ── API: Customer Ledger Export ───────────────────────────────────────────────
+app.get('/api/reports/ledger', authMiddleware, adminOnly, async (c) => {
+  const mobile = c.req.query('mobile') || ''
+  const from   = c.req.query('from')   || ''
+  const to     = c.req.query('to')     || ''
+  const mode   = c.req.query('mode')   || 'A'  // A=summary, B=with machines
+  if (!mobile) return c.json({ error: 'mobile required' }, 400)
+
+  let jConds = `WHERE (j.snap_mobile=? OR j.snap_mobile2=?)`
+  const jParams: any[] = [mobile, mobile]
+  if (from) { jConds += ` AND DATE(j.created_at)>=?`; jParams.push(from) }
+  if (to)   { jConds += ` AND DATE(j.created_at)<=?`; jParams.push(to) }
+
+  const { results: jobs } = await c.env.DB.prepare(`
+    SELECT j.id AS job_number, j.snap_name AS customer, j.snap_mobile AS phone,
+           j.status, j.received_amount AS received,
+           (SELECT SUM(charges) FROM machines WHERE job_id=j.id) AS amount,
+           j.created_at AS date
+    FROM jobs j ${jConds} ORDER BY j.created_at DESC
+  `).bind(...jParams).all<any>()
+
+  const wb = XLSX.utils.book_new()
+
+  if (mode === 'B') {
+    // Mode B: with machine details
+    const rows: any[] = []
+    for (const job of jobs) {
+      const { results: machines } = await c.env.DB.prepare(
+        `SELECT product_name, product_complaint, charges FROM machines WHERE job_id=?`
+      ).bind(job.job_number).all<any>()
+      if (machines.length) {
+        machines.forEach((m: any, i: number) => {
+          rows.push({
+            'Job Number':   i === 0 ? job.job_number : '',
+            'Date':         i === 0 ? job.date : '',
+            'Customer':     i === 0 ? job.customer : '',
+            'Machine':      m.product_name,
+            'Complaint':    m.product_complaint || '',
+            'Charges':      m.charges || 0,
+            'Job Total':    i === 0 ? job.amount : '',
+            'Received':     i === 0 ? job.received : '',
+            'Due':          i === 0 ? job.due : '',
+            'Status':       i === 0 ? job.status : '',
+          })
+        })
+      } else {
+        rows.push({ 'Job Number': job.job_number, 'Date': job.date, 'Customer': job.customer,
+                    'Machine': '', 'Complaint': '', 'Charges': 0,
+                    'Job Total': job.amount, 'Received': job.received, 'Due': job.due, 'Status': job.status })
+      }
+    }
+    // Totals row
+    const totalAmt = jobs.reduce((s: number, r: any) => s + (r.amount||0), 0)
+    const totalRec = jobs.reduce((s: number, r: any) => s + (r.received||0), 0)
+    rows.push({ 'Job Number': 'TOTAL', 'Job Total': totalAmt, 'Received': totalRec, 'Due': totalAmt - totalRec })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Ledger With Machines')
+  } else {
+    // Mode A: summary
+    const rows = jobs.map((r: any) => ({
+      'Job Number': r.job_number, 'Date': r.date, 'Status': r.status,
+      'Amount': r.amount || 0, 'Received': r.received || 0, 'Due': (r.amount||0) - (r.received||0),
+    }))
+    const totalAmt = jobs.reduce((s: number, r: any) => s + (r.amount||0), 0)
+    const totalRec = jobs.reduce((s: number, r: any) => s + (r.received||0), 0)
+    rows.push({ 'Job Number': 'TOTAL', 'Amount': totalAmt, 'Received': totalRec, 'Due': totalAmt - totalRec })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Ledger Summary')
+  }
+
+  const buf  = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
+  const name = `AES_ledger_${mobile}_${new Date().toISOString().slice(0,10)}.xlsx`
+  return new Response(buf, {
+    headers: {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="${name}"`
     }
   })
 })
