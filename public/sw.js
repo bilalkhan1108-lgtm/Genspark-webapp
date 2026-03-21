@@ -1,6 +1,7 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v6
+// Service Worker — ADITION ELECTRIC SOLUTION v7
 // Strategy: Cache-first for static UI  ·  Network-first for API
-const CACHE_VER  = 'aes-v6';
+// Scope: / (serves entire app shell)
+const CACHE_VER  = 'aes-v7';
 const STATIC_URLS = [
   '/',
   '/static/app.js',
@@ -44,7 +45,7 @@ self.addEventListener('fetch', e => {
         const fetchPromise = fetch(request).then(resp => {
           if (resp.ok) cache.put(request, resp.clone());
           return resp;
-        }).catch(() => cached); // fall back to cache on network error
+        }).catch(() => cached);
         return cached || fetchPromise;
       })
     );
@@ -60,7 +61,6 @@ self.addEventListener('fetch', e => {
         return resp;
       }).catch(() => null);
       if (cached) {
-        // Revalidate in background
         fetchPromise.catch(() => {});
         return cached;
       }
@@ -72,7 +72,6 @@ self.addEventListener('fetch', e => {
 // ── Background sync: reload data when back online ────────────────────────────
 self.addEventListener('sync', e => {
   if (e.tag === 'sync-jobs') {
-    // Notify all clients to refresh
     e.waitUntil(
       self.clients.matchAll().then(clients =>
         clients.forEach(c => c.postMessage({ type: 'SYNC_JOBS' }))

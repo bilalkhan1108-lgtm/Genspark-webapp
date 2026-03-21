@@ -21,7 +21,12 @@
 const S = {
   token  : localStorage.getItem('AES_TOKEN') || null,
   user   : (() => { try { return JSON.parse(localStorage.getItem('AES_USER') || 'null') } catch { return null } })(),
-  view   : 'login',
+  view   : (() => {
+    // If already logged in, go to dashboard; otherwise login
+    const tok = localStorage.getItem('AES_TOKEN');
+    const usr = (() => { try { return JSON.parse(localStorage.getItem('AES_USER') || 'null') } catch { return null } })();
+    return (tok && usr) ? 'dashboard' : 'login';
+  })(),
   jobId  : null,
   jobs   : [],
   job    : null,
@@ -267,8 +272,29 @@ function logout() {
 function navigate(view, params = {}) {
   S.view = view;
   if (params.jobId) S.jobId = params.jobId;
+  // Push history state so Android back button goes to jobs list, not app exit
+  if (view === 'dashboard') {
+    history.pushState({ view: 'dashboard' }, '', '/?status=' + (S.filter || ''));
+  } else if (view === 'detail') {
+    history.pushState({ view: 'detail', jobId: S.jobId }, '', '/?job=' + S.jobId);
+  } else if (view !== 'login') {
+    history.pushState({ view }, '', '/' + (view !== 'dashboard' ? '?view=' + view : ''));
+  }
   render();
 }
+
+// Back button: instead of exiting app, go to jobs list
+window.addEventListener('popstate', e => {
+  const state = e.state;
+  if (!S.token || !S.user) { render(); return; }
+  if (!state || state.view === 'dashboard') {
+    S.view = 'dashboard'; render();
+  } else if (state.view === 'detail' && state.jobId) {
+    S.view = 'detail'; S.jobId = state.jobId; render();
+  } else {
+    S.view = state.view || 'dashboard'; render();
+  }
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RENDER ROOT
@@ -437,20 +463,19 @@ function bindView() {
 // ─────────────────────────────────────────────────────────────────────────────
 function dashboardHTML() {
   const filters = [
-    { s:'',             label:'All' },
-    { s:'under_repair', label:'Under Repair' },
-    { s:'repaired',     label:'Repaired' },
-    { s:'returned',     label:'Returned' },
-    ...(isAdmin() ? [{ s:'delivered', label:'Delivered' }] : []),
+    { s:'',             label:'All',          color:'#1a1a2e' },
+    { s:'under_repair', label:'Under Repair',  color:sc('under_repair') },
+    { s:'repaired',     label:'Repaired',      color:sc('repaired') },
+    { s:'returned',     label:'Returned',      color:sc('returned') },
+    { s:'delivered',    label:'Delivered',     color:sc('delivered') },
   ];
   return `
   <div style="display:flex;flex-direction:column;height:100%">
-    <div id="stats-bar" class="stats-bar"></div>
-    <div class="filter-bar">
+    <div class="filter-bar" id="filter-chip-bar">
       ${filters.map(f => `
       <button class="filter-chip ${S.filter===f.s?'chip-active':''}"
-        style="--chip-color:${f.s ? sc(f.s) : '#1a1a2e'}"
-        data-filter="${f.s}">${f.label}</button>`).join('')}
+        style="--chip-color:${f.color}"
+        data-filter="${f.s}">${f.label} <span class="chip-count" id="cc-${f.s||'all'}"></span></button>`).join('')}
     </div>
     ${!isAdmin() ? `
     <div class="my-jobs-bar">
@@ -470,48 +495,34 @@ function dashboardHTML() {
   </div>`;
 }
 
-// Analytics 30-second cache to avoid duplicate calls on filter/search
+// Analytics 30-second cache — only used for chip counts (no separate stats bar)
 let _analyticsCache = null;
 let _analyticsCacheTs = 0;
 function loadAnalytics(force) {
   const now = Date.now();
   if (!force && _analyticsCache && (now - _analyticsCacheTs) < 30000) {
-    // Use cached value
-    const d = _analyticsCache;
-    const sb = document.getElementById('stats-bar');
-    if (sb) _renderStatsBar(d, sb);
+    _applyChipCounts(_analyticsCache);
     return;
   }
   API.get('/api/analytics').then(r => {
     _analyticsCache = r.data;
     _analyticsCacheTs = Date.now();
-    const sb = document.getElementById('stats-bar');
-    if (sb) _renderStatsBar(r.data, sb);
-  }).catch(() => {
-    const sb = document.getElementById('stats-bar');
-    if (sb) sb.style.display = 'none';
-  });
+    _applyChipCounts(r.data);
+  }).catch(() => {});
 }
-function _renderStatsBar(d, sb) {
-  sb.innerHTML = `
-    <div class="stat-chip" onclick="filterAll()">
-      <span class="stat-num">${d.total}</span><span class="stat-lbl">All</span>
-    </div>
-    <div class="stat-chip" onclick="filterByStatus('under_repair')">
-      <span class="stat-num" style="color:#E53935">${d.underRepair||0}</span><span class="stat-lbl">Under Repair</span>
-    </div>
-    <div class="stat-chip" onclick="filterByStatus('repaired')">
-      <span class="stat-num" style="color:#FB8C00">${d.repaired||0}</span><span class="stat-lbl">Repaired</span>
-    </div>
-    <div class="stat-chip" onclick="filterByStatus('returned')">
-      <span class="stat-num" style="color:#1E88E5">${d.returned||0}</span><span class="stat-lbl">Returned</span>
-    </div>
-    <div class="stat-chip" onclick="filterDone()">
-      <span class="stat-num" style="color:#43A047">${d.completed}</span><span class="stat-lbl">Delivered</span>
-    </div>
-    <div class="stat-chip" onclick="filterToday()">
-      <span class="stat-num" style="color:#9C27B0">${d.today}</span><span class="stat-lbl">Today</span>
-    </div>`;
+function _applyChipCounts(d) {
+  // Update counts inside filter chip buttons only (no separate stats tiles)
+  const map = {
+    'cc-all':         d.total      || 0,
+    'cc-under_repair': d.underRepair || 0,
+    'cc-repaired':    d.repaired    || 0,
+    'cc-returned':    d.returned    || 0,
+    'cc-delivered':   d.completed  || 0,
+  };
+  Object.entries(map).forEach(([id, val]) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = `(${val})`;
+  });
 }
 
 async function loadJobs() {
@@ -926,17 +937,11 @@ function renderDetail() {
     </div>
 
     <!-- Financial Panel
-         Admin: itemized breakdown per machine + Total + Received + Balance
-         Staff: ONLY Balance Due — no amounts, no Repair Amount, no Received  -->
+         Admin: Total + Received + Balance + edit received amount
+         Staff: HIDDEN — no financial data visible -->
+    ${isAdmin() ? `
     <div class="card mt-3 financial-panel">
       <div class="fin-title"><i class="fas fa-rupee-sign"></i> Financials</div>
-      ${isAdmin() ? `
-        ${(j.machines||[]).map(m => `
-        <div class="fin-machine-row">
-          <span class="fin-machine-name">${esc(m.product_name)}${m.quantity>1?` ×${m.quantity}`:''}</span>
-          <span class="fin-machine-amt">${fmtRs(m.charges)}</span>
-        </div>`).join('')}
-        ${(j.machines||[]).length > 1 ? `<div style="border-top:1px dashed #e0e0e0;margin:4px 0"></div>` : ''}
         <div class="fin-row">
           <span class="fin-label fw-bold">= Total Amount</span>
           <span class="fin-amount fw-bold">${fmtRs(total)}</span>
@@ -944,12 +949,12 @@ function renderDetail() {
         <div class="fin-row">
           <span class="fin-label">Received Amount</span>
           <span class="fin-amount" style="color:#43A047">${fmtRs(received)}</span>
-        </div>` : ''}
+        </div>
       <div class="fin-row fin-balance">
         <span class="fin-label fw-bold">Balance Due</span>
         <span class="fin-amount fw-bold" style="color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
       </div>
-      ${isAdmin() && j.status !== 'delivered' ? `
+      ${true ? `
       <div class="fin-edit-row">
         <label class="form-label" style="margin:0">Update Received Amount (₹)</label>
         <div style="display:flex;gap:8px;margin-top:6px">
@@ -958,7 +963,7 @@ function renderDetail() {
           <button id="recv-save" class="btn-sm btn-green">Save</button>
         </div>
       </div>` : ''}
-    </div>
+    </div>` : ''}
 
     ${j.status === 'delivered' && j.delivery_receiver_name ? `
     <!-- Delivery Info Card -->
@@ -1301,7 +1306,19 @@ function bindDetail(j) {
   document.getElementById('btn-wa-reminder')?.addEventListener('click', () => {
     const phone   = (j.snap_mobile || '').replace(/\D/g, '');
     const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
-    const text    = encodeURIComponent(`Reminder: Your job #${j.id} is ready.\nPlease complete payment to proceed with delivery.\n\nADITION ELECTRIC SOLUTION`);
+    const balance = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
+    const products = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
+    const reminderMsg = `Hello ${j.snap_name || 'Valued Customer'},
+
+⚠️ *Reminder* — Your job *#${j.id}* is ready and awaiting collection.
+
+*Products:*
+${products}
+${balance > 0 ? `\n*Amount Due: ₹${balance}*\nPlease complete payment to proceed with delivery.\n` : ''}
+Kindly collect within *25 days* from repair date to avoid liability.
+
+— *ADITION ELECTRIC SOLUTION*`;
+    const text    = encodeURIComponent(reminderMsg);
     const url     = waPhone ? `https://wa.me/${waPhone}?text=${text}` : `https://wa.me/?text=${text}`;
     if (waPhone) {
       window.location.href = `whatsapp://send?phone=${waPhone}&text=${text}`;
@@ -1697,33 +1714,31 @@ function showDeliveryModal(j) {
   showModal(`
     <h3 class="modal-title"><i class="fas fa-check-double" style="color:#1E88E5"></i> Mark as Delivered</h3>
     <div class="form-group">
-      <label class="form-label">Receiver Name <span class="req">*</span></label>
-      <input id="dm-rname" type="text" class="form-input" placeholder="Person who collected the device">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Receiver Mobile</label>
-      <input id="dm-rmob" type="tel" class="form-input" placeholder="Mobile of receiver" inputmode="numeric">
-    </div>
-    <div class="form-group">
-      <label class="form-label">Delivery Method</label>
+      <label class="form-label">Delivery Method <span class="req">*</span></label>
       <select id="dm-method" class="form-input">
         <option value="in_person">In Person</option>
         <option value="courier">Courier</option>
       </select>
     </div>
-    <div id="courier-extra" style="display:none">
-      <div class="form-group">
-        <label class="form-label">Courier Name</label>
-        <input id="dm-courier" type="text" class="form-input" placeholder="e.g. DTDC, BlueDart">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Tracking ID</label>
-        <input id="dm-track" type="text" class="form-input" placeholder="Tracking number">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Delivery Address</label>
-        <textarea id="dm-addr" class="form-input" rows="2"></textarea>
-      </div>
+    <div class="form-group">
+      <label class="form-label">Receiver Name <span class="req">*</span></label>
+      <input id="dm-rname" type="text" class="form-input" placeholder="Person who collected the device">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Receiver Mobile <span style="color:#999;font-size:12px">(optional)</span></label>
+      <input id="dm-rmob" type="tel" class="form-input" placeholder="Mobile of receiver" inputmode="numeric">
+    </div>
+    <div class="form-group" id="courier-name-wrap">
+      <label class="form-label">Courier Name <span style="color:#999;font-size:12px">(optional)</span></label>
+      <input id="dm-courier" type="text" class="form-input" placeholder="e.g. DTDC, BlueDart">
+    </div>
+    <div class="form-group" id="courier-track-wrap">
+      <label class="form-label">Tracking ID <span style="color:#999;font-size:12px">(optional)</span></label>
+      <input id="dm-track" type="text" class="form-input" placeholder="Tracking number">
+    </div>
+    <div class="form-group" id="courier-addr-wrap">
+      <label class="form-label">Delivery Address <span style="color:#999;font-size:12px">(optional)</span></label>
+      <textarea id="dm-addr" class="form-input" rows="2"></textarea>
     </div>
     ${isAdmin() ? `
     <div class="form-group">
@@ -1738,10 +1753,16 @@ function showDeliveryModal(j) {
       </button>
     </div>`);
 
-  document.getElementById('dm-method')?.addEventListener('change', e => {
-    document.getElementById('courier-extra').style.display =
-      e.target.value === 'courier' ? 'block' : 'none';
-  });
+  // Show/hide courier-specific optional fields based on method selection
+  const toggleCourierFields = (method) => {
+    const show = method === 'courier';
+    ['courier-name-wrap','courier-track-wrap','courier-addr-wrap'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.opacity = show ? '1' : '0.5';
+    });
+  };
+  document.getElementById('dm-method')?.addEventListener('change', e => toggleCourierFields(e.target.value));
+  toggleCourierFields('in_person'); // default dim courier fields
 
   document.getElementById('dm-confirm')?.addEventListener('click', async () => {
     const rname = document.getElementById('dm-rname')?.value.trim();
@@ -1773,49 +1794,49 @@ function jobCardPrintHTML(j) {
   const color      = sc(j.status);
   const isDelivered = j.status === 'delivered';
   const isRepaired  = j.status === 'repaired';
-  const showPayment = isRepaired && balance > 0;
+  const showPayment = balance > 0 && !isDelivered; // Show QR whenever there's a balance (except delivered)
 
   const deliveryBlock = isDelivered ? `
-    <div style="margin:0 50px 30px;background:#E3F2FD;border:3px solid #1E88E5;border-radius:16px;padding:28px">
-      <div style="font-size:24px;font-weight:800;color:#1565C0;margin-bottom:14px">📦 Delivery Information</div>
-      <table style="width:100%;border-collapse:collapse;font-size:20px">
-        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:6px 0;width:220px">Received By</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
-        ${j.delivery_receiver_mobile ? `<tr><td style="color:#555;padding:6px 0">Mobile</td><td style="font-weight:700;color:#1565C0">${j.delivery_receiver_mobile}</td></tr>` : ''}
-        ${j.delivery_method          ? `<tr><td style="color:#555;padding:6px 0">Method</td><td style="font-weight:700;color:#1a1a2e">${j.delivery_method==='courier'?'Courier':'In Person'}</td></tr>` : ''}
-        ${j.delivery_courier_name    ? `<tr><td style="color:#555;padding:6px 0">Courier</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_courier_name)}</td></tr>` : ''}
-        ${j.delivery_tracking        ? `<tr><td style="color:#555;padding:6px 0">Tracking</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_tracking)}</td></tr>` : ''}
-        ${j.delivered_at             ? `<tr><td style="color:#555;padding:6px 0">Date</td><td style="font-weight:700;color:#1a1a2e">${fmtDate(j.delivered_at)}</td></tr>` : ''}
+    <div style="margin:0 50px 24px;background:#E3F2FD;border:3px solid #1E88E5;border-radius:16px;padding:22px">
+      <div style="font-size:22px;font-weight:800;color:#1565C0;margin-bottom:12px">📦 Delivery Information</div>
+      <table style="width:100%;border-collapse:collapse;font-size:18px">
+        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:5px 0;width:200px">Received By</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
+        ${j.delivery_receiver_mobile ? `<tr><td style="color:#555;padding:5px 0">Mobile</td><td style="font-weight:700;color:#1565C0">${j.delivery_receiver_mobile}</td></tr>` : ''}
+        ${j.delivery_method          ? `<tr><td style="color:#555;padding:5px 0">Method</td><td style="font-weight:700;color:#1a1a2e">${j.delivery_method==='courier'?'Courier':'In Person'}</td></tr>` : ''}
+        ${j.delivery_courier_name    ? `<tr><td style="color:#555;padding:5px 0">Courier</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_courier_name)}</td></tr>` : ''}
+        ${j.delivery_tracking        ? `<tr><td style="color:#555;padding:5px 0">Tracking</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_tracking)}</td></tr>` : ''}
+        ${j.delivered_at             ? `<tr><td style="color:#555;padding:5px 0">Date</td><td style="font-weight:700;color:#1a1a2e">${fmtDate(j.delivered_at)}</td></tr>` : ''}
       </table>
     </div>` : `
-    <div style="margin:0 50px 30px;background:#fff8e1;border:3px solid #FFC107;border-radius:16px;padding:28px">
-      <div style="font-size:24px;font-weight:800;color:#e65100;margin-bottom:10px">⚠️ Collection Notice</div>
-      <div style="font-size:20px;color:#5D4037;line-height:1.65">
+    <div style="margin:0 50px 24px;background:#fff8e1;border:3px solid #FFC107;border-radius:16px;padding:22px">
+      <div style="font-size:22px;font-weight:800;color:#e65100;margin-bottom:8px">⚠️ Collection Notice</div>
+      <div style="font-size:18px;color:#5D4037;line-height:1.65">
         Kindly collect your machine(s) within <strong>25 days</strong> from the date of this notice.
         After this period, we shall <strong>not be held liable</strong> for any claims, loss, or damage to uncollected items.
       </div>
     </div>`;
 
-  // Payment block — shown only when Repaired + balance due
+  // Payment block — shown when balance > 0 (except delivered)
   const paymentBlock = showPayment ? `
-    <div style="margin:0 50px 30px;background:#E8F5E9;border:3px solid #43A047;border-radius:16px;padding:30px">
-      <div style="font-size:26px;font-weight:900;color:#2E7D32;margin-bottom:18px;text-align:center">💳 Complete Payment to Proceed</div>
-      <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap">
-        <!-- QR Code via Google Charts API (works offline after first load) -->
+    <div style="margin:0 50px 24px;background:#E8F5E9;border:3px solid #43A047;border-radius:16px;padding:24px">
+      <div style="font-size:22px;font-weight:900;color:#2E7D32;margin-bottom:14px;text-align:center">💳 Complete Payment to Proceed</div>
+      <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
+        <!-- QR Code -->
         <div style="text-align:center;flex-shrink:0">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:200px;height:200px;border-radius:12px;border:2px solid #43A047" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:16px;color:#555;margin-top:8px">Scan to Pay ₹${balance}</div>
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:180px;height:180px;border-radius:10px;border:2px solid #43A047" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:14px;color:#555;margin-top:6px">Scan to Pay ₹${balance}</div>
         </div>
         <div style="flex:1;min-width:200px">
-          <div style="font-size:20px;font-weight:800;color:#1a1a2e;margin-bottom:12px">UPI / Bank Details</div>
-          <table style="border-collapse:collapse;font-size:18px;width:100%">
-            <tr><td style="color:#555;padding:5px 0;width:120px">UPI</td><td style="font-weight:700;color:#1a1a2e">9375940444@okbizaxis</td></tr>
-            <tr><td style="color:#555;padding:5px 0">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-            <tr><td colspan="2" style="padding:10px 0 4px"><hr style="border:1px solid #ccc"></td></tr>
-            <tr><td style="color:#555;padding:5px 0">Bank</td><td style="font-weight:700">State Bank Of India</td></tr>
-            <tr><td style="color:#555;padding:5px 0">Name</td><td style="font-weight:700">ADITION ELECTRIC SOLUTION</td></tr>
-            <tr><td style="color:#555;padding:5px 0">A/C No.</td><td style="font-weight:700;color:#1a1a2e">37321811864</td></tr>
-            <tr><td style="color:#555;padding:5px 0">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
-            <tr><td style="color:#555;padding:5px 0">Branch</td><td style="font-weight:700">Patharkuva</td></tr>
+          <div style="font-size:18px;font-weight:800;color:#1a1a2e;margin-bottom:10px">UPI / Bank Details</div>
+          <table style="border-collapse:collapse;font-size:16px;width:100%">
+            <tr><td style="color:#555;padding:4px 0;width:100px">UPI</td><td style="font-weight:700;color:#1a1a2e">9375940444@okbizaxis</td></tr>
+            <tr><td style="color:#555;padding:4px 0">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+            <tr><td colspan="2" style="padding:8px 0 3px"><hr style="border:1px solid #ccc"></td></tr>
+            <tr><td style="color:#555;padding:4px 0">Bank</td><td style="font-weight:700">State Bank Of India</td></tr>
+            <tr><td style="color:#555;padding:4px 0">Name</td><td style="font-weight:700">ADITION ELECTRIC SOLUTION</td></tr>
+            <tr><td style="color:#555;padding:4px 0">A/C No.</td><td style="font-weight:700;color:#1a1a2e">37321811864</td></tr>
+            <tr><td style="color:#555;padding:4px 0">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
+            <tr><td style="color:#555;padding:4px 0">Branch</td><td style="font-weight:700">Patharkuva</td></tr>
           </table>
         </div>
       </div>
@@ -1823,79 +1844,78 @@ function jobCardPrintHTML(j) {
 
   // Header (repeated on each page via CSS — actually used once; pages split in JS)
   const headerBlock = `
-    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);padding:44px 60px 36px;text-align:center">
-      <div style="width:90px;height:90px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:20px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:52px">⚡</div>
-      <div style="color:#fff;font-size:36px;font-weight:900;letter-spacing:3px">ADITION ELECTRIC SOLUTION</div>
-      <div style="color:rgba(255,255,255,.65);font-size:18px;margin-top:6px;letter-spacing:1px">SERVICE MANAGEMENT SYSTEM</div>
+    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);padding:36px 50px 28px;text-align:center">
+      <div style="width:76px;height:76px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:18px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:44px">⚡</div>
+      <div style="color:#fff;font-size:32px;font-weight:900;letter-spacing:2px">ADITION ELECTRIC SOLUTION</div>
+      <div style="color:rgba(255,255,255,.65);font-size:16px;margin-top:4px;letter-spacing:1px">SERVICE MANAGEMENT SYSTEM</div>
     </div>
-    <div style="background:${color};padding:20px 60px;display:flex;justify-content:space-between;align-items:center">
-      <div style="color:#fff;font-size:48px;font-weight:900;letter-spacing:4px">${j.id}</div>
-      <div style="color:#fff;font-size:22px;font-weight:700;background:rgba(0,0,0,.2);padding:8px 20px;border-radius:10px">${sl(j.status)}</div>
+    <div style="background:${color};padding:16px 50px;display:flex;justify-content:space-between;align-items:center">
+      <div style="color:#fff;font-size:42px;font-weight:900;letter-spacing:3px">${j.id}</div>
+      <div style="color:#fff;font-size:20px;font-weight:700;background:rgba(0,0,0,.2);padding:7px 18px;border-radius:10px">${sl(j.status)}</div>
     </div>`;
 
   // All machines — NO height limit, NO overflow:hidden, NO slice
+  // Two-column layout per product: image left, details right
   const machinesBlock = `
-    <div style="padding:24px 60px 0">
-      <div style="font-size:18px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px">Products Registered (${(j.machines||[]).length})</div>
-      ${(j.machines||[]).map((m,i) => `
-      <div style="background:#f8f9fa;border-radius:14px;padding:20px 24px;margin-bottom:14px;border-left:6px solid ${sc(m.status)}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <div style="flex:1;min-width:0">
-            <div style="font-size:24px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` ×${m.quantity}`:''}</div>
-            ${m.product_complaint ? `<div style="font-size:18px;color:#666;margin-top:4px">${esc(m.product_complaint)}</div>` : ''}
-            ${m.work_done ? `<div style="font-size:17px;color:#2E7D32;margin-top:4px">✅ Work done: ${esc(m.work_done)}</div>` : ''}
+    <div style="padding:20px 50px 0">
+      <div style="font-size:17px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px">Products Registered (${(j.machines||[]).length})</div>
+      ${(j.machines||[]).map((m,i) => {
+        const firstImg = (m.images||[])[0];
+        return `
+      <div style="background:#f8f9fa;border-radius:14px;padding:16px 20px;margin-bottom:12px;border-left:6px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:16px">
+        ${firstImg ? `<img src="${firstImg.url}" style="width:90px;height:90px;border-radius:10px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">` : `<div style="width:90px;height:90px;border-radius:10px;background:#e0e0e0;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:36px">⚡</div>`}
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:4px">
+            <div style="font-size:22px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` ×${m.quantity}`:''}</div>
+            <div style="background:${sc(m.status)};color:#fff;border-radius:8px;padding:4px 12px;font-size:14px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
           </div>
-          <div style="text-align:right;flex-shrink:0;margin-left:16px">
-            <div style="background:${sc(m.status)};color:#fff;border-radius:8px;padding:6px 14px;font-size:16px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
-          </div>
+          ${m.product_complaint ? `<div style="font-size:16px;color:#666;margin-top:4px">${esc(m.product_complaint)}</div>` : ''}
+          ${m.work_done ? `<div style="font-size:15px;color:#2E7D32;margin-top:4px">✅ ${esc(m.work_done)}</div>` : ''}
         </div>
-        ${(m.images||[]).length ? `
-        <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
-          ${(m.images||[]).slice(0,4).map(img => `<img src="${img.url}" style="width:100px;height:100px;border-radius:10px;object-fit:cover" onerror="this.style.display='none'">`).join('')}
-        </div>` : ''}
-      </div>`).join('')}
+      </div>`;
+      }).join('')}
     </div>`;
 
   const financialBlock = `
-    <div style="margin:20px 60px;background:#f8f9fa;border-radius:14px;padding:22px 26px">
-      <div style="font-size:18px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">Financial Summary</div>
-      <div style="display:flex;justify-content:space-between;font-size:24px;padding:8px 0;border-bottom:1px solid #e0e0e0">
+    <div style="margin:16px 50px;background:#f8f9fa;border-radius:14px;padding:18px 22px">
+      <div style="font-size:16px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">Financial Summary</div>
+      <div style="display:flex;justify-content:space-between;font-size:22px;padding:7px 0;border-bottom:1px solid #e0e0e0">
         <span style="color:#555;font-weight:600">Total Amount</span><span style="font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:24px;padding:8px 0;border-bottom:1px solid #e0e0e0">
+      <div style="display:flex;justify-content:space-between;font-size:22px;padding:7px 0;border-bottom:1px solid #e0e0e0">
         <span style="color:#555;font-weight:600">Amount Received</span><span style="font-weight:800;color:#43A047">${fmtRs(received)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:28px;padding:10px 0">
+      <div style="display:flex;justify-content:space-between;font-size:26px;padding:9px 0">
         <span style="font-weight:700;color:#1a1a2e">Amount Due</span>
         <span style="font-weight:900;color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
       </div>
     </div>`;
 
-  const noteBlock = j.note ? `<div style="margin:0 60px 16px;background:#fffde7;border-radius:10px;padding:18px 22px;font-size:19px;color:#795548"><b>Note:</b> ${esc(j.note)}</div>` : '';
+  const noteBlock = j.note ? `<div style="margin:0 50px 12px;background:#fffde7;border-radius:10px;padding:14px 18px;font-size:17px;color:#795548"><b>Note:</b> ${esc(j.note)}</div>` : '';
 
   const footerBlock = `
-    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:30px 60px;margin-top:auto">
-      <div style="color:#fff;font-size:20px;font-weight:700">✨ adition™ since 1984</div>
-      <div style="color:rgba(255,255,255,.65);font-size:16px;margin-top:6px">Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001</div>
-      <div style="color:rgba(255,255,255,.4);font-size:14px;margin-top:4px">Subjected to Ahmedabad Jurisdiction only</div>
+    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:24px 50px;margin-top:auto">
+      <div style="color:#fff;font-size:18px;font-weight:700">✨ adition™ since 1984</div>
+      <div style="color:rgba(255,255,255,.65);font-size:14px;margin-top:4px">Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001</div>
+      <div style="color:rgba(255,255,255,.4);font-size:12px;margin-top:3px">Subjected to Ahmedabad Jurisdiction only</div>
     </div>`;
 
   // Customer info block
   const custBlock = `
-    <div style="padding:30px 60px 16px">
-      <div style="font-size:17px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px">Customer Details</div>
+    <div style="padding:22px 50px 12px">
+      <div style="font-size:15px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">Customer Details</div>
       <table style="width:100%;border-collapse:collapse">
-        <tr><td style="font-size:19px;color:#555;padding:7px 0;width:180px">Name</td>
-            <td style="font-size:24px;font-weight:800;color:#1a1a2e">${esc(j.snap_name)}</td></tr>
-        <tr><td style="font-size:19px;color:#555;padding:7px 0">Mobile</td>
-            <td style="font-size:22px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?' / '+j.snap_mobile2:''}</td></tr>
-        ${j.snap_address ? `<tr><td style="font-size:19px;color:#555;padding:7px 0">Address</td>
-            <td style="font-size:19px;color:#333">${esc(j.snap_address)}</td></tr>` : ''}
-        <tr><td style="font-size:19px;color:#555;padding:7px 0">Date</td>
-            <td style="font-size:19px;color:#555">${fmtDate(j.created_at)}</td></tr>
+        <tr><td style="font-size:17px;color:#555;padding:6px 0;width:160px">Name</td>
+            <td style="font-size:22px;font-weight:800;color:#1a1a2e">${esc(j.snap_name)}</td></tr>
+        <tr><td style="font-size:17px;color:#555;padding:6px 0">Mobile</td>
+            <td style="font-size:20px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?' / '+j.snap_mobile2:''}</td></tr>
+        ${j.snap_address ? `<tr><td style="font-size:17px;color:#555;padding:6px 0">Address</td>
+            <td style="font-size:17px;color:#333">${esc(j.snap_address)}</td></tr>` : ''}
+        <tr><td style="font-size:17px;color:#555;padding:6px 0">Date</td>
+            <td style="font-size:17px;color:#555">${fmtDate(j.created_at)}</td></tr>
       </table>
     </div>
-    <div style="border-top:2px solid #f0f0f0;margin:0 60px 4px"></div>`;
+    <div style="border-top:2px solid #f0f0f0;margin:0 50px 4px"></div>`;
 
   // Single long scrollable page — JS will slice into 1920px segments
   return `
@@ -2042,14 +2062,55 @@ async function generateAndShareJobCard(j, shareMode) {
 }
 
 function shareText(j, multiPage) {
-  const custName = j.snap_name || 'Valued Customer';
-  const balance  = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
-  const isRepaired = j.status === 'repaired';
+  const custName    = j.snap_name || 'Valued Customer';
+  const balance     = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
+  const isRepaired  = j.status === 'repaired';
+  const isDelivered = j.status === 'delivered';
+  const products    = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
+  const total       = j.total_charges || 0;
 
   if (isRepaired && balance > 0) {
-    return `Hello ${custName},\nYour job #${j.id} is ready.\n\nTo process delivery kindly complete the payment.\nPayment details are given in the job card.\n\nADITION ELECTRIC SOLUTION`;
+    return `Hello ${custName},
+
+Your job *#${j.id}* is ready for delivery! 🎉
+
+*Products Repaired:*
+${products}
+
+*Payment Summary:*
+Total Amount: ₹${total}
+Amount Due: ₹${balance}
+
+To receive your device, kindly complete the payment.
+Payment details (UPI / Bank) are given in the job card image.
+
+Please collect your device within *25 days* from the date of this notice. After this period, we shall not be held liable for any claims or loss.
+
+— *ADITION ELECTRIC SOLUTION*`;
   }
-  return `Hello ${custName},\nYour job #${j.id} is updated.\nPlease check your job card.\n\nADITION ELECTRIC SOLUTION`;
+
+  if (isDelivered) {
+    return `Hello ${custName},
+
+Your job *#${j.id}* has been delivered. ✅
+
+Thank you for choosing us!
+
+— *ADITION ELECTRIC SOLUTION*`;
+  }
+
+  // Generic / under_repair status
+  return `Hello ${custName},
+
+Your job *#${j.id}* has been registered. 🔧
+
+*Products:*
+${products}
+
+We will notify you once the repair is complete.
+Please collect within *25 days* of notification.
+
+— *ADITION ELECTRIC SOLUTION*`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2580,9 +2641,9 @@ if (document.readyState === 'loading') {
   render();
 }
 
-// Register Service Worker
+// Register Service Worker with explicit scope "/"
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
 }
 
 // Capture PWA install prompt (Chrome/Edge/Android)
