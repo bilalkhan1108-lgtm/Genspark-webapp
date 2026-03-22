@@ -1,20 +1,85 @@
-# ADITION ELECTRIC SOLUTION — PWA v6
+# ADITION ELECTRIC SOLUTION — PWA v16
 
 **Mobile-first PWA** for electric appliance repair shop management.  
-Admin & Staff roles · Job tracking C-001 to C-999 · R2 image storage · D1 SQLite DB
+Admin & Staff roles · Job tracking · R2 image storage · D1 SQLite DB
 
 ---
 
 ## 🔗 URLs
 | Environment | URL |
 |---|---|
-| **Sandbox (Dev)** | https://3000-ivun77vx8q4y3hmbo2tha-583b4d74.sandbox.novita.ai |
+| **Sandbox (Dev)** | https://3000-itsteu7gob2nb2g5pp83m-dfc00ec5.sandbox.novita.ai |
 | **GitHub** | https://github.com/bilalkhan1108-lgtm/Genspark-webapp |
-| **Production** | Deploy via `npm run deploy` (see Deployment section) |
 
 ---
 
-## ✅ Completed Features (v6)
+## ✅ Completed Features (v16)
+
+### Authentication & RBAC
+- Email/password login with JWT (30-day expiry)
+- **Admin** (bilalkhan1108@gmail.com / `0010`) — full CRUD, financials, delivery, reports
+- **Staff** — no prices/financials visible, Balance Due only, assignment requests
+
+### Dashboard
+- Filter chips with live counts: All(n) · Under Repair(n) · Repaired(n) · Returned(n) · Delivered(n)
+- Virtual list rendering — handles 500+ jobs lag-free
+- 10ms debounce search, persistent URL filter
+- Staff notification bar: Assignment Approved ✅ / Denied ❌ with timestamps
+
+### Job Management
+- Auto-generated job IDs (configurable prefix + digit format)
+- Customer auto-fill from history
+- Per-machine repair amounts, itemized total
+- Admin can edit received amount even after delivery
+
+### Job History Timeline ✨ NEW
+- **History button** on every job detail page (all roles)
+- Full audit log: Job Created, Machine Added, Status changes, Payment updates, Delivery
+- Shows timestamp, action description, user name, and role badge
+
+### Staff Notifications ✨ IMPROVED
+- `GET /api/my-notifications` — returns assignment approvals/denials from last 7 days
+- Shows exact resolved timestamp (not just date)
+- Color-coded per status
+
+### WhatsApp Messages ✨ IMPROVED
+- Itemized product list with individual prices (₹ per item, quantity multiplier)
+- Estimated repair amount for new jobs
+- Payment due amount with UPI details for repaired jobs
+- 25-day collection notice
+- Shop phone number included
+
+### Job Card Export
+- 3× resolution (high DPI canvas) for sharp WhatsApp images
+- 2-column customer layout (Name|Mobile, Address|Date)
+- All product images + individual charges shown
+- QR code shown when balance > 0; hidden when fully paid
+
+### Image Upload ✨ IMPROVED
+- **Instant preview** using local blob URL (no wait for upload)
+- **Async non-blocking upload** — UI remains responsive during upload
+- Auto-retry on failure with reduced quality
+- Client-side compression to 1080px before upload
+
+### Delivery Flow
+- Delivery Method at top of modal
+- All extra fields (Receiver, Courier, Tracking) always visible and optional
+- WhatsApp post-delivery message with delivered confirmation
+
+### Reports
+- Customer Ledger: search by mobile, filter by date range, export Summary/Detailed
+- Staff Work Report, Job Summary, Full Backup, My Jobs Export
+- Customer Data Export (deduplicated)
+
+### PWA
+- `manifest.json`: standalone mode, start_url "/", theme_color "#0f172a"
+- 192×192 and 512×512 icons
+- Service Worker v7 caches key assets
+- beforeinstallprompt → install button in header
+- Back button uses history.pushState + onpopstate
+
+## 🔐 Credentials
+- **Admin**: bilalkhan1108@gmail.com / `0010`
 
 ### Authentication & RBAC
 - Email/password login with JWT (30-day expiry)
