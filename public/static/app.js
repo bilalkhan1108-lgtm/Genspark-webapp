@@ -255,6 +255,7 @@ async function login(email, password) {
     S.token = r.data.token; S.user = r.data.user;
     localStorage.setItem('AES_TOKEN', S.token);
     localStorage.setItem('AES_USER', JSON.stringify(S.user));
+    maybeAskPushPermission();
     navigate('dashboard');
   } catch (e) {
     toast(e.response?.data?.error || 'Login failed', 'error');
@@ -307,6 +308,8 @@ function render() {
     bindLogin();
     return;
   }
+  // Ask push permission once after first render when logged in
+  maybeAskPushPermission();
   app.innerHTML = `
     <div class="app-shell">
       ${headerHTML()}
@@ -447,6 +450,32 @@ function bindView() {
     }).catch(() => {});
   }
 
+  // Staff: show notification bar for recent request updates (approved/denied)
+  if (!isAdmin() && S.view === 'dashboard') {
+    API.get('/api/my-notifications').then(r => {
+      const notes = r.data || [];
+      if (!notes.length) return;
+      const bar = document.getElementById('staff-notif-bar');
+      if (!bar) return;
+      bar.innerHTML = notes.slice(0, 5).map(n => {
+        const icon   = n.status === 'approved' ? '✅' : '❌';
+        const color  = n.status === 'approved' ? '#E8F5E9' : '#FFEBEE';
+        const border = n.status === 'approved' ? '#43A047' : '#E53935';
+        const action = n.status === 'approved' ? 'Assignment Approved' : 'Assignment Denied';
+        const ts     = n.resolved_at || n.created_at;
+        const tsStr  = ts ? new Date(ts).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
+        const msg    = n.status === 'approved'
+          ? `${icon} <b>${action}</b> — Job <b>#${esc(n.job_id)}</b> · <i>${esc(n.product_name)}</i>`
+          : `${icon} <b>${action}</b> — Job <b>#${esc(n.job_id)}</b> · <i>${esc(n.product_name)}</i>`;
+        return `<div style="background:${color};border-left:4px solid ${border};border-radius:8px;padding:10px 14px;margin-bottom:6px;font-size:13px;line-height:1.5">
+          ${msg}
+          <div style="color:#999;font-size:11px;margin-top:3px">${tsStr}</div>
+        </div>`;
+      }).join('');
+      bar.style.display = 'block';
+    }).catch(() => {});
+  }
+
   switch (S.view) {
     case 'dashboard': loadJobs();                                               break;
     case 'newjob':    if (isAdmin()) bindNewJob();                               break;
@@ -471,6 +500,7 @@ function dashboardHTML() {
   ];
   return `
   <div style="display:flex;flex-direction:column;height:100%">
+    ${!isAdmin() ? `<div id="staff-notif-bar" style="display:none;padding:8px 12px 0"></div>` : ''}
     <div class="filter-bar" id="filter-chip-bar">
       ${filters.map(f => `
       <button class="filter-chip ${S.filter===f.s?'chip-active':''}"
@@ -995,7 +1025,7 @@ function renderDetail() {
 
     <!-- Action Buttons — RBAC: admin-only download/share/deliver/delete -->
     <div class="action-row mt-3">
-      ${isAdmin() && j.status !== 'delivered' ? `
+      ${isAdmin() ? `
       <button id="btn-deliver" class="action-btn" style="background:#1E88E5">
         <i class="fas fa-check-double"></i><span>Deliver</span>
       </button>` : ''}
@@ -1009,6 +1039,9 @@ function renderDetail() {
       <button id="btn-del-job" class="action-btn" style="background:#E53935">
         <i class="fas fa-trash"></i><span>Delete</span>
       </button>` : ''}
+      <button id="btn-job-history" class="action-btn" style="background:#7B1FA2">
+        <i class="fas fa-history"></i><span>History</span>
+      </button>
     </div>
 
     <!-- Machines List -->
@@ -1196,24 +1229,79 @@ function bindDetail(j) {
     sel.dataset.prev = sel.value;
   });
 
-  // Image upload with canvas compression (1080px)
+  // Image upload with canvas compression (1080px) — async non-blocking with instant preview
   document.querySelectorAll('.img-file-input').forEach(input => {
     input.addEventListener('change', async e => {
       const raw = e.target.files[0];
       if (!raw) return;
       const mid = e.target.dataset.mid;
-      try {
-        toast('Compressing…', 'info');
-        const compressed = await compressImage(raw, 1080, 0.82);
-        const fd = new FormData();
-        fd.append('image', compressed);
-        toast('Uploading…', 'info');
-        await API.post(`/api/machines/${mid}/images`, fd, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        });
-        toast('Image saved', 'success');
-        await loadDetail();
-      } catch (_) { toast('Upload failed', 'error'); }
+
+      // Instant local preview using blob URL (no wait for upload)
+      const previewUrl = URL.createObjectURL(raw);
+      const wrap = input.closest('.machine-card')?.querySelector('.images-row');
+      if (wrap) {
+        const tempDiv = document.createElement('div');
+        tempDiv.className = 'img-wrap';
+        tempDiv.style.cssText = 'position:relative;opacity:0.6';
+        const tempImg = document.createElement('img');
+        tempImg.src = previewUrl;
+        tempImg.className = 'img-thumb';
+        tempImg.style.cssText = 'filter:blur(1px)';
+        const spinner = document.createElement('div');
+        spinner.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.5)';
+        spinner.innerHTML = '<i class="fas fa-spinner fa-spin" style="color:#E53935;font-size:18px"></i>';
+        tempDiv.appendChild(tempImg);
+        tempDiv.appendChild(spinner);
+        const addBtn = wrap.querySelector('.img-add-btn');
+        if (addBtn) wrap.insertBefore(tempDiv, addBtn);
+        else wrap.appendChild(tempDiv);
+
+        // Upload asynchronously without blocking UI
+        (async () => {
+          try {
+            const compressed = await compressImage(raw, 1080, 0.82);
+            const fd = new FormData();
+            fd.append('image', compressed);
+            await API.post(`/api/machines/${mid}/images`, fd, {
+              headers: { 'Content-Type': 'multipart/form-data' }
+            });
+            toast('Image saved ✅', 'success');
+            URL.revokeObjectURL(previewUrl);
+            await loadDetail(); // Refresh to show real image from R2
+          } catch (_) {
+            toast('Upload failed — retrying…', 'error');
+            tempDiv.remove();
+            URL.revokeObjectURL(previewUrl);
+            // Silent retry once
+            try {
+              const compressed2 = await compressImage(raw, 800, 0.75);
+              const fd2 = new FormData();
+              fd2.append('image', compressed2);
+              await API.post(`/api/machines/${mid}/images`, fd2, {
+                headers: { 'Content-Type': 'multipart/form-data' }
+              });
+              toast('Image saved ✅', 'success');
+              await loadDetail();
+            } catch (_2) {
+              toast('Image upload failed', 'error');
+            }
+          }
+        })();
+      } else {
+        // Fallback: old blocking behavior
+        try {
+          toast('Compressing…', 'info');
+          const compressed = await compressImage(raw, 1080, 0.82);
+          const fd = new FormData();
+          fd.append('image', compressed);
+          toast('Uploading…', 'info');
+          await API.post(`/api/machines/${mid}/images`, fd, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
+          toast('Image saved', 'success');
+          await loadDetail();
+        } catch (_) { toast('Upload failed', 'error'); }
+      }
     });
   });
 
@@ -1299,6 +1387,9 @@ function bindDetail(j) {
   // WhatsApp share (admin only)
   document.getElementById('btn-share')?.addEventListener('click', () => generateAndShareJobCard(j, true));
 
+  // Job History (all roles)
+  document.getElementById('btn-job-history')?.addEventListener('click', () => showJobHistory(j));
+
   // Customer History (admin only)
   document.getElementById('btn-cust-history')?.addEventListener('click', () => showCustomerHistory(j.snap_mobile, j.snap_name));
 
@@ -1375,6 +1466,76 @@ async function showCustomerHistory(mobile, name) {
   };
   document.getElementById('ch-ledger-a')?.addEventListener('click', () => dlLedger('A'));
   document.getElementById('ch-ledger-b')?.addEventListener('click', () => dlLedger('B'));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JOB HISTORY TIMELINE MODAL
+// ─────────────────────────────────────────────────────────────────────────────
+async function showJobHistory(j) {
+  showModal(`
+    <h3 class="modal-title"><i class="fas fa-history" style="color:#7B1FA2"></i> Job History — ${esc(j.id)}</h3>
+    <div id="jh-list" style="max-height:65vh;overflow-y:auto;padding:4px 0">
+      <div class="loader-wrap"><i class="fas fa-spinner fa-spin"></i></div>
+    </div>
+    <div class="modal-footer">
+      <button onclick="closeModal()" class="btn-ghost" style="margin-left:auto">Close</button>
+    </div>`);
+
+  try {
+    const r = await API.get(`/api/jobs/${j.id}/history`);
+    const events = r.data || [];
+    const el = document.getElementById('jh-list');
+    if (!el) return;
+
+    if (!events.length) {
+      el.innerHTML = `<div style="text-align:center;padding:24px;color:#888">
+        <i class="fas fa-history fa-2x" style="margin-bottom:8px;display:block"></i>
+        No history recorded yet
+      </div>`;
+      return;
+    }
+
+    const ACTION_ICONS = {
+      'Job Created':     { icon: 'fa-plus-circle',   color: '#43A047' },
+      'Machine Added':   { icon: 'fa-tools',          color: '#1E88E5' },
+      'Status: delivered': { icon: 'fa-check-double', color: '#1E88E5' },
+      'Payment Updated': { icon: 'fa-rupee-sign',     color: '#FB8C00' },
+    };
+    function getIcon(action) {
+      if (action.startsWith('Machine:')) return { icon: 'fa-cog', color: '#9C27B0' };
+      if (action.startsWith('Status:'))  return { icon: 'fa-exchange-alt', color: '#E53935' };
+      return ACTION_ICONS[action] || { icon: 'fa-circle', color: '#888' };
+    }
+
+    el.innerHTML = `
+    <div style="position:relative;padding-left:28px">
+      <div style="position:absolute;left:10px;top:0;bottom:0;width:2px;background:#e0e0e0"></div>
+      ${events.map((ev, i) => {
+        const { icon, color } = getIcon(ev.action);
+        const isLast = i === events.length - 1;
+        return `
+        <div style="position:relative;margin-bottom:${isLast?'0':'16px'}">
+          <div style="position:absolute;left:-23px;top:2px;width:22px;height:22px;background:${color};border-radius:50%;display:flex;align-items:center;justify-content:center">
+            <i class="fas ${icon}" style="color:#fff;font-size:10px"></i>
+          </div>
+          <div style="background:#f8f9fa;border-radius:10px;padding:10px 14px;border-left:3px solid ${color}">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">
+              <span style="font-weight:700;color:#1a1a2e;font-size:14px">${esc(ev.action)}</span>
+              <span style="font-size:11px;color:#999">${fmtDate(ev.created_at)}</span>
+            </div>
+            ${ev.detail ? `<div style="font-size:13px;color:#555;margin-top:4px">${esc(ev.detail)}</div>` : ''}
+            <div style="font-size:12px;color:#aaa;margin-top:3px">
+              <i class="fas fa-user" style="margin-right:4px"></i>${esc(ev.user_name || 'System')}
+              <span style="margin-left:6px;background:${ev.user_role==='admin'?'#FFEBEE':'#E3F2FD'};color:${ev.user_role==='admin'?'#E53935':'#1E88E5'};border-radius:4px;padding:1px 6px;font-size:10px">${ev.user_role || 'system'}</span>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  } catch (_) {
+    const el = document.getElementById('jh-list');
+    if (el) el.innerHTML = `<p style="text-align:center;padding:16px;color:#888">Failed to load history</p>`;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1854,23 +2015,25 @@ function jobCardPrintHTML(j) {
       <div style="color:#fff;font-size:20px;font-weight:700;background:rgba(0,0,0,.2);padding:7px 18px;border-radius:10px">${sl(j.status)}</div>
     </div>`;
 
-  // All machines — NO height limit, NO overflow:hidden, NO slice
-  // Two-column layout per product: image left, details right
+  // All machines — 2-column card: image left, details right; show individual price
   const machinesBlock = `
-    <div style="padding:20px 50px 0">
-      <div style="font-size:17px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px">Products Registered (${(j.machines||[]).length})</div>
+    <div style="padding:16px 50px 0">
+      <div style="font-size:15px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">Products Registered (${(j.machines||[]).length})</div>
       ${(j.machines||[]).map((m,i) => {
         const firstImg = (m.images||[])[0];
         return `
-      <div style="background:#f8f9fa;border-radius:14px;padding:16px 20px;margin-bottom:12px;border-left:6px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:16px">
-        ${firstImg ? `<img src="${firstImg.url}" style="width:90px;height:90px;border-radius:10px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">` : `<div style="width:90px;height:90px;border-radius:10px;background:#e0e0e0;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:36px">⚡</div>`}
+      <div style="background:#f8f9fa;border-radius:12px;padding:14px 16px;margin-bottom:10px;border-left:5px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:14px">
+        ${firstImg
+          ? `<img src="${firstImg.url}" style="width:84px;height:84px;border-radius:8px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
+          : `<div style="width:84px;height:84px;border-radius:8px;background:#e8eaed;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:32px;color:#bbb">⚡</div>`}
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:4px">
-            <div style="font-size:22px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` ×${m.quantity}`:''}</div>
-            <div style="background:${sc(m.status)};color:#fff;border-radius:8px;padding:4px 12px;font-size:14px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
+            <div style="font-size:20px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-weight:600">×${m.quantity}</span>`:''}</div>
+            <div style="background:${sc(m.status)};color:#fff;border-radius:6px;padding:3px 10px;font-size:13px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
           </div>
-          ${m.product_complaint ? `<div style="font-size:16px;color:#666;margin-top:4px">${esc(m.product_complaint)}</div>` : ''}
-          ${m.work_done ? `<div style="font-size:15px;color:#2E7D32;margin-top:4px">✅ ${esc(m.work_done)}</div>` : ''}
+          ${m.product_complaint ? `<div style="font-size:14px;color:#666;margin-top:3px">${esc(m.product_complaint)}</div>` : ''}
+          ${m.work_done ? `<div style="font-size:13px;color:#2E7D32;margin-top:3px">✅ ${esc(m.work_done)}</div>` : ''}
+          <div style="margin-top:6px;font-size:18px;font-weight:700;color:#1a1a2e">Charges: <span style="color:#E53935">${fmtRs(m.charges || 0)}</span>${m.quantity>1?` <span style="color:#888;font-size:14px">(×${m.quantity} = ${fmtRs((m.charges||0)*m.quantity)})</span>`:''}</div>
         </div>
       </div>`;
       }).join('')}
@@ -1900,20 +2063,28 @@ function jobCardPrintHTML(j) {
       <div style="color:rgba(255,255,255,.4);font-size:12px;margin-top:3px">Subjected to Ahmedabad Jurisdiction only</div>
     </div>`;
 
-  // Customer info block
+  // Customer info block — 2-column grid: Left col (Name, Address) | Right col (Mobile, Date)
   const custBlock = `
-    <div style="padding:22px 50px 12px">
-      <div style="font-size:15px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">Customer Details</div>
-      <table style="width:100%;border-collapse:collapse">
-        <tr><td style="font-size:17px;color:#555;padding:6px 0;width:160px">Name</td>
-            <td style="font-size:22px;font-weight:800;color:#1a1a2e">${esc(j.snap_name)}</td></tr>
-        <tr><td style="font-size:17px;color:#555;padding:6px 0">Mobile</td>
-            <td style="font-size:20px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?' / '+j.snap_mobile2:''}</td></tr>
-        ${j.snap_address ? `<tr><td style="font-size:17px;color:#555;padding:6px 0">Address</td>
-            <td style="font-size:17px;color:#333">${esc(j.snap_address)}</td></tr>` : ''}
-        <tr><td style="font-size:17px;color:#555;padding:6px 0">Date</td>
-            <td style="font-size:17px;color:#555">${fmtDate(j.created_at)}</td></tr>
-      </table>
+    <div style="padding:20px 50px 12px">
+      <div style="font-size:15px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px">Customer Details</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 24px">
+        <div>
+          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Name</div>
+          <div style="font-size:22px;font-weight:800;color:#1a1a2e;line-height:1.2">${esc(j.snap_name)}</div>
+        </div>
+        <div>
+          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Mobile</div>
+          <div style="font-size:20px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?'<br><span style="font-size:16px">'+j.snap_mobile2+'</span>':''}</div>
+        </div>
+        <div>
+          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Address</div>
+          <div style="font-size:16px;color:#333;line-height:1.4">${j.snap_address ? esc(j.snap_address) : '<span style="color:#bbb">—</span>'}</div>
+        </div>
+        <div>
+          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Date</div>
+          <div style="font-size:17px;color:#555;font-weight:600">${fmtDate(j.created_at)}</div>
+        </div>
+      </div>
     </div>
     <div style="border-top:2px solid #f0f0f0;margin:0 50px 4px"></div>`;
 
@@ -1967,25 +2138,26 @@ async function generateAndShareJobCard(j, shareMode) {
 
     const actualH = el.scrollHeight || el.offsetHeight || 1920;
     const PAGE_H  = 1920; // pixels per page at scale:1
+    const SCALE   = 3;    // 3× resolution for crisp WhatsApp quality
 
-    // Capture full long canvas
+    // Capture full long canvas at 3× scale for high DPI
     const fullCanvas = await html2canvas(el, {
-      scale: 2,
+      scale: SCALE,
       useCORS: true,
       allowTaint: false,
       width: 1080,
       height: actualH,
       backgroundColor: '#ffffff',
       logging: false,
-      imageTimeout: 25000,
+      imageTimeout: 30000,
     });
 
     // Revoke blob URLs after capture
     blobUrls.forEach(u => URL.revokeObjectURL(u));
 
-    // Slice into 1080×1920 page canvases (scale:2 → each page = 2160×3840 raw)
-    const pageH_scaled = PAGE_H * 2;
-    const pageW_scaled = 1080  * 2;
+    // Slice into 1080×1920 page canvases (scale:3 → each page = 3240×5760 raw)
+    const pageH_scaled = PAGE_H * SCALE;
+    const pageW_scaled = 1080  * SCALE;
     const totalPages   = Math.ceil(fullCanvas.height / pageH_scaled);
     const pageBlobs    = [];
 
@@ -1999,7 +2171,7 @@ async function generateAndShareJobCard(j, shareMode) {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, pc.width, pc.height);
       ctx.drawImage(fullCanvas, 0, srcY, pageW_scaled, srcH, 0, 0, pageW_scaled, srcH);
-      await new Promise(res => pc.toBlob(b => { pageBlobs.push(b); res(); }, 'image/jpeg', 0.92));
+      await new Promise(res => pc.toBlob(b => { pageBlobs.push(b); res(); }, 'image/jpeg', 0.95));
     }
 
     const text     = shareText(j, totalPages > 1);
@@ -2066,51 +2238,69 @@ function shareText(j, multiPage) {
   const balance     = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
   const isRepaired  = j.status === 'repaired';
   const isDelivered = j.status === 'delivered';
-  const products    = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
   const total       = j.total_charges || 0;
+  const received    = j.received_amount || 0;
+
+  // Build itemized product list with individual prices
+  const products = (j.machines||[]).map(m => {
+    const price    = parseFloat(m.charges) || 0;
+    const qty      = m.quantity || 1;
+    const lineAmt  = price * qty;
+    const priceStr = price > 0 ? ` — ₹${lineAmt.toLocaleString('en-IN')}${qty>1?' (×'+qty+')':''}` : '';
+    return `• ${m.product_name}${qty>1?' ×'+qty:''}${priceStr}`;
+  }).join('\n') || '• Your device';
 
   if (isRepaired && balance > 0) {
-    return `Hello ${custName},
+    return `Hello *${custName}*,
 
-Your job *#${j.id}* is ready for delivery! 🎉
+Your repair job *#${j.id}* is ready! 🎉
 
 *Products Repaired:*
 ${products}
 
 *Payment Summary:*
-Total Amount: ₹${total}
-Amount Due: ₹${balance}
+Total Repair Amount: ₹${total.toLocaleString('en-IN')}
+Amount Received: ₹${received.toLocaleString('en-IN')}
+*Amount Due: ₹${balance.toLocaleString('en-IN')}*
 
 To receive your device, kindly complete the payment.
-Payment details (UPI / Bank) are given in the job card image.
+Payment details (UPI / Bank) are shown in the job card image.
 
-Please collect your device within *25 days* from the date of this notice. After this period, we shall not be held liable for any claims or loss.
+Please collect your device within *25 days* from this notice. After this period, we shall not be held liable for any claims, loss, or damage.
 
-— *ADITION ELECTRIC SOLUTION*`;
+— *ADITION ELECTRIC SOLUTION*
+📞 7801990001 | Gheekanta, Ahmedabad`;
   }
 
   if (isDelivered) {
-    return `Hello ${custName},
+    return `Hello *${custName}*,
 
-Your job *#${j.id}* has been delivered. ✅
-
-Thank you for choosing us!
-
-— *ADITION ELECTRIC SOLUTION*`;
-  }
-
-  // Generic / under_repair status
-  return `Hello ${custName},
-
-Your job *#${j.id}* has been registered. 🔧
+Your job *#${j.id}* has been successfully delivered. ✅
 
 *Products:*
 ${products}
 
-We will notify you once the repair is complete.
-Please collect within *25 days* of notification.
+Thank you for trusting us with your repair needs!
 
-— *ADITION ELECTRIC SOLUTION*`;
+— *ADITION ELECTRIC SOLUTION*
+📞 7801990001 | Gheekanta, Ahmedabad`;
+  }
+
+  // Under repair / just created — no amount yet or 0
+  const amtLine = total > 0 ? `\nEstimated Repair Amount: ₹${total.toLocaleString('en-IN')}` : '';
+  return `Hello *${custName}*,
+
+Your job *#${j.id}* has been registered with us. 🔧
+
+*Products:*
+${products}
+${amtLine}
+
+We will notify you once the repair is complete.
+Please collect your device within *25 days* of notification. After this period, we shall not be held liable for any claims, loss, or damage to uncollected items.
+
+— *ADITION ELECTRIC SOLUTION*
+📞 7801990001 | Gheekanta, Ahmedabad`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2419,6 +2609,31 @@ function reportsHTML() {
       </div>
       <button id="btn-jr" class="btn-sm btn-blue" style="background:#9C27B0"><i class="fas fa-download"></i> Export</button>
     </div>
+    <div class="report-card" id="ledger-report-card">
+      <div class="report-title"><i class="fas fa-book" style="color:#00897B"></i> Customer Ledger</div>
+      <div class="report-desc">View & export full job history for a customer</div>
+      <div class="form-group" style="margin-top:10px">
+        <label class="form-label">Customer Mobile <span class="req">*</span></label>
+        <div style="display:flex;gap:8px">
+          <input id="ledger-mobile" type="tel" class="form-input" placeholder="9876543210" inputmode="numeric" style="flex:1">
+          <button id="btn-ledger-search" class="btn-sm" style="background:#00897B;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;white-space:nowrap"><i class="fas fa-search"></i> Load</button>
+        </div>
+      </div>
+      <div class="form-row-2" style="margin-bottom:8px">
+        <div class="form-group"><label class="form-label">From Date</label>
+          <input id="ledger-from" type="date" class="form-input"></div>
+        <div class="form-group"><label class="form-label">To Date</label>
+          <input id="ledger-to" type="date" class="form-input"></div>
+      </div>
+      <div id="ledger-results" style="display:none;margin-top:8px">
+        <div id="ledger-table" style="overflow-x:auto;max-height:320px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px"></div>
+        <div id="ledger-totals" style="margin-top:8px;padding:10px 12px;background:#E8F5E9;border-radius:8px;font-size:14px;font-weight:700"></div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button id="btn-ledger-a" class="btn-sm btn-blue"><i class="fas fa-file-excel"></i> Export Summary</button>
+          <button id="btn-ledger-b" class="btn-sm" style="background:#7B1FA2;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer"><i class="fas fa-file-excel"></i> Export with Machines</button>
+        </div>
+      </div>
+    </div>
   </div>`;
 }
 function bindReports() {
@@ -2503,6 +2718,89 @@ function bindReports() {
       toast('Job summary downloaded ✅', 'success');
     } catch (_) { toast('Export failed', 'error'); }
   });
+
+  // ── Customer Ledger in-page view ──────────────────────────────────────────────
+  const loadLedger = async () => {
+    const mobile = document.getElementById('ledger-mobile')?.value.trim();
+    if (!mobile) { toast('Enter customer mobile', 'error'); return; }
+    const from   = document.getElementById('ledger-from')?.value || '';
+    const to     = document.getElementById('ledger-to')?.value   || '';
+    try {
+      toast('Loading ledger…', 'info');
+      const p = new URLSearchParams({ mobile });
+      if (from) p.set('from', from);
+      if (to)   p.set('to',   to);
+      const r = await API.get('/api/customers/history?' + p);
+      const jobs = r.data || [];
+      const resDiv = document.getElementById('ledger-results');
+      const tblDiv = document.getElementById('ledger-table');
+      const totDiv = document.getElementById('ledger-totals');
+      if (resDiv) resDiv.style.display = 'block';
+      if (!jobs.length) {
+        if (tblDiv) tblDiv.innerHTML = `<p style="padding:16px;color:#888;text-align:center">No jobs found for this mobile number</p>`;
+        if (totDiv) totDiv.textContent = '';
+        return;
+      }
+      let totalAmt = 0, totalRec = 0;
+      const rows = jobs.map(j => {
+        const amt  = parseFloat(j.total_charges) || 0;
+        const rec  = parseFloat(j.received_amount) || 0;
+        const due  = Math.max(0, amt - rec);
+        totalAmt += amt; totalRec += rec;
+        const sc2 = j.status === 'delivered' ? '#1E88E5' : j.status === 'repaired' ? '#43A047' : j.status === 'returned' ? '#B8860B' : '#E53935';
+        return `<tr style="border-bottom:1px solid #f5f5f5">
+          <td style="padding:8px 10px;font-weight:700;color:#1a1a2e;cursor:pointer;text-decoration:underline" onclick="closeModal();navigate('detail',{jobId:'${j.id}'})">${j.id}</td>
+          <td style="padding:8px 10px;color:#666">${fmtDate(j.created_at)}</td>
+          <td style="padding:8px 10px;font-size:12px"><span style="background:${sc2}22;color:${sc2};border-radius:4px;padding:2px 6px;font-weight:700">${sl(j.status)}</span></td>
+          <td style="padding:8px 10px;font-weight:700;text-align:right">${fmtRs(amt)}</td>
+          <td style="padding:8px 10px;color:#43A047;font-weight:600;text-align:right">${fmtRs(rec)}</td>
+          <td style="padding:8px 10px;color:${due>0?'#E53935':'#43A047'};font-weight:700;text-align:right">${fmtRs(due)}</td>
+        </tr>`;
+      }).join('');
+      if (tblDiv) tblDiv.innerHTML = `
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="background:#f8f9fa;position:sticky;top:0">
+            <th style="padding:8px 10px;text-align:left;color:#888;font-weight:700">Job #</th>
+            <th style="padding:8px 10px;text-align:left;color:#888;font-weight:700">Date</th>
+            <th style="padding:8px 10px;text-align:left;color:#888;font-weight:700">Status</th>
+            <th style="padding:8px 10px;text-align:right;color:#888;font-weight:700">Amount</th>
+            <th style="padding:8px 10px;text-align:right;color:#888;font-weight:700">Received</th>
+            <th style="padding:8px 10px;text-align:right;color:#888;font-weight:700">Due</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+      const totalDue = Math.max(0, totalAmt - totalRec);
+      if (totDiv) totDiv.innerHTML = `
+        <span>Total: <b>${fmtRs(totalAmt)}</b></span> &nbsp;|&nbsp;
+        <span style="color:#43A047">Received: <b>${fmtRs(totalRec)}</b></span> &nbsp;|&nbsp;
+        <span style="color:${totalDue>0?'#E53935':'#43A047'}">Total Receivable: <b>${fmtRs(totalDue)}</b></span>
+        &nbsp;<span style="color:#888;font-weight:400;font-size:12px">(${jobs.length} jobs)</span>`;
+      toast(`Loaded ${jobs.length} jobs`, 'success');
+    } catch (_) { toast('Ledger load failed', 'error'); }
+  };
+  document.getElementById('btn-ledger-search')?.addEventListener('click', loadLedger);
+  document.getElementById('ledger-mobile')?.addEventListener('keypress', e => { if (e.key === 'Enter') loadLedger(); });
+
+  const dlLedger = async (mode) => {
+    const mobile = document.getElementById('ledger-mobile')?.value.trim();
+    if (!mobile) { toast('Enter customer mobile first', 'error'); return; }
+    const from = document.getElementById('ledger-from')?.value || '';
+    const to   = document.getElementById('ledger-to')?.value   || '';
+    const p    = new URLSearchParams({ mobile, mode });
+    if (from) p.set('from', from);
+    if (to)   p.set('to',   to);
+    try {
+      const resp = await API.get('/api/reports/ledger?' + p, { responseType: 'blob' });
+      const url  = URL.createObjectURL(resp.data);
+      const a    = document.createElement('a'); a.href = url;
+      a.download = `AES_ledger_${mobile}_${mode}.xlsx`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      toast('Ledger downloaded ✅', 'success');
+    } catch (_) { toast('Export failed', 'error'); }
+  };
+  document.getElementById('btn-ledger-a')?.addEventListener('click', () => dlLedger('A'));
+  document.getElementById('btn-ledger-b')?.addEventListener('click', () => dlLedger('B'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2555,7 +2853,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v10.0<br>
+      ✨ adition™ since 1984 · v16.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -2644,6 +2942,44 @@ if (document.readyState === 'loading') {
 // Register Service Worker with explicit scope "/"
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+}
+
+// ── PWA Push Notification helper ─────────────────────────────────────────────
+async function requestPushPermission() {
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') return true;
+  if (Notification.permission === 'denied')  return false;
+  const result = await Notification.requestPermission();
+  return result === 'granted';
+}
+
+function showLocalNotification(title, body, tag) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  navigator.serviceWorker.ready.then(reg => {
+    reg.showNotification(title, {
+      body,
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      tag: tag || 'aes-notif',
+      renotify: true,
+      vibrate: [200, 100, 200],
+    });
+  }).catch(() => {
+    // Fallback: browser Notification API
+    new Notification(title, { body, icon: '/icons/icon-192.png', tag: tag || 'aes-notif' });
+  });
+}
+
+// Ask for push permission once after login
+window._pushPermAsked = false;
+function maybeAskPushPermission() {
+  if (window._pushPermAsked) return;
+  window._pushPermAsked = true;
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'default') {
+    // Delay 3s to not interrupt first render
+    setTimeout(() => requestPushPermission(), 3000);
+  }
 }
 
 // Capture PWA install prompt (Chrome/Edge/Android)

@@ -91,6 +91,18 @@ async function ensureDbSchema(db: D1Database) {
     // Add work_done / return_reason columns if not exist (idempotent)
     await db.prepare(`ALTER TABLE machines ADD COLUMN work_done TEXT`).run().catch(() => {})
     await db.prepare(`ALTER TABLE machines ADD COLUMN return_reason TEXT`).run().catch(() => {})
+    // Ensure job_history audit table exists
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS job_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail TEXT,
+        user_name TEXT,
+        user_role TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
@@ -281,10 +293,15 @@ app.post('/api/jobs', authMiddleware, async (c) => {
          isAdmin ? (body.received_amount || 0) : 0).run()
 
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first<any>()
+  // Log history: job created
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+    ).bind(jobId, 'Job Created', `Customer: ${customer_name} (${customer_mobile})`,
+           c.get('userName') || 'System', c.get('userRole') || 'admin').run()
+  } catch (_) {}
   return c.json(job, 201)
 })
-
-// ── API: Jobs — detail ────────────────────────────────────────────────────────
 app.get('/api/jobs/:id', authMiddleware, async (c) => {
   const id  = c.req.param('id')
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(id).first<any>()
@@ -348,6 +365,21 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
   fields.push(`updated_at=datetime('now')`)
   vals.push(id)
   await c.env.DB.prepare(`UPDATE jobs SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
+  // Log history for status changes and payment updates
+  try {
+    if (body.status) {
+      const detail = body.status === 'delivered'
+        ? `Delivered to: ${body.delivery_receiver_name || '?'} via ${body.delivery_method || 'in_person'}`
+        : `Status changed to ${body.status}`
+      await c.env.DB.prepare(
+        `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+      ).bind(id, `Status: ${body.status}`, detail, c.get('userName') || 'Admin', c.get('userRole') || 'admin').run()
+    } else if ('received_amount' in body) {
+      await c.env.DB.prepare(
+        `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+      ).bind(id, 'Payment Updated', `Received amount updated to ₹${body.received_amount}`, c.get('userName') || 'Admin', c.get('userRole') || 'admin').run()
+    }
+  } catch (_) {}
   return c.json({ ok: true })
 })
 
@@ -391,6 +423,13 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
     'under_repair'
   ).run()
   await updateJobStatus(c.env.DB, jobId)
+  // Log history: machine added
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+    ).bind(jobId, 'Machine Added', `${body.product_name}${body.product_complaint ? ' — ' + body.product_complaint : ''}`,
+           c.get('userName') || 'System', c.get('userRole') || 'admin').run()
+  } catch (_) {}
   return c.json({ id: result.meta.last_row_id }, 201)
 })
 
@@ -417,6 +456,17 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
       await c.env.DB.prepare(`UPDATE machines SET ${setClause} WHERE id=?`)
         .bind(body.status, ...extraVals, id).run()
       await updateJobStatus(c.env.DB, machine.job_id)
+      // Log history: machine status change
+      try {
+        const detail = body.status === 'repaired' && body.work_done
+          ? `${machine.product_name} → Repaired. Work: ${body.work_done}`
+          : body.status === 'returned' && body.return_reason
+          ? `${machine.product_name} → Returned. Reason: ${body.return_reason}`
+          : `${machine.product_name} → ${body.status}`
+        await c.env.DB.prepare(
+          `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+        ).bind(machine.job_id, `Machine: ${body.status}`, detail, c.get('userName') || 'Staff', c.get('userRole') || 'staff').run()
+      } catch (_) {}
       return c.json({ ok: true })
     }
     return c.json({ error: 'Nothing to update' }, 400)
@@ -433,10 +483,17 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
   vals.push(id)
   await c.env.DB.prepare(`UPDATE machines SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
   await updateJobStatus(c.env.DB, machine.job_id)
+  // Log history for admin machine status changes
+  try {
+    if (body.status) {
+      await c.env.DB.prepare(
+        `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+      ).bind(machine.job_id, `Machine: ${body.status}`, `${machine.product_name} → ${body.status}`,
+             c.get('userName') || 'Admin', 'admin').run()
+    }
+  } catch (_) {}
   return c.json({ ok: true })
 })
-
-// ── API: Machines — delete (admin only) ──────────────────────────────────────
 app.delete('/api/machines/:id', authMiddleware, adminOnly, async (c) => {
   const id      = c.req.param('id')
   const machine = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(id).first<any>()
@@ -651,6 +708,79 @@ app.get('/api/my-requests', authMiddleware, async (c) => {
     LIMIT 50
   `).bind(c.get('userId')).all<any>()
   return c.json(results)
+})
+
+// Staff: get recent assignment notifications (approved/denied in last 7 days)
+app.get('/api/my-notifications', authMiddleware, async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(`
+      SELECT r.id, r.status, r.created_at, r.resolved_at, r.job_id,
+             m.product_name
+      FROM assignment_requests r
+      JOIN machines m ON r.machine_id = m.id
+      WHERE r.staff_id=? AND r.status IN ('approved','denied')
+        AND r.resolved_at >= datetime('now','-7 days')
+      ORDER BY r.resolved_at DESC
+      LIMIT 10
+    `).bind(c.get('userId')).all<any>()
+    return c.json(results || [])
+  } catch (_) {
+    return c.json([])
+  }
+})
+
+// Job history endpoint — returns audit log for a job
+app.get('/api/jobs/:id/history', authMiddleware, async (c) => {
+  const jobId = c.req.param('id')
+  try {
+    // Ensure job_history table exists (lazy create)
+    await c.env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS job_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail TEXT,
+        user_name TEXT,
+        user_role TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `).run()
+    const { results } = await c.env.DB.prepare(`
+      SELECT * FROM job_history WHERE job_id=? ORDER BY created_at ASC
+    `).bind(jobId).all<any>()
+    return c.json(results || [])
+  } catch (_) {
+    return c.json([])
+  }
+})
+
+// Record a job history entry (internal helper — called after key actions)
+// POST /api/jobs/:id/history  body: { action, detail }
+app.post('/api/jobs/:id/history', authMiddleware, async (c) => {
+  const jobId = c.req.param('id')
+  let body: any
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const { action, detail } = body
+  if (!action) return c.json({ error: 'action required' }, 400)
+  try {
+    await c.env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS job_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail TEXT,
+        user_name TEXT,
+        user_role TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `).run()
+    await c.env.DB.prepare(
+      `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+    ).bind(jobId, action, detail || null, c.get('userName') || 'System', c.get('userRole') || 'staff').run()
+    return c.json({ ok: true })
+  } catch (_) {
+    return c.json({ ok: false })
+  }
 })
 
 // ── API: Staff management ─────────────────────────────────────────────────────
