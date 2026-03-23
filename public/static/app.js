@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v9                        ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v17                       ║
 // ║  "iQOO 13 Flagship Edition"                                          ║
 // ║  · 10ms debounce search · passive:true touch · touch-action:pan-y   ║
 // ║  · Strict RBAC: staff sees NO prices / NO share / NO mobiles        ║
@@ -43,6 +43,112 @@ const S = {
 };
 
 const CARD_H = 88;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMART SUGGESTIONS CACHE (localStorage-backed)
+// ─────────────────────────────────────────────────────────────────────────────
+const _sugCache = {
+  _key: 'AES_SMART_SUGGESTIONS_V2',
+  _data: null,
+  load() {
+    if (this._data) return this._data;
+    try { this._data = JSON.parse(localStorage.getItem(this._key) || '{}'); }
+    catch { this._data = {}; }
+    if (!this._data.products)   this._data.products   = [];
+    if (!this._data.complaints) this._data.complaints = [];
+    if (!this._data.amounts)    this._data.amounts    = [];
+    if (!this._data.prodMap)    this._data.prodMap     = {}; // product→[complaints]
+    if (!this._data.amtMap)     this._data.amtMap      = {}; // product→[amounts]
+    return this._data;
+  },
+  save() { try { localStorage.setItem(this._key, JSON.stringify(this._data)); } catch {} },
+  addProduct(name) {
+    if (!name) return;
+    const d = this.load();
+    d.products = [name, ...d.products.filter(p => p !== name)].slice(0, 30);
+    this.save();
+  },
+  addComplaint(comp, product) {
+    if (!comp) return;
+    const d = this.load();
+    d.complaints = [comp, ...d.complaints.filter(c => c !== comp)].slice(0, 30);
+    if (product) {
+      if (!d.prodMap[product]) d.prodMap[product] = [];
+      d.prodMap[product] = [comp, ...d.prodMap[product].filter(c => c !== comp)].slice(0, 10);
+    }
+    this.save();
+  },
+  addAmount(amt, product) {
+    if (!amt || amt <= 0) return;
+    const d = this.load();
+    d.amounts = [amt, ...d.amounts.filter(a => a !== amt)].slice(0, 20);
+    if (product) {
+      if (!d.amtMap[product]) d.amtMap[product] = [];
+      d.amtMap[product] = [amt, ...d.amtMap[product].filter(a => a !== amt)].slice(0, 8);
+    }
+    this.save();
+  },
+  getProducts(q) {
+    const d = this.load();
+    if (!q) return d.products.slice(0, 12);
+    const lq = q.toLowerCase();
+    return d.products.filter(p => p.toLowerCase().includes(lq)).slice(0, 12);
+  },
+  getComplaints(product) {
+    const d = this.load();
+    if (product && d.prodMap[product]?.length) return d.prodMap[product];
+    return d.complaints.slice(0, 10);
+  },
+  getAmounts(product) {
+    const d = this.load();
+    if (product && d.amtMap[product]?.length) return d.amtMap[product];
+    return d.amounts.slice(0, 10);
+  }
+};
+
+// Build suggestion tile HTML — scrollable horizontal row, tappable
+function suggestionTilesHTML(items, targetId, extraClass) {
+  if (!items || !items.length) return '';
+  return `<div class="sug-tiles ${extraClass||''}" data-target="${targetId}" style="display:flex;flex-wrap:nowrap;gap:6px;margin-top:6px;overflow-x:auto;overflow-y:hidden;padding:4px 0;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;scrollbar-width:none">
+    ${items.map(v => `<span class="sug-tile" data-val="${esc(String(v))}" style="background:#f0f4ff;color:#1a1a2e;border:1px solid #d0d8f0;border-radius:8px;padding:6px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;user-select:none;transition:background .15s,transform .1s;flex-shrink:0;-webkit-tap-highlight-color:transparent">${esc(String(v))}</span>`).join('')}
+  </div>`;
+}
+
+// Wire suggestion tiles — clicking sets value, animates, moves cursor to next field
+function bindSuggestionTiles(container, onSelect) {
+  (container || document).querySelectorAll('.sug-tile').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const target = document.getElementById(tile.closest('.sug-tiles')?.dataset.target);
+      if (target) {
+        if (target.tagName === 'TEXTAREA') {
+          const cur = target.value.trim();
+          target.value = cur ? cur + ', ' + tile.dataset.val : tile.dataset.val;
+        } else {
+          target.value = tile.dataset.val;
+        }
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+        // Visual feedback
+        tile.style.background = '#E8F5E9'; tile.style.borderColor = '#43A047';
+        tile.style.transform = 'scale(0.92)';
+        setTimeout(() => { tile.style.background = '#f0f4ff'; tile.style.borderColor = '#d0d8f0'; tile.style.transform = ''; }, 350);
+        // Auto-focus next field
+        autoFocusNext(target);
+      }
+      if (onSelect) onSelect(tile.dataset.val, target);
+    }, { passive: true });
+  });
+}
+
+// Auto-focus next logical input field
+function autoFocusNext(currentEl) {
+  if (!currentEl) return;
+  const form = currentEl.closest('.modal-sheet') || currentEl.closest('.card') || document;
+  const fields = Array.from(form.querySelectorAll('input:not([type=hidden]):not([type=file]),textarea,select'));
+  const idx = fields.indexOf(currentEl);
+  if (idx >= 0 && idx < fields.length - 1) {
+    setTimeout(() => { fields[idx + 1]?.focus(); fields[idx + 1]?.scrollIntoView?.({ block: 'center', behavior: 'smooth' }); }, 120);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // API
@@ -147,17 +253,34 @@ function setFilter(s) {
 // R2 endpoints require Bearer token; we fetch as blob then set src
 // ─────────────────────────────────────────────────────────────────────────────
 const _mediaCache = new Map();
+const _mediaLoading = new Map(); // prevent duplicate fetches
 async function loadAuthMedia(url, el, attr) {
   if (!url || !S.token) return;
   if (_mediaCache.has(url)) { el[attr] = _mediaCache.get(url); return; }
-  try {
-    const resp = await fetch(url, { headers: { Authorization: 'Bearer ' + S.token } });
-    if (!resp.ok) return;
-    const blob = await resp.blob();
-    const blobUrl = URL.createObjectURL(blob);
-    _mediaCache.set(url, blobUrl);
-    el[attr] = blobUrl;
-  } catch (_) {}
+  // Deduplicate: if already loading this URL, wait for it
+  if (_mediaLoading.has(url)) {
+    try { await _mediaLoading.get(url); if (_mediaCache.has(url)) el[attr] = _mediaCache.get(url); } catch {}
+    return;
+  }
+  const promise = (async () => {
+    try {
+      const resp = await fetch(url, { headers: { Authorization: 'Bearer ' + S.token } });
+      if (!resp.ok) return;
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      _mediaCache.set(url, blobUrl);
+      el[attr] = blobUrl;
+    } catch (_) {
+      // Silent retry once after 1s\n
+      try {
+        await new Promise(r => setTimeout(r, 1000));
+        const resp2 = await fetch(url, { headers: { Authorization: 'Bearer ' + S.token } });
+        if (resp2.ok) { const b = await resp2.blob(); const bu = URL.createObjectURL(b); _mediaCache.set(url, bu); el[attr] = bu; }
+      } catch {}
+    } finally { _mediaLoading.delete(url); }
+  })();
+  _mediaLoading.set(url, promise);
+  await promise;
 }
 
 function applyAuthImages(container) {
@@ -173,24 +296,46 @@ function applyAuthImages(container) {
 // IMAGE COMPRESSION (canvas, max 1080px, before R2 upload)
 // ─────────────────────────────────────────────────────────────────────────────
 function compressImage(file, maxW = 1080, quality = 0.82) {
-  return new Promise(resolve => {
-    const reader = new FileReader();
-    reader.onload = e => {
-      const img = new Image();
-      img.onload = () => {
-        const ratio = Math.min(1, maxW / Math.max(img.width, img.height));
-        const w = Math.round(img.width  * ratio);
-        const h = Math.round(img.height * ratio);
+  return new Promise((resolve, reject) => {
+    try {
+      // Use createImageBitmap for faster decoding when available
+      const useBlob = typeof createImageBitmap === 'function';
+      const processImg = (img, w, h) => {
+        const ratio = Math.min(1, maxW / Math.max(w, h));
+        const nw = Math.round(w * ratio);
+        const nh = Math.round(h * ratio);
         const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        canvas.width = nw; canvas.height = nh;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, nw, nh);
+        // Try WebP first (smaller file, faster upload), fallback to JPEG
+        const tryWebP = typeof canvas.toBlob === 'function';
+        const mime = tryWebP && canvas.toDataURL('image/webp').startsWith('data:image/webp') ? 'image/webp' : 'image/jpeg';
+        const ext = mime === 'image/webp' ? '.webp' : '.jpg';
         canvas.toBlob(blob => {
-          resolve(new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }));
-        }, 'image/jpeg', quality);
+          if (blob) resolve(new File([blob], file.name.replace(/\.[^.]+$/, ext), { type: mime }));
+          else resolve(file); // Fallback to original
+        }, mime, quality);
       };
-      img.src = e.target.result;
-    };
-    reader.readAsDataURL(file);
+
+      if (useBlob) {
+        createImageBitmap(file).then(bmp => {
+          processImg(bmp, bmp.width, bmp.height);
+        }).catch(() => {
+          // Fallback to FileReader
+          const reader = new FileReader();
+          reader.onload = e => { const img = new Image(); img.onload = () => processImg(img, img.width, img.height); img.onerror = () => resolve(file); img.src = e.target.result; };
+          reader.readAsDataURL(file);
+        });
+      } else {
+        const reader = new FileReader();
+        reader.onload = e => { const img = new Image(); img.onload = () => processImg(img, img.width, img.height); img.onerror = () => resolve(file); img.src = e.target.result; };
+        reader.onerror = () => resolve(file);
+        reader.readAsDataURL(file);
+      }
+    } catch (_) { resolve(file); }
   });
 }
 
@@ -707,10 +852,12 @@ function newJobHTML() {
       <div class="form-group">
         <label class="form-label">Product Name <span class="req">*</span></label>
         <input id="nj-product" type="text" class="form-input" placeholder='e.g. Samsung TV 55"' autocomplete="off">
+        <div id="nj-prod-sugs"></div>
       </div>
       <div class="form-group">
         <label class="form-label">Complaint / Issue <span class="req">*</span></label>
         <textarea id="nj-complaint" class="form-input" rows="2" placeholder="Describe the problem…"></textarea>
+        <div id="nj-comp-sugs"></div>
       </div>
       <div class="form-row-2">
         ${isAdmin() ? `
@@ -764,20 +911,28 @@ function bindNewJob() {
   }
 
   const mobileIn = document.getElementById('nj-mobile');
+  let _mobileLookupDone = '';
   async function lookupMobile() {
     const m = mobileIn?.value.trim();
-    if (!m || m.length < 10) return;
+    if (!m || m.length < 10 || m === _mobileLookupDone) return;
+    _mobileLookupDone = m;
     try {
       const r = await API.get('/api/customers/by-mobile', { params: { mobile: m } });
       if (r.data) {
         document.getElementById('nj-name').value    = r.data.name    || '';
         document.getElementById('nj-mobile2').value = r.data.mobile2 || '';
         document.getElementById('nj-address').value = r.data.address || '';
-        toast('Customer found — pre-filled', 'success');
+        toast('Customer found — auto-filled ✅', 'success');
+        // Auto-focus product name after auto-fill
+        setTimeout(() => document.getElementById('nj-product')?.focus(), 150);
       }
     } catch (_) {}
   }
   mobileIn?.addEventListener('blur', lookupMobile);
+  // Also trigger on input for instant lookup when 10+ digits typed
+  mobileIn?.addEventListener('input', debounce(() => {
+    if ((mobileIn?.value.trim() || '').length >= 10) lookupMobile();
+  }, 400));
 
   // Smart name autofill — suggest existing customers as user types
   const nameIn = document.getElementById('nj-name');
@@ -817,6 +972,32 @@ function bindNewJob() {
   nameIn?.addEventListener('blur', () => { setTimeout(removeSuggestBox, 200); });
   function removeSuggestBox() { document.getElementById('nj-suggest-box')?.remove(); }
 
+  // Smart suggestion tiles for new job product/complaint fields
+  const njProdSugs = document.getElementById('nj-prod-sugs');
+  const njCompSugs = document.getElementById('nj-comp-sugs');
+  function njUpdateProdSugs(q) {
+    if (!njProdSugs) return;
+    const sugs = _sugCache.getProducts(q);
+    njProdSugs.innerHTML = suggestionTilesHTML(sugs, 'nj-product', 'prod-sugs');
+    bindSuggestionTiles(njProdSugs, (v) => {
+      njUpdateCompSugs(v);
+      setTimeout(() => document.getElementById('nj-complaint')?.focus(), 100);
+    });
+  }
+  function njUpdateCompSugs(product) {
+    if (!njCompSugs) return;
+    const comps = _sugCache.getComplaints(product);
+    njCompSugs.innerHTML = suggestionTilesHTML(comps, 'nj-complaint', 'comp-sugs');
+    bindSuggestionTiles(njCompSugs);
+  }
+  njUpdateProdSugs('');
+  njUpdateCompSugs('');
+  document.getElementById('nj-product')?.addEventListener('input', debounce(e => {
+    const val = e.target.value.trim();
+    njUpdateProdSugs(val);
+    njUpdateCompSugs(val);
+  }, 150));
+
   // Image preview
   const imgInput = document.getElementById('nj-img');
   imgInput?.addEventListener('change', async e => {
@@ -839,6 +1020,13 @@ function bindNewJob() {
     const mobile  = document.getElementById('nj-mobile')?.value.trim();
     const product = document.getElementById('nj-product')?.value.trim();
     if (!name || !mobile || !product) { toast('Name, mobile & product are required', 'error'); return; }
+
+    // Save to suggestion cache for future use
+    _sugCache.addProduct(product);
+    const _njComp = document.getElementById('nj-complaint')?.value.trim();
+    if (_njComp) _sugCache.addComplaint(_njComp, product);
+    const _njChg = isAdmin() ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0;
+    if (_njChg > 0) _sugCache.addAmount(_njChg, product);
 
     const btn = document.getElementById('nj-submit');
     btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating…';
@@ -1675,14 +1863,53 @@ function showRequestAssignModal(machineId, jobId) {
 // MODALS — Add / Edit Machine, Delivery
 // ─────────────────────────────────────────────────────────────────────────────
 function showAddMachineModal(jobId) {
+  const sc = _sugCache;
+  const prodSugs = sc.getProducts();
+  const compSugs = sc.getComplaints();
+  const amtSugs  = sc.getAmounts();
+
   showModal(`
     <h3 class="modal-title"><i class="fas fa-plus" style="color:#E53935"></i> Add Machine</h3>
+
+    <!-- 1. Product Photo (Optional) -->
+    <div class="form-group">
+      <label class="form-label"><i class="fas fa-camera" style="color:#E53935"></i> Product Photo <span style="color:#999;font-size:12px">(optional)</span></label>
+      <div style="display:flex;gap:10px;align-items:center">
+        <label class="img-upload-label" style="flex:1">
+          <i class="fas fa-camera"></i> Take / Pick Photo
+          <input id="am-img" type="file" accept="image/*" capture="environment" style="display:none">
+        </label>
+        <div id="am-img-preview" style="display:none">
+          <img id="am-img-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #e0e0e0">
+          <button id="am-img-clear" style="margin-left:4px;background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Voice Note (Optional) -->
+    <div class="form-group">
+      <label class="form-label"><i class="fas fa-microphone" style="color:#E53935"></i> Voice Note <span style="color:#999;font-size:12px">(optional)</span></label>
+      <div id="am-audio-section">
+        <button id="am-audio-rec" class="btn-sm btn-orange" style="width:100%;padding:10px">
+          <i class="fas fa-microphone"></i> Record Voice Note
+        </button>
+        <div id="am-audio-preview" style="display:none;margin-top:6px;display:none;align-items:center;gap:8px">
+          <audio id="am-audio-play" controls style="flex:1;height:36px"></audio>
+          <button id="am-audio-clear" class="btn-sm btn-red" style="padding:6px 10px"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Product Name -->
     <div class="form-group">
       <label class="form-label">Product Name <span class="req">*</span></label>
-      <input id="am-prod" type="text" class="form-input" placeholder="e.g. LG AC 1.5T">
+      <input id="am-prod" type="text" class="form-input" placeholder="e.g. LG AC 1.5T" autocomplete="off">
+      <div id="am-prod-sugs">${suggestionTilesHTML(prodSugs, 'am-prod', 'prod-sugs')}</div>
     </div>
+
+    <!-- 4. Complaint / Issue -->
     <div class="form-group">
-      <label class="form-label">Complaint / Issue <span class="req">*</span></label>
+      <label class="form-label">Complaint / Issue</label>
       <div class="complaint-tags" id="am-ctags">
         <span class="ctag" data-t="Motor Issue">⚙️ Motor Issue</span>
         <span class="ctag" data-t="Power Issue">🔌 Power Issue</span>
@@ -1694,18 +1921,24 @@ function showAddMachineModal(jobId) {
         <span class="ctag" data-t="Speed Problem">💨 Speed Problem</span>
       </div>
       <textarea id="am-comp" class="form-input" rows="2" placeholder="Issue description…"></textarea>
+      <div id="am-comp-sugs">${suggestionTilesHTML(compSugs, 'am-comp', 'comp-sugs')}</div>
     </div>
+
+    <!-- 5. Repair Amount -->
     <div class="form-row-2">
       ${isAdmin() ? `
       <div class="form-group">
         <label class="form-label">Repair Amount (₹)</label>
         <input id="am-chg" type="number" class="form-input" min="0" placeholder="0" inputmode="decimal">
+        <div id="am-amt-sugs">${suggestionTilesHTML(amtSugs.map(a => '₹' + a), 'am-chg', 'amt-sugs')}</div>
       </div>` : ''}
       <div class="form-group">
         <label class="form-label">Qty</label>
         <input id="am-qty" type="number" class="form-input" min="1" value="1" inputmode="numeric">
       </div>
     </div>
+
+    <!-- 6. Assign Staff -->
     ${isAdmin() ? `
     <div class="form-group">
       <label class="form-label">Assign Staff</label>
@@ -1714,40 +1947,57 @@ function showAddMachineModal(jobId) {
         ${S.staff.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
       </select>
     </div>` : ''}
-    <!-- Image capture — upfront, part of machine form -->
-    <div class="form-group">
-      <label class="form-label"><i class="fas fa-camera" style="color:#888"></i> Product Photo</label>
-      <label class="img-upload-label">
-        <i class="fas fa-camera"></i> Take / Pick Photo
-        <input id="am-img" type="file" accept="image/*" capture="environment" style="display:none">
-      </label>
-      <div id="am-img-preview" style="display:none;margin-top:6px">
-        <img id="am-img-thumb" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:2px solid #e0e0e0">
-      </div>
-    </div>
+
     <div class="modal-footer">
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
-      <button id="am-save" class="btn-primary">Save Machine</button>
+      <button id="am-save" class="btn-primary"><i class="fas fa-save"></i> Save Machine</button>
     </div>`);
 
-  // Quick complaint tags — tap to append or set
-  document.querySelectorAll('#am-ctags .ctag').forEach(tag => {
-    tag.addEventListener('click', () => {
-      const comp = document.getElementById('am-comp');
-      if (!comp) return;
-      const cur = comp.value.trim();
-      const t   = tag.dataset.t;
-      comp.value = cur ? `${cur}, ${t}` : t;
-      tag.style.background = '#FFEBEE';
-      setTimeout(() => { tag.style.background = ''; }, 600);
+  // ── Wire suggestion tiles ──────────────────────────────────────────────────
+  // Product name tiles → clicking fills name + updates complaint/amount tiles + auto-focus complaint
+  bindSuggestionTiles(document.getElementById('am-prod-sugs'), (val, target) => {
+    updateComplaintTiles(val);
+    updateAmountTiles(val);
+    setTimeout(() => document.getElementById('am-comp')?.focus(), 100);
+  });
+  // Complaint tiles → clicking fills complaint + auto-focus amount
+  bindSuggestionTiles(document.getElementById('am-comp-sugs'), () => {
+    setTimeout(() => document.getElementById('am-chg')?.focus(), 100);
+  });
+  // Amount tiles → need special handling for ₹ prefix
+  document.querySelectorAll('#am-amt-sugs .sug-tile').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const chg = document.getElementById('am-chg');
+      if (chg) { chg.value = tile.dataset.val.replace(/[₹,]/g, ''); chg.dispatchEvent(new Event('input')); }
+      tile.style.background = '#E8F5E9';
+      setTimeout(() => { tile.style.background = '#f0f4ff'; }, 400);
+      setTimeout(() => document.getElementById('am-qty')?.focus(), 100);
     }, { passive: true });
   });
 
-  // Smart tag filter based on product name input
-  document.getElementById('am-prod')?.addEventListener('input', debounce(e => {
-    const name  = e.target.value.toLowerCase();
+  // Quick complaint tags — tap to append
+  function bindCTags() {
+    document.querySelectorAll('#am-ctags .ctag').forEach(tag => {
+      tag.addEventListener('click', () => {
+        const comp = document.getElementById('am-comp');
+        if (!comp) return;
+        const cur = comp.value.trim();
+        comp.value = cur ? `${cur}, ${tag.dataset.t}` : tag.dataset.t;
+        tag.style.background = '#FFEBEE';
+        setTimeout(() => { tag.style.background = ''; }, 600);
+      }, { passive: true });
+    });
+  }
+  bindCTags();
+
+  function updateComplaintTiles(productName) {
+    const comps = _sugCache.getComplaints(productName);
+    const el = document.getElementById('am-comp-sugs');
+    if (el) { el.innerHTML = suggestionTilesHTML(comps, 'am-comp', 'comp-sugs'); bindSuggestionTiles(el); }
+    // Also update complaint quick-tags based on product type
     const tagEl = document.getElementById('am-ctags');
     if (!tagEl) return;
+    const name = (productName || '').toLowerCase();
     const clipperTags  = ['⚙️ Motor Issue','🔪 Blade Problem','🔊 Noise Issue','💨 Speed Problem','❌ Not Working'];
     const dryerTags    = ['🌡️ Heating Issue','🔌 Power Issue','💨 Speed Problem','🔊 Noise Issue','❌ Not Working'];
     const trimmerTags  = ['⚙️ Motor Issue','🔋 Charging Issue','🔪 Blade Problem','🔌 Power Issue','❌ Not Working'];
@@ -1758,62 +2008,139 @@ function showAddMachineModal(jobId) {
     else if (/dryer|drier|blower/.test(name)) tags = dryerTags;
     else if (/trimmer|trim/.test(name))       tags = trimmerTags;
     else if (/ac|air/.test(name))             tags = acTags;
-    tagEl.innerHTML = tags.map(t => {
-      const raw = t.replace(/[^a-zA-Z ]/g,'').trim();
-      return `<span class="ctag" data-t="${raw}">${t}</span>`;
-    }).join('');
-    tagEl.querySelectorAll('.ctag').forEach(tag => {
-      tag.addEventListener('click', () => {
-        const comp = document.getElementById('am-comp');
-        if (!comp) return;
-        const cur = comp.value.trim();
-        comp.value = cur ? `${cur}, ${tag.dataset.t}` : tag.dataset.t;
+    tagEl.innerHTML = tags.map(t => { const raw = t.replace(/[^a-zA-Z ]/g,'').trim(); return `<span class="ctag" data-t="${raw}">${t}</span>`; }).join('');
+    bindCTags();
+  }
+
+  function updateAmountTiles(productName) {
+    const amts = _sugCache.getAmounts(productName);
+    const el = document.getElementById('am-amt-sugs');
+    if (!el) return;
+    el.innerHTML = suggestionTilesHTML(amts.map(a => '₹' + a), 'am-chg', 'amt-sugs');
+    el.querySelectorAll('.sug-tile').forEach(tile => {
+      tile.addEventListener('click', () => {
+        const chg = document.getElementById('am-chg');
+        if (chg) { chg.value = tile.dataset.val.replace(/[₹,]/g, ''); }
+        tile.style.background = '#E8F5E9';
+        setTimeout(() => { tile.style.background = '#f0f4ff'; }, 400);
       }, { passive: true });
     });
-  }, 200));
+  }
 
+  // Smart product name input — filter suggestions + update complaint/amount tiles as user types
+  document.getElementById('am-prod')?.addEventListener('input', debounce(e => {
+    const val = e.target.value.trim();
+    const sugs = _sugCache.getProducts(val);
+    const el = document.getElementById('am-prod-sugs');
+    if (el) {
+      el.innerHTML = suggestionTilesHTML(sugs, 'am-prod', 'prod-sugs');
+      bindSuggestionTiles(el, (v) => {
+        updateComplaintTiles(v); updateAmountTiles(v);
+        setTimeout(() => document.getElementById('am-comp')?.focus(), 100);
+      });
+    }
+    updateComplaintTiles(val);
+    updateAmountTiles(val);
+  }, 150));
+
+  // Image preview (instant)
   document.getElementById('am-img')?.addEventListener('change', e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      document.getElementById('am-img-thumb').src = ev.target.result;
-      document.getElementById('am-img-preview').style.display = 'block';
-    };
-    reader.readAsDataURL(file);
+    const file = e.target.files[0]; if (!file) return;
+    const blobUrl = URL.createObjectURL(file);
+    document.getElementById('am-img-thumb').src = blobUrl;
+    document.getElementById('am-img-preview').style.display = 'flex';
+  });
+  document.getElementById('am-img-clear')?.addEventListener('click', () => {
+    const inp = document.getElementById('am-img'); if (inp) inp.value = '';
+    document.getElementById('am-img-preview').style.display = 'none';
   });
 
+  // Audio recorder (inline — no separate modal)
+  let _amAudioBlob = null, _amAudioMime = 'audio/webm';
+  document.getElementById('am-audio-rec')?.addEventListener('click', async () => {
+    const btn = document.getElementById('am-audio-rec');
+    if (S.audioRecorder && S.audioRecorder.state === 'recording') {
+      // Stop recording
+      stopAudioRecorder();
+      btn.innerHTML = '<i class="fas fa-microphone"></i> Record Voice Note';
+      btn.style.background = '';
+      return;
+    }
+    // Start recording
+    const ok = await startAudioRecorder((blob, mime) => {
+      _amAudioBlob = blob; _amAudioMime = mime;
+      const url = URL.createObjectURL(blob);
+      const aud = document.getElementById('am-audio-play');
+      if (aud) aud.src = url;
+      const prev = document.getElementById('am-audio-preview');
+      if (prev) prev.style.display = 'flex';
+      btn.innerHTML = '<i class="fas fa-microphone"></i> Record Voice Note';
+      btn.style.background = '';
+    });
+    if (ok) {
+      btn.innerHTML = '<i class="fas fa-stop" style="animation:pulse 1s infinite"></i> Stop Recording';
+      btn.style.background = '#E53935';
+    }
+  });
+  document.getElementById('am-audio-clear')?.addEventListener('click', () => {
+    _amAudioBlob = null;
+    document.getElementById('am-audio-preview').style.display = 'none';
+    stopAudioRecorder();
+  });
+
+  // ── Save machine ────────────────────────────────────────────────────────────
   document.getElementById('am-save')?.addEventListener('click', async () => {
     const prod = document.getElementById('am-prod')?.value.trim();
     if (!prod) { toast('Product name required', 'error'); return; }
+    const complaint = document.getElementById('am-comp')?.value.trim() || null;
+    const charges   = isAdmin() ? (parseFloat(document.getElementById('am-chg')?.value) || 0) : 0;
+    const quantity  = parseInt(document.getElementById('am-qty')?.value) || 1;
+    const staffId   = isAdmin() ? (document.getElementById('am-staff')?.value || null) : null;
+
+    // Save to suggestion cache
+    _sugCache.addProduct(prod);
+    if (complaint) _sugCache.addComplaint(complaint, prod);
+    if (charges > 0) _sugCache.addAmount(charges, prod);
+
     const btn = document.getElementById('am-save');
-    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…';
     try {
       const machR = await API.post(`/api/jobs/${jobId}/machines`, {
-        product_name:      prod,
-        product_complaint: document.getElementById('am-comp')?.value.trim() || null,
-        charges:           isAdmin() ? (parseFloat(document.getElementById('am-chg')?.value) || 0) : 0,
-        quantity:          parseInt(document.getElementById('am-qty')?.value) || 1,
-        assigned_staff_id: isAdmin() ? (document.getElementById('am-staff')?.value || null) : null,
+        product_name: prod, product_complaint: complaint,
+        charges, quantity, assigned_staff_id: staffId,
       });
+      const machId = machR.data.id;
 
-      // Upload image if selected
+      // Upload image + audio in background (non-blocking for modal close)
       const imgFile = document.getElementById('am-img')?.files[0];
-      if (imgFile && machR.data.id) {
-        try {
-          const compressed = await compressImage(imgFile, 1080, 0.82);
-          const fd = new FormData();
-          fd.append('image', compressed);
-          await API.post(`/api/machines/${machR.data.id}/images`, fd, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
-        } catch (_) {}
-      }
+      closeModal(); toast('Machine added ✅', 'success');
 
-      closeModal(); toast('Machine added', 'success'); await loadDetail();
+      // Async uploads after modal close
+      const uploads = [];
+      if (imgFile && machId) {
+        uploads.push((async () => {
+          try {
+            const compressed = await compressImage(imgFile, 1080, 0.82);
+            const fd = new FormData(); fd.append('image', compressed);
+            await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+          } catch (_) { toast('Image upload failed', 'error'); }
+        })());
+      }
+      if (_amAudioBlob && machId) {
+        uploads.push((async () => {
+          try {
+            const ext  = _amAudioMime.includes('ogg') ? '.ogg' : '.webm';
+            const file = new File([_amAudioBlob], `voice_note${ext}`, { type: _amAudioMime });
+            const fd   = new FormData(); fd.append('audio', file);
+            await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+          } catch (_) { toast('Audio upload failed', 'error'); }
+        })());
+      }
+      if (uploads.length) await Promise.allSettled(uploads);
+      await loadDetail();
     } catch (_) {
       toast('Failed to add machine', 'error');
-      btn.disabled = false; btn.innerHTML = 'Save Machine';
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Machine';
     }
   });
 }
@@ -1955,140 +2282,135 @@ function jobCardPrintHTML(j) {
   const color      = sc(j.status);
   const isDelivered = j.status === 'delivered';
   const isRepaired  = j.status === 'repaired';
-  const showPayment = balance > 0 && !isDelivered; // Show QR whenever there's a balance (except delivered)
+  const showPayment = balance > 0 && !isDelivered;
 
   const deliveryBlock = isDelivered ? `
-    <div style="margin:0 50px 24px;background:#E3F2FD;border:3px solid #1E88E5;border-radius:16px;padding:22px">
-      <div style="font-size:22px;font-weight:800;color:#1565C0;margin-bottom:12px">📦 Delivery Information</div>
-      <table style="width:100%;border-collapse:collapse;font-size:18px">
-        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:5px 0;width:200px">Received By</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
-        ${j.delivery_receiver_mobile ? `<tr><td style="color:#555;padding:5px 0">Mobile</td><td style="font-weight:700;color:#1565C0">${j.delivery_receiver_mobile}</td></tr>` : ''}
-        ${j.delivery_method          ? `<tr><td style="color:#555;padding:5px 0">Method</td><td style="font-weight:700;color:#1a1a2e">${j.delivery_method==='courier'?'Courier':'In Person'}</td></tr>` : ''}
-        ${j.delivery_courier_name    ? `<tr><td style="color:#555;padding:5px 0">Courier</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_courier_name)}</td></tr>` : ''}
-        ${j.delivery_tracking        ? `<tr><td style="color:#555;padding:5px 0">Tracking</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_tracking)}</td></tr>` : ''}
-        ${j.delivered_at             ? `<tr><td style="color:#555;padding:5px 0">Date</td><td style="font-weight:700;color:#1a1a2e">${fmtDate(j.delivered_at)}</td></tr>` : ''}
+    <div style="margin:0 30px 14px;background:#E3F2FD;border:2px solid #1E88E5;border-radius:12px;padding:14px 16px">
+      <div style="font-size:18px;font-weight:800;color:#1565C0;margin-bottom:8px">📦 Delivery Information</div>
+      <table style="width:100%;border-collapse:collapse;font-size:16px">
+        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:3px 0;width:160px">Received By</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
+        ${j.delivery_receiver_mobile ? `<tr><td style="color:#555;padding:3px 0">Mobile</td><td style="font-weight:700;color:#1565C0">${j.delivery_receiver_mobile}</td></tr>` : ''}
+        ${j.delivery_method          ? `<tr><td style="color:#555;padding:3px 0">Method</td><td style="font-weight:700">${j.delivery_method==='courier'?'Courier':'In Person'}</td></tr>` : ''}
+        ${j.delivery_courier_name    ? `<tr><td style="color:#555;padding:3px 0">Courier</td><td style="font-weight:700">${esc(j.delivery_courier_name)}</td></tr>` : ''}
+        ${j.delivery_tracking        ? `<tr><td style="color:#555;padding:3px 0">Tracking</td><td style="font-weight:700">${esc(j.delivery_tracking)}</td></tr>` : ''}
+        ${j.delivered_at             ? `<tr><td style="color:#555;padding:3px 0">Date</td><td style="font-weight:700">${fmtDate(j.delivered_at)}</td></tr>` : ''}
       </table>
     </div>` : `
-    <div style="margin:0 50px 24px;background:#fff8e1;border:3px solid #FFC107;border-radius:16px;padding:22px">
-      <div style="font-size:22px;font-weight:800;color:#e65100;margin-bottom:8px">⚠️ Collection Notice</div>
-      <div style="font-size:18px;color:#5D4037;line-height:1.65">
+    <div style="margin:0 30px 14px;background:#fff8e1;border:2px solid #FFC107;border-radius:12px;padding:14px 16px">
+      <div style="font-size:17px;font-weight:800;color:#e65100;margin-bottom:6px">⚠️ Collection Notice</div>
+      <div style="font-size:15px;color:#5D4037;line-height:1.5">
         Kindly collect your machine(s) within <strong>25 days</strong> from the date of this notice.
         After this period, we shall <strong>not be held liable</strong> for any claims, loss, or damage to uncollected items.
       </div>
     </div>`;
 
-  // Payment block — shown when balance > 0 (except delivered)
   const paymentBlock = showPayment ? `
-    <div style="margin:0 50px 24px;background:#E8F5E9;border:3px solid #43A047;border-radius:16px;padding:24px">
-      <div style="font-size:22px;font-weight:900;color:#2E7D32;margin-bottom:14px;text-align:center">💳 Complete Payment to Proceed</div>
-      <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
-        <!-- QR Code -->
+    <div style="margin:0 30px 14px;background:#E8F5E9;border:2px solid #43A047;border-radius:12px;padding:16px">
+      <div style="font-size:18px;font-weight:900;color:#2E7D32;margin-bottom:10px;text-align:center">💳 Complete Payment to Proceed</div>
+      <div style="display:flex;gap:16px;align-items:flex-start">
         <div style="text-align:center;flex-shrink:0">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:180px;height:180px;border-radius:10px;border:2px solid #43A047" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:14px;color:#555;margin-top:6px">Scan to Pay ₹${balance}</div>
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:150px;height:150px;border-radius:8px;border:2px solid #43A047" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:13px;color:#555;margin-top:4px">Scan to Pay ₹${balance}</div>
         </div>
-        <div style="flex:1;min-width:200px">
-          <div style="font-size:18px;font-weight:800;color:#1a1a2e;margin-bottom:10px">UPI / Bank Details</div>
-          <table style="border-collapse:collapse;font-size:16px;width:100%">
-            <tr><td style="color:#555;padding:4px 0;width:100px">UPI</td><td style="font-weight:700;color:#1a1a2e">9375940444@okbizaxis</td></tr>
-            <tr><td style="color:#555;padding:4px 0">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-            <tr><td colspan="2" style="padding:8px 0 3px"><hr style="border:1px solid #ccc"></td></tr>
-            <tr><td style="color:#555;padding:4px 0">Bank</td><td style="font-weight:700">State Bank Of India</td></tr>
-            <tr><td style="color:#555;padding:4px 0">Name</td><td style="font-weight:700">ADITION ELECTRIC SOLUTION</td></tr>
-            <tr><td style="color:#555;padding:4px 0">A/C No.</td><td style="font-weight:700;color:#1a1a2e">37321811864</td></tr>
-            <tr><td style="color:#555;padding:4px 0">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
-            <tr><td style="color:#555;padding:4px 0">Branch</td><td style="font-weight:700">Patharkuva</td></tr>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:16px;font-weight:800;color:#1a1a2e;margin-bottom:8px">UPI / Bank Details</div>
+          <table style="border-collapse:collapse;font-size:14px;width:100%">
+            <tr><td style="color:#555;padding:3px 0;width:80px">UPI</td><td style="font-weight:700">9375940444@okbizaxis</td></tr>
+            <tr><td style="color:#555;padding:3px 0">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+            <tr><td colspan="2" style="padding:4px 0"><hr style="border:1px solid #ccc"></td></tr>
+            <tr><td style="color:#555;padding:3px 0">Bank</td><td style="font-weight:700">State Bank Of India</td></tr>
+            <tr><td style="color:#555;padding:3px 0">A/C No.</td><td style="font-weight:700">37321811864</td></tr>
+            <tr><td style="color:#555;padding:3px 0">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
           </table>
         </div>
       </div>
     </div>` : '';
 
-  // Header (repeated on each page via CSS — actually used once; pages split in JS)
+  // Compact header
   const headerBlock = `
-    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);padding:36px 50px 28px;text-align:center">
-      <div style="width:76px;height:76px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:18px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:44px">⚡</div>
-      <div style="color:#fff;font-size:32px;font-weight:900;letter-spacing:2px">ADITION ELECTRIC SOLUTION</div>
-      <div style="color:rgba(255,255,255,.65);font-size:16px;margin-top:4px;letter-spacing:1px">SERVICE MANAGEMENT SYSTEM</div>
+    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);padding:24px 30px 18px;text-align:center">
+      <div style="width:56px;height:56px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:14px;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;font-size:32px">⚡</div>
+      <div style="color:#fff;font-size:28px;font-weight:900;letter-spacing:2px">ADITION ELECTRIC SOLUTION</div>
+      <div style="color:rgba(255,255,255,.6);font-size:14px;margin-top:3px;letter-spacing:1px">SERVICE MANAGEMENT SYSTEM</div>
     </div>
-    <div style="background:${color};padding:16px 50px;display:flex;justify-content:space-between;align-items:center">
-      <div style="color:#fff;font-size:42px;font-weight:900;letter-spacing:3px">${j.id}</div>
-      <div style="color:#fff;font-size:20px;font-weight:700;background:rgba(0,0,0,.2);padding:7px 18px;border-radius:10px">${sl(j.status)}</div>
+    <div style="background:${color};padding:12px 30px;display:flex;justify-content:space-between;align-items:center">
+      <div style="color:#fff;font-size:36px;font-weight:900;letter-spacing:3px">${j.id}</div>
+      <div style="color:#fff;font-size:18px;font-weight:700;background:rgba(0,0,0,.2);padding:5px 14px;border-radius:8px">${sl(j.status)}</div>
     </div>`;
 
-  // All machines — 2-column card: image left, details right; show individual price
+  // Machines — compact cards with images and individual prices
   const machinesBlock = `
-    <div style="padding:16px 50px 0">
-      <div style="font-size:15px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">Products Registered (${(j.machines||[]).length})</div>
+    <div style="padding:10px 30px 0">
+      <div style="font-size:13px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px">Products (${(j.machines||[]).length})</div>
       ${(j.machines||[]).map((m,i) => {
         const firstImg = (m.images||[])[0];
         return `
-      <div style="background:#f8f9fa;border-radius:12px;padding:14px 16px;margin-bottom:10px;border-left:5px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:14px">
+      <div style="background:#f8f9fa;border-radius:10px;padding:10px 12px;margin-bottom:8px;border-left:4px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:10px">
         ${firstImg
-          ? `<img src="${firstImg.url}" style="width:84px;height:84px;border-radius:8px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
-          : `<div style="width:84px;height:84px;border-radius:8px;background:#e8eaed;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:32px;color:#bbb">⚡</div>`}
+          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:70px;height:70px;border-radius:6px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
+          : `<div style="width:70px;height:70px;border-radius:6px;background:#e8eaed;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:26px;color:#bbb">⚡</div>`}
         <div style="flex:1;min-width:0">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:4px">
-            <div style="font-size:20px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-weight:600">×${m.quantity}</span>`:''}</div>
-            <div style="background:${sc(m.status)};color:#fff;border-radius:6px;padding:3px 10px;font-size:13px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:4px">
+            <div style="font-size:18px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-weight:600">×${m.quantity}</span>`:''}</div>
+            <div style="background:${sc(m.status)};color:#fff;border-radius:5px;padding:2px 8px;font-size:12px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
           </div>
-          ${m.product_complaint ? `<div style="font-size:14px;color:#666;margin-top:3px">${esc(m.product_complaint)}</div>` : ''}
-          ${m.work_done ? `<div style="font-size:13px;color:#2E7D32;margin-top:3px">✅ ${esc(m.work_done)}</div>` : ''}
-          <div style="margin-top:6px;font-size:18px;font-weight:700;color:#1a1a2e">Charges: <span style="color:#E53935">${fmtRs(m.charges || 0)}</span>${m.quantity>1?` <span style="color:#888;font-size:14px">(×${m.quantity} = ${fmtRs((m.charges||0)*m.quantity)})</span>`:''}</div>
+          ${m.product_complaint ? `<div style="font-size:13px;color:#666;margin-top:2px">${esc(m.product_complaint)}</div>` : ''}
+          ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:2px">✅ ${esc(m.work_done)}</div>` : ''}
+          <div style="margin-top:4px;font-size:16px;font-weight:700;color:#1a1a2e">₹${((m.charges||0)*1).toLocaleString('en-IN')}${m.quantity>1?` <span style="color:#888;font-size:13px">(×${m.quantity} = ${fmtRs((m.charges||0)*m.quantity)})</span>`:''}</div>
         </div>
       </div>`;
       }).join('')}
     </div>`;
 
   const financialBlock = `
-    <div style="margin:16px 50px;background:#f8f9fa;border-radius:14px;padding:18px 22px">
-      <div style="font-size:16px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">Financial Summary</div>
-      <div style="display:flex;justify-content:space-between;font-size:22px;padding:7px 0;border-bottom:1px solid #e0e0e0">
+    <div style="margin:10px 30px;background:#f8f9fa;border-radius:12px;padding:14px 18px">
+      <div style="display:flex;justify-content:space-between;font-size:18px;padding:5px 0;border-bottom:1px solid #e0e0e0">
         <span style="color:#555;font-weight:600">Total Amount</span><span style="font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:22px;padding:7px 0;border-bottom:1px solid #e0e0e0">
+      <div style="display:flex;justify-content:space-between;font-size:18px;padding:5px 0;border-bottom:1px solid #e0e0e0">
         <span style="color:#555;font-weight:600">Amount Received</span><span style="font-weight:800;color:#43A047">${fmtRs(received)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:26px;padding:9px 0">
+      <div style="display:flex;justify-content:space-between;font-size:22px;padding:7px 0">
         <span style="font-weight:700;color:#1a1a2e">Amount Due</span>
         <span style="font-weight:900;color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
       </div>
     </div>`;
 
-  const noteBlock = j.note ? `<div style="margin:0 50px 12px;background:#fffde7;border-radius:10px;padding:14px 18px;font-size:17px;color:#795548"><b>Note:</b> ${esc(j.note)}</div>` : '';
+  const noteBlock = j.note ? `<div style="margin:0 30px 8px;background:#fffde7;border-radius:8px;padding:10px 14px;font-size:15px;color:#795548"><b>Note:</b> ${esc(j.note)}</div>` : '';
 
   const footerBlock = `
-    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:24px 50px;margin-top:auto">
-      <div style="color:#fff;font-size:18px;font-weight:700">✨ adition™ since 1984</div>
-      <div style="color:rgba(255,255,255,.65);font-size:14px;margin-top:4px">Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001</div>
-      <div style="color:rgba(255,255,255,.4);font-size:12px;margin-top:3px">Subjected to Ahmedabad Jurisdiction only</div>
+    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:18px 30px;margin-top:auto">
+      <div style="color:#fff;font-size:16px;font-weight:700">✨ adition™ since 1984</div>
+      <div style="color:rgba(255,255,255,.6);font-size:13px;margin-top:3px">Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001</div>
+      <div style="color:rgba(255,255,255,.35);font-size:11px;margin-top:2px">Subjected to Ahmedabad Jurisdiction only</div>
     </div>`;
 
-  // Customer info block — 2-column grid: Left col (Name, Address) | Right col (Mobile, Date)
+  // Customer info — 2-column: Name/Mobile left, Address/Date right — compact, mobile-optimized
   const custBlock = `
-    <div style="padding:20px 50px 12px">
-      <div style="font-size:15px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:14px">Customer Details</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 24px">
+    <div style="padding:14px 30px 8px">
+      <div style="font-size:13px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">Customer Details</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 20px">
         <div>
-          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Name</div>
-          <div style="font-size:22px;font-weight:800;color:#1a1a2e;line-height:1.2">${esc(j.snap_name)}</div>
+          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Name</div>
+          <div style="font-size:20px;font-weight:800;color:#1a1a2e;line-height:1.2">${esc(j.snap_name)}</div>
         </div>
         <div>
-          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Mobile</div>
-          <div style="font-size:20px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?'<br><span style="font-size:16px">'+j.snap_mobile2+'</span>':''}</div>
+          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Mobile</div>
+          <div style="font-size:18px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?'<br><span style="font-size:14px">'+j.snap_mobile2+'</span>':''}</div>
         </div>
         <div>
-          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Address</div>
-          <div style="font-size:16px;color:#333;line-height:1.4">${j.snap_address ? esc(j.snap_address) : '<span style="color:#bbb">—</span>'}</div>
+          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Address</div>
+          <div style="font-size:14px;color:#333;line-height:1.3">${j.snap_address ? esc(j.snap_address) : '<span style="color:#bbb">—</span>'}</div>
         </div>
         <div>
-          <div style="font-size:13px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Date</div>
-          <div style="font-size:17px;color:#555;font-weight:600">${fmtDate(j.created_at)}</div>
+          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Date</div>
+          <div style="font-size:15px;color:#555;font-weight:600">${fmtDate(j.created_at)}</div>
         </div>
       </div>
     </div>
-    <div style="border-top:2px solid #f0f0f0;margin:0 50px 4px"></div>`;
+    <div style="border-top:2px solid #f0f0f0;margin:0 30px 4px"></div>`;
 
-  // Single long scrollable page — JS will slice into 1920px segments
+  // Compact layout — 1080px wide, minimal padding, fits more products per page
   return `
   <div style="width:1080px;background:#fff;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column">
     ${headerBlock}
@@ -2114,50 +2436,69 @@ async function generateAndShareJobCard(j, shareMode) {
     // Temporarily make print element visible to measure actual height
     el.style.left = '-99999px'; el.style.top = '0';
 
-    // Pre-load all authenticated images as blob URLs so html2canvas can paint them
+    // Pre-load ALL authenticated images as blob URLs so html2canvas can paint them
     const blobUrls = [];
     const imgEls = Array.from(el.querySelectorAll('img'));
-    await Promise.allSettled(imgEls.map(img => {
+    // Fetch all images in parallel, wait for ALL to complete
+    const imgResults = await Promise.allSettled(imgEls.map(img => {
       const src = img.getAttribute('src') || img.getAttribute('data-auth-src') || '';
       if (!src) return Promise.resolve();
       if (src.startsWith('blob:') || src.startsWith('data:')) { img.crossOrigin = 'anonymous'; return Promise.resolve(); }
-      return new Promise(resolve => {
+      return new Promise((resolve, reject) => {
         fetch(src, { headers: { Authorization: `Bearer ${S.token}` } })
-          .then(r => r.ok ? r.blob() : null)
+          .then(r => r.ok ? r.blob() : Promise.reject('fetch failed'))
           .then(b => {
-            if (b) { const bu = URL.createObjectURL(b); blobUrls.push(bu); img.src = bu; }
+            const bu = URL.createObjectURL(b);
+            blobUrls.push(bu);
+            img.src = bu;
             img.crossOrigin = 'anonymous';
-            resolve();
+            // Wait for image to actually decode/load in DOM
+            return img.decode ? img.decode().then(resolve).catch(resolve) : resolve();
           })
-          .catch(resolve);
+          .catch(() => {
+            img.crossOrigin = 'anonymous';
+            resolve(); // Don't block on failed images
+          });
       });
     }));
 
-    // Wait for images to paint
-    await new Promise(r => setTimeout(r, 300));
+    // Verify all images are actually loaded before canvas capture
+    await Promise.allSettled(imgEls.map(img => {
+      if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+      return new Promise(resolve => {
+        img.onload = resolve;
+        img.onerror = resolve;
+        setTimeout(resolve, 3000); // Max 3s wait per image
+      });
+    }));
 
-    const actualH = el.scrollHeight || el.offsetHeight || 1920;
-    const PAGE_H  = 1920; // pixels per page at scale:1
-    const SCALE   = 3;    // 3× resolution for crisp WhatsApp quality
+    // Extra paint delay for browser rendering
+    await new Promise(r => setTimeout(r, 500));
 
-    // Capture full long canvas at 3× scale for high DPI
+    const actualH = el.scrollHeight || el.offsetHeight || 1440;
+    const PAGE_W  = 1080;  // output page width
+    const PAGE_H  = 1440;  // output page height (3:4 ratio, optimized for WhatsApp)
+    const SCALE   = 3;     // 3× resolution for crisp high-DPI
+
+    // Capture full long canvas at 3× scale for high DPI, sharp text
     const fullCanvas = await html2canvas(el, {
       scale: SCALE,
       useCORS: true,
       allowTaint: false,
-      width: 1080,
+      width: PAGE_W,
       height: actualH,
       backgroundColor: '#ffffff',
       logging: false,
       imageTimeout: 30000,
+      letterRendering: true,
     });
 
     // Revoke blob URLs after capture
     blobUrls.forEach(u => URL.revokeObjectURL(u));
 
-    // Slice into 1080×1920 page canvases (scale:3 → each page = 3240×5760 raw)
-    const pageH_scaled = PAGE_H * SCALE;
-    const pageW_scaled = 1080  * SCALE;
+    // Slice into 1080×1440 page canvases (3× scale for sharp output)
+    const pageH_scaled = PAGE_H * SCALE;  // 4320
+    const pageW_scaled = PAGE_W * SCALE;  // 3240
     const totalPages   = Math.ceil(fullCanvas.height / pageH_scaled);
     const pageBlobs    = [];
 
@@ -2168,6 +2509,9 @@ async function generateAndShareJobCard(j, shareMode) {
       pc.width     = pageW_scaled;
       pc.height    = pageH_scaled;
       const ctx    = pc.getContext('2d');
+      // Enable high-quality image rendering
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, pc.width, pc.height);
       ctx.drawImage(fullCanvas, 0, srcY, pageW_scaled, srcH, 0, 0, pageW_scaled, srcH);
@@ -2251,56 +2595,79 @@ function shareText(j, multiPage) {
   }).join('\n') || '• Your device';
 
   if (isRepaired && balance > 0) {
-    return `Hello *${custName}*,
+    return `🔧 *ADITION ELECTRIC SOLUTION* 🔧
+—————————————————
 
-Your repair job *#${j.id}* is ready! 🎉
+Hello *${custName}*,
 
-*Products Repaired:*
+Your repair job *#${j.id}* is ready for collection! 🎉
+
+📋 *Products Repaired:*
 ${products}
 
-*Payment Summary:*
+💰 *Payment Summary:*
 Total Repair Amount: ₹${total.toLocaleString('en-IN')}
 Amount Received: ₹${received.toLocaleString('en-IN')}
-*Amount Due: ₹${balance.toLocaleString('en-IN')}*
+⚠️ *Amount Due: ₹${balance.toLocaleString('en-IN')}*
 
 To receive your device, kindly complete the payment.
 Payment details (UPI / Bank) are shown in the job card image.
 
-Please collect your device within *25 days* from this notice. After this period, we shall not be held liable for any claims, loss, or damage.
+⚠️ *Important:* Please collect your device within *25 days* from this notice. After this period, we shall not be held liable for any claims, loss, or damage.
 
-— *ADITION ELECTRIC SOLUTION*
-📞 7801990001 | Gheekanta, Ahmedabad`;
+📞 *Contact:* 7801990001
+📍 Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001
+
+— *ADITION ELECTRIC SOLUTION* ✨
+_Since 1984_`;
   }
 
   if (isDelivered) {
-    return `Hello *${custName}*,
+    return `🔧 *ADITION ELECTRIC SOLUTION* 🔧
+—————————————————
 
-Your job *#${j.id}* has been successfully delivered. ✅
+Hello *${custName}*,
 
-*Products:*
+Your job *#${j.id}* has been successfully delivered! ✅
+
+📋 *Products:*
 ${products}
 
-Thank you for trusting us with your repair needs!
+Thank you for trusting us with your repair needs! 🙏
 
-— *ADITION ELECTRIC SOLUTION*
-📞 7801990001 | Gheekanta, Ahmedabad`;
+📞 *Contact:* 7801990001
+📍 Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001
+
+— *ADITION ELECTRIC SOLUTION* ✨
+_Since 1984_`;
   }
 
-  // Under repair / just created — no amount yet or 0
-  const amtLine = total > 0 ? `\nEstimated Repair Amount: ₹${total.toLocaleString('en-IN')}` : '';
-  return `Hello *${custName}*,
+  // Under repair / just created — job creation message with exact format
+  return `🔧 *ADITION ELECTRIC SOLUTION* 🔧
+—————————————————
 
-Your job *#${j.id}* has been registered with us. 🔧
+Hello *${custName}*,
 
-*Products:*
+Your job has been successfully registered! ✅
+
+🆔 *Job Number:* ${j.id}
+📅 *Date:* ${fmtDate(j.created_at)}
+
+📋 *Products Registered:*
 ${products}
-${amtLine}
+${total > 0 ? `\n💰 *Estimated Repair Amount:* ₹${total.toLocaleString('en-IN')}` : ''}
+${received > 0 ? `\n✅ *Advance Received:* ₹${received.toLocaleString('en-IN')}` : ''}
+${balance > 0 ? `\n⚠️ *Balance Due:* ₹${balance.toLocaleString('en-IN')}` : ''}
 
-We will notify you once the repair is complete.
-Please collect your device within *25 days* of notification. After this period, we shall not be held liable for any claims, loss, or damage to uncollected items.
+We will notify you once the repair is complete. 🔔
 
-— *ADITION ELECTRIC SOLUTION*
-📞 7801990001 | Gheekanta, Ahmedabad`;
+⚠️ *Important:* Please collect your device within *25 days* from the date of notification. After this period, we shall not be held liable for any claims, loss, or damage to uncollected items.
+
+📞 *Contact:* 7801990001
+📍 Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001
+
+— *ADITION ELECTRIC SOLUTION* ✨
+_Since 1984_`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2853,7 +3220,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v16.0<br>
+      ✨ adition™ since 1984 · v17.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -2994,5 +3361,22 @@ window.addEventListener('beforeinstallprompt', e => {
     if (headerEl) { const h = headerEl.outerHTML; headerEl.outerHTML = headerHTML(); bindView(); }
   }
 });
+
+// ── Performance: preload suggestion data on app boot ─────────────────────────────
+_sugCache.load();
+
+// ── System stability: global error handler ─ prevent UI crash ──────────────────
+window.addEventListener('error', e => {
+  console.error('[AES] Uncaught error:', e.error?.message || e.message);
+  // Don't crash UI — silently log
+});
+window.addEventListener('unhandledrejection', e => {
+  console.warn('[AES] Unhandled promise rejection:', e.reason?.message || e.reason);
+  e.preventDefault(); // Prevent console error from crashing UI
+});
+
+// ── Performance: smooth mobile scrolling with passive listeners ──────────
+document.addEventListener('touchstart', () => {}, { passive: true });
+document.addEventListener('touchmove', () => {}, { passive: true });
 
 })();
