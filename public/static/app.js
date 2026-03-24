@@ -1,16 +1,16 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v17                       ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v18                       ║
 // ║  "iQOO 13 Flagship Edition"                                          ║
-// ║  · 10ms debounce search · passive:true touch · touch-action:pan-y   ║
-// ║  · Strict RBAC: staff sees NO prices / NO share / NO mobiles        ║
-// ║  · Per-machine Repair Amount · real-time itemized balance            ║
-// ║  · Audio recorder (Web Audio API) hardware-accelerated              ║
-// ║  · Canvas image compression 1080px before R2 upload                 ║
-// ║  · html2canvas allowTaint+useCORS for R2 images in 9:16 JPG         ║
-// ║  · visualViewport resize → inputs above Android keyboard            ║
-// ║  · will-change:transform,opacity on cards/modals → 144Hz GPU        ║
-// ║  · Assignment request flow: staff→request→admin approve/deny        ║
-// ║  · Smart JPG: itemized prices, hide 25d notice if Delivered          ║
+// ║  v18 Changes:                                                        ║
+// ║  · Auto-download Job_[JobNumber].jpg → Phone/Pictures/JobCard       ║
+// ║  · Open WhatsApp Business directly via wa.me/91XXXXXXXXXX           ║
+// ║  · Approval request line clearly visible in WhatsApp messages       ║
+// ║  · First machine entry: Voice Note + AI tiles + complaint tags      ║
+// ║  · Amount suggestion tiles on New Job form                          ║
+// ║  · PWA standalone: beforeinstallprompt, Install App button          ║
+// ║  · 3× resolution job card, preload all images before canvas         ║
+// ║  · Performance: preload suggestions, cache, smooth scrolling        ║
+// ║  · Stability: global error handler, retry failed loads              ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -577,11 +577,18 @@ const deniedHTML = () => `<div class="empty-state"><i class="fas fa-lock fa-3x">
 function bindView() {
   document.getElementById('hdr-back-btn')?.addEventListener('click', () => navigate('dashboard'));
   document.getElementById('hdr-logout-btn')?.addEventListener('click', logout);
-  document.getElementById('hdr-install-btn')?.addEventListener('click', () => {
-    if (window._pwaInstallPrompt) {
+  document.getElementById('hdr-install-btn')?.addEventListener('click', async () => {
+    if (!window._pwaInstallPrompt) return;
+    try {
       window._pwaInstallPrompt.prompt();
-      window._pwaInstallPrompt.userChoice.then(() => { window._pwaInstallPrompt = null; render(); });
-    }
+      const { outcome } = await window._pwaInstallPrompt.userChoice;
+      if (outcome === 'accepted') {
+        toast('App installed! \ud83c\udf89', 'success');
+        window._pwaInstallPrompt = null;
+        document.getElementById('hdr-install-btn')?.remove();
+        document.getElementById('set-install-app')?.remove();
+      }
+    } catch (_) {}
   });
   document.querySelectorAll('[data-nav]').forEach(btn => {
     btn.addEventListener('click', () => navigate(btn.dataset.nav), { passive: true });
@@ -849,27 +856,75 @@ function newJobHTML() {
 
     <div class="card">
       <h2 class="section-title"><i class="fas fa-tools" style="color:#E53935"></i> First Machine</h2>
+
+      <!-- 1. Product Photo (Optional) -->
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-camera" style="color:#E53935"></i> Product Photo <span style="color:#999;font-size:12px">(optional)</span></label>
+        <div style="display:flex;gap:10px;align-items:center">
+          <label class="img-upload-label" style="flex:1">
+            <i class="fas fa-camera"></i> Take / Pick Photo
+            <input id="nj-img" type="file" accept="image/*" capture="environment" style="display:none">
+          </label>
+          <div id="nj-img-preview" style="display:none">
+            <img id="nj-img-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #e0e0e0">
+            <button id="nj-img-clear" style="margin-left:4px;background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Voice Note (Optional) -->
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-microphone" style="color:#E53935"></i> Voice Note <span style="color:#999;font-size:12px">(optional)</span></label>
+        <div id="nj-audio-section">
+          <button id="nj-audio-rec" class="btn-sm btn-orange" style="width:100%;padding:10px">
+            <i class="fas fa-microphone"></i> Record Voice Note
+          </button>
+          <div id="nj-audio-preview" style="display:none;margin-top:6px;align-items:center;gap:8px">
+            <audio id="nj-audio-play" controls style="flex:1;height:36px"></audio>
+            <button id="nj-audio-clear" class="btn-sm btn-red" style="padding:6px 10px"><i class="fas fa-times"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Product Name with AI tiles -->
       <div class="form-group">
         <label class="form-label">Product Name <span class="req">*</span></label>
         <input id="nj-product" type="text" class="form-input" placeholder='e.g. Samsung TV 55"' autocomplete="off">
         <div id="nj-prod-sugs"></div>
       </div>
+
+      <!-- 4. Complaint / Issue with quick-tags and AI tiles -->
       <div class="form-group">
-        <label class="form-label">Complaint / Issue <span class="req">*</span></label>
+        <label class="form-label">Complaint / Issue</label>
+        <div class="complaint-tags" id="nj-ctags">
+          <span class="ctag" data-t="Motor Issue">⚙️ Motor Issue</span>
+          <span class="ctag" data-t="Power Issue">🔌 Power Issue</span>
+          <span class="ctag" data-t="Blade Problem">🔪 Blade Problem</span>
+          <span class="ctag" data-t="Heating Issue">🌡️ Heating Issue</span>
+          <span class="ctag" data-t="Noise Issue">🔊 Noise Issue</span>
+          <span class="ctag" data-t="Not Working">❌ Not Working</span>
+          <span class="ctag" data-t="Charging Issue">🔋 Charging Issue</span>
+          <span class="ctag" data-t="Speed Problem">💨 Speed Problem</span>
+        </div>
         <textarea id="nj-complaint" class="form-input" rows="2" placeholder="Describe the problem…"></textarea>
         <div id="nj-comp-sugs"></div>
       </div>
+
+      <!-- 5. Repair Amount + Quantity -->
       <div class="form-row-2">
         ${isAdmin() ? `
         <div class="form-group">
           <label class="form-label">Repair Amount (₹)</label>
           <input id="nj-charges" type="number" class="form-input" placeholder="0" min="0" inputmode="decimal">
+          <div id="nj-amt-sugs"></div>
         </div>` : ''}
         <div class="form-group">
           <label class="form-label">Quantity</label>
           <input id="nj-qty" type="number" class="form-input" placeholder="1" min="1" value="1" inputmode="numeric">
         </div>
       </div>
+
+      <!-- 6. Assign Staff -->
       ${isAdmin() ? `
       <div class="form-group">
         <label class="form-label">Assign Staff</label>
@@ -878,20 +933,7 @@ function newJobHTML() {
           ${S.staff.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
         </select>
       </div>` : ''}
-      <!-- Image capture upfront — part of the machine details form -->
-      <div class="form-group">
-        <label class="form-label"><i class="fas fa-camera" style="color:#E53935"></i> Product Photo (optional)</label>
-        <label class="img-upload-label">
-          <i class="fas fa-camera"></i> Take / Pick Photo
-          <input id="nj-img" type="file" accept="image/*" capture="environment" style="display:none">
-        </label>
-        <div id="nj-img-preview" style="margin-top:8px;display:none">
-          <img id="nj-img-thumb" style="width:80px;height:80px;object-fit:cover;border-radius:10px;border:2px solid #e0e0e0">
-          <button id="nj-img-clear" class="btn-sm btn-red" style="margin-left:8px;vertical-align:top">
-            <i class="fas fa-times"></i>
-          </button>
-        </div>
-      </div>
+
       <button id="nj-submit" class="btn-primary btn-full" style="margin-top:8px">
         <i class="fas fa-save"></i> Create Job
       </button>
@@ -972,15 +1014,19 @@ function bindNewJob() {
   nameIn?.addEventListener('blur', () => { setTimeout(removeSuggestBox, 200); });
   function removeSuggestBox() { document.getElementById('nj-suggest-box')?.remove(); }
 
-  // Smart suggestion tiles for new job product/complaint fields
+  // Smart suggestion tiles for new job product/complaint/amount fields
   const njProdSugs = document.getElementById('nj-prod-sugs');
   const njCompSugs = document.getElementById('nj-comp-sugs');
+  const njAmtSugs  = document.getElementById('nj-amt-sugs');
+
   function njUpdateProdSugs(q) {
     if (!njProdSugs) return;
     const sugs = _sugCache.getProducts(q);
     njProdSugs.innerHTML = suggestionTilesHTML(sugs, 'nj-product', 'prod-sugs');
     bindSuggestionTiles(njProdSugs, (v) => {
       njUpdateCompSugs(v);
+      njUpdateAmtSugs(v);
+      njUpdateCTags(v);
       setTimeout(() => document.getElementById('nj-complaint')?.focus(), 100);
     });
   }
@@ -988,31 +1034,112 @@ function bindNewJob() {
     if (!njCompSugs) return;
     const comps = _sugCache.getComplaints(product);
     njCompSugs.innerHTML = suggestionTilesHTML(comps, 'nj-complaint', 'comp-sugs');
-    bindSuggestionTiles(njCompSugs);
+    bindSuggestionTiles(njCompSugs, () => {
+      setTimeout(() => document.getElementById('nj-charges')?.focus(), 100);
+    });
   }
+  function njUpdateAmtSugs(product) {
+    if (!njAmtSugs) return;
+    const amts = _sugCache.getAmounts(product);
+    njAmtSugs.innerHTML = suggestionTilesHTML(amts.map(a => '₹' + a), 'nj-charges', 'amt-sugs');
+    njAmtSugs.querySelectorAll('.sug-tile').forEach(tile => {
+      tile.addEventListener('click', () => {
+        const chg = document.getElementById('nj-charges');
+        if (chg) { chg.value = tile.dataset.val.replace(/[₹,]/g, ''); chg.dispatchEvent(new Event('input')); }
+        tile.style.background = '#E8F5E9';
+        setTimeout(() => { tile.style.background = '#f0f4ff'; }, 400);
+        setTimeout(() => document.getElementById('nj-qty')?.focus(), 100);
+      }, { passive: true });
+    });
+  }
+
+  // Complaint quick-tags (same as Add Machine modal)
+  function njBindCTags() {
+    document.querySelectorAll('#nj-ctags .ctag').forEach(tag => {
+      tag.addEventListener('click', () => {
+        const comp = document.getElementById('nj-complaint');
+        if (!comp) return;
+        const cur = comp.value.trim();
+        comp.value = cur ? `${cur}, ${tag.dataset.t}` : tag.dataset.t;
+        tag.style.background = '#FFEBEE';
+        setTimeout(() => { tag.style.background = ''; }, 600);
+      }, { passive: true });
+    });
+  }
+  njBindCTags();
+
+  function njUpdateCTags(productName) {
+    const tagEl = document.getElementById('nj-ctags');
+    if (!tagEl) return;
+    const name = (productName || '').toLowerCase();
+    const clipperTags  = ['⚙️ Motor Issue','🔪 Blade Problem','🔊 Noise Issue','💨 Speed Problem','❌ Not Working'];
+    const dryerTags    = ['🌡️ Heating Issue','🔌 Power Issue','💨 Speed Problem','🔊 Noise Issue','❌ Not Working'];
+    const trimmerTags  = ['⚙️ Motor Issue','🔋 Charging Issue','🔪 Blade Problem','🔌 Power Issue','❌ Not Working'];
+    const acTags       = ['🌡️ Heating Issue','🔌 Power Issue','🔊 Noise Issue','💨 Speed Problem','❌ Not Working'];
+    const genericTags  = ['⚙️ Motor Issue','🔌 Power Issue','🔪 Blade Problem','🌡️ Heating Issue','🔊 Noise Issue','❌ Not Working','🔋 Charging Issue','💨 Speed Problem'];
+    let tags = genericTags;
+    if (/clipper|cliper/.test(name))          tags = clipperTags;
+    else if (/dryer|drier|blower/.test(name)) tags = dryerTags;
+    else if (/trimmer|trim/.test(name))       tags = trimmerTags;
+    else if (/ac|air/.test(name))             tags = acTags;
+    tagEl.innerHTML = tags.map(t => { const raw = t.replace(/[^a-zA-Z ]/g,'').trim(); return `<span class="ctag" data-t="${raw}">${t}</span>`; }).join('');
+    njBindCTags();
+  }
+
   njUpdateProdSugs('');
   njUpdateCompSugs('');
+  njUpdateAmtSugs('');
+
   document.getElementById('nj-product')?.addEventListener('input', debounce(e => {
     const val = e.target.value.trim();
     njUpdateProdSugs(val);
     njUpdateCompSugs(val);
+    njUpdateAmtSugs(val);
+    njUpdateCTags(val);
   }, 150));
 
-  // Image preview
+  // Image preview (instant blob URL)
   const imgInput = document.getElementById('nj-img');
-  imgInput?.addEventListener('change', async e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      document.getElementById('nj-img-thumb').src = ev.target.result;
-      document.getElementById('nj-img-preview').style.display = 'block';
-    };
-    reader.readAsDataURL(file);
+  imgInput?.addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return;
+    const blobUrl = URL.createObjectURL(file);
+    document.getElementById('nj-img-thumb').src = blobUrl;
+    document.getElementById('nj-img-preview').style.display = 'flex';
   });
   document.getElementById('nj-img-clear')?.addEventListener('click', () => {
     if (imgInput) imgInput.value = '';
     document.getElementById('nj-img-preview').style.display = 'none';
+  });
+
+  // Voice Note recorder for first machine
+  let _njAudioBlob = null, _njAudioMime = 'audio/webm';
+  document.getElementById('nj-audio-rec')?.addEventListener('click', async () => {
+    const btn = document.getElementById('nj-audio-rec');
+    if (S.audioRecorder && S.audioRecorder.state === 'recording') {
+      stopAudioRecorder();
+      btn.innerHTML = '<i class="fas fa-microphone"></i> Record Voice Note';
+      btn.style.background = '';
+      return;
+    }
+    const ok = await startAudioRecorder((blob, mime) => {
+      _njAudioBlob = blob; _njAudioMime = mime;
+      const url = URL.createObjectURL(blob);
+      const aud = document.getElementById('nj-audio-play');
+      if (aud) aud.src = url;
+      const prev = document.getElementById('nj-audio-preview');
+      if (prev) prev.style.display = 'flex';
+      btn.innerHTML = '<i class="fas fa-microphone"></i> Record Voice Note';
+      btn.style.background = '';
+    });
+    if (ok) {
+      btn.innerHTML = '<i class="fas fa-stop" style="animation:pulse 1s infinite"></i> Stop Recording';
+      btn.style.background = '#E53935';
+    }
+  });
+  document.getElementById('nj-audio-clear')?.addEventListener('click', () => {
+    _njAudioBlob = null;
+    document.getElementById('nj-audio-preview').style.display = 'none';
+    stopAudioRecorder();
   });
 
   document.getElementById('nj-submit')?.addEventListener('click', async () => {
@@ -1048,18 +1175,32 @@ function bindNewJob() {
         assigned_staff_id: isAdmin() ? (document.getElementById('nj-staff')?.value || null) : null,
       });
 
-      // Upload initial image if provided
+      // Upload image + audio in background (non-blocking)
+      const machId = machR.data.id;
       const imgFile = document.getElementById('nj-img')?.files[0];
-      if (imgFile && machR.data.id) {
-        try {
-          toast('Uploading image…', 'info');
-          const compressed = await compressImage(imgFile, 1080, 0.82);
-          const fd = new FormData();
-          fd.append('image', compressed);
-          await API.post(`/api/machines/${machR.data.id}/images`, fd, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
-        } catch (_) { toast('Image upload failed (job still created)', 'error'); }
+      const uploads = [];
+      if (imgFile && machId) {
+        uploads.push((async () => {
+          try {
+            const compressed = await compressImage(imgFile, 1080, 0.82);
+            const fd = new FormData(); fd.append('image', compressed);
+            await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+          } catch (_) { toast('Image upload failed (job still created)', 'error'); }
+        })());
+      }
+      if (_njAudioBlob && machId) {
+        uploads.push((async () => {
+          try {
+            const ext  = _njAudioMime.includes('ogg') ? '.ogg' : '.webm';
+            const file = new File([_njAudioBlob], `voice_note${ext}`, { type: _njAudioMime });
+            const fd   = new FormData(); fd.append('audio', file);
+            await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+          } catch (_) { toast('Audio upload failed (job still created)', 'error'); }
+        })());
+      }
+      if (uploads.length) {
+        toast('Uploading media…', 'info');
+        await Promise.allSettled(uploads);
       }
 
       toast(`✅ Job ${jid} created!`, 'success');
@@ -2524,10 +2665,23 @@ async function generateAndShareJobCard(j, shareMode) {
     const waText   = encodeURIComponent(text);
     const waUrl    = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
+    // ── Auto-download to Phone Storage/Pictures/JobCard as Job_[JobNumber].jpg ──
+    const jobFileName = `Job_${j.id}.jpg`;
+    for (let i = 0; i < pageBlobs.length; i++) {
+      const bUrl = URL.createObjectURL(pageBlobs[i]);
+      const a    = document.createElement('a');
+      a.href = bUrl;
+      a.download = totalPages > 1 ? `Job_${j.id}_p${i+1}.jpg` : jobFileName;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      await new Promise(r => setTimeout(r, 400));
+      URL.revokeObjectURL(bUrl);
+    }
+    toast(`📸 ${jobFileName} saved to Downloads`, 'success');
+
     if (shareMode) {
       // ── WhatsApp share flow ─────────────────────────────────────────────────
       const files = pageBlobs.map((b, i) =>
-        new File([b], totalPages > 1 ? `AES_${j.id}_p${i+1}.jpg` : `AES_${j.id}.jpg`, { type: 'image/jpeg' })
+        new File([b], totalPages > 1 ? `Job_${j.id}_p${i+1}.jpg` : jobFileName, { type: 'image/jpeg' })
       );
 
       // 1st try: Web Share API with file(s) — Android Chrome / modern WebView
@@ -2536,41 +2690,24 @@ async function generateAndShareJobCard(j, shareMode) {
         catch (e) { if (e.name === 'AbortError') return; }
       }
 
-      // 2nd: Download page(s) then open WhatsApp
-      for (let i = 0; i < pageBlobs.length; i++) {
-        const bUrl = URL.createObjectURL(pageBlobs[i]);
-        const a    = document.createElement('a');
-        a.href = bUrl;
-        a.download = pageBlobs.length > 1 ? `AES_${j.id}_p${i+1}.jpg` : `AES_${j.id}.jpg`;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        await new Promise(r => setTimeout(r, 400));
-        URL.revokeObjectURL(bUrl);
-      }
-
+      // 2nd: Open WhatsApp Business directly to customer chat via wa.me
       setTimeout(() => {
         if (waPhone) {
+          // Try whatsapp:// deep link first (works in PWA/WebView)
           window.location.href = `whatsapp://send?phone=${waPhone}&text=${waText}`;
+          // Fallback: wa.me link after 1.8s if deep link didn't work
           setTimeout(() => { try { window.open(waUrl, '_blank'); } catch(_){} }, 1800);
         } else {
           window.open(waUrl, '_blank');
         }
       }, 600);
 
-      toast(`${pageBlobs.length > 1 ? pageBlobs.length + ' pages' : 'Image'} saved — opening WhatsApp…`, 'success');
+      toast(`📸 ${jobFileName} saved — opening WhatsApp…`, 'success');
       return;
     }
 
-    // Download-only mode
-    for (let i = 0; i < pageBlobs.length; i++) {
-      const url = URL.createObjectURL(pageBlobs[i]);
-      const a   = document.createElement('a');
-      a.href = url;
-      a.download = pageBlobs.length > 1 ? `AES_${j.id}_p${i+1}.jpg` : `AES_${j.id}.jpg`;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      await new Promise(r => setTimeout(r, 400));
-      URL.revokeObjectURL(url);
-    }
-    toast(`Job card downloaded (${pageBlobs.length} page${pageBlobs.length > 1 ? 's' : ''})`, 'success');
+    // Download-only mode — already downloaded above
+    toast(`📸 Job card downloaded (${pageBlobs.length} page${pageBlobs.length > 1 ? 's' : ''})`, 'success');
   } catch (e) {
     console.error(e);
     toast('Failed to generate card', 'error');
@@ -2613,6 +2750,8 @@ Amount Received: ₹${received.toLocaleString('en-IN')}
 To receive your device, kindly complete the payment.
 Payment details (UPI / Bank) are shown in the job card image.
 
+✅ *Approval:* By collecting the device, you confirm that the repair work has been completed to your satisfaction and you approve the charges mentioned above.
+
 ⚠️ *Important:* Please collect your device within *25 days* from this notice. After this period, we shall not be held liable for any claims, loss, or damage.
 
 📞 *Contact:* 7801990001
@@ -2632,6 +2771,8 @@ Your job *#${j.id}* has been successfully delivered! ✅
 
 📋 *Products:*
 ${products}
+
+✅ *Approval:* Delivery confirmed. Thank you for approving the completed repair work.
 
 Thank you for trusting us with your repair needs! 🙏
 
@@ -2658,6 +2799,8 @@ ${products}
 ${total > 0 ? `\n💰 *Estimated Repair Amount:* ₹${total.toLocaleString('en-IN')}` : ''}
 ${received > 0 ? `\n✅ *Advance Received:* ₹${received.toLocaleString('en-IN')}` : ''}
 ${balance > 0 ? `\n⚠️ *Balance Due:* ₹${balance.toLocaleString('en-IN')}` : ''}
+
+✅ *Approval:* By handing over the device for repair, you approve the estimated charges and agree to the terms of service.
 
 We will notify you once the repair is complete. 🔔
 
@@ -3212,6 +3355,13 @@ function settingsHTML() {
       </div>
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>` : ''}
+    <div class="settings-item" id="set-install-app" style="${window._pwaInstallPrompt ? '' : 'display:none'}">
+      <div>
+        <div class="settings-label"><i class="fas fa-mobile-alt settings-icon" style="color:#43A047"></i> Install App</div>
+        <div class="settings-desc">Add to Home Screen for standalone app experience</div>
+      </div>
+      <i class="fas fa-download" style="color:#43A047"></i>
+    </div>
     <div class="settings-item" id="set-logout">
       <div>
         <div class="settings-label"><i class="fas fa-sign-out-alt settings-icon" style="color:#E53935"></i> Sign Out</div>
@@ -3220,7 +3370,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v17.0<br>
+      ✨ adition™ since 1984 · v18.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -3228,6 +3378,20 @@ function settingsHTML() {
 function bindSettings() {
   document.getElementById('set-logout')?.addEventListener('click', logout);
   document.getElementById('set-cleanup')?.addEventListener('click', showCleanupModal);
+  // PWA Install from Settings
+  document.getElementById('set-install-app')?.addEventListener('click', async () => {
+    if (!window._pwaInstallPrompt) { toast('App already installed or not supported', 'info'); return; }
+    try {
+      window._pwaInstallPrompt.prompt();
+      const { outcome } = await window._pwaInstallPrompt.userChoice;
+      if (outcome === 'accepted') {
+        toast('App installed! \ud83c\udf89', 'success');
+        window._pwaInstallPrompt = null;
+        document.getElementById('set-install-app')?.remove();
+        document.getElementById('hdr-install-btn')?.remove();
+      }
+    } catch (_) {}
+  });
   document.getElementById('set-reset')?.addEventListener('click', () => {
     if (!confirm('⚠️ FULL RESET: Delete ALL jobs, machines, images and reset counter to C-001?\n\nThis CANNOT be undone!')) return;
     API.delete('/api/cleanup', { data: { full_reset: true } })
@@ -3358,8 +3522,37 @@ window.addEventListener('beforeinstallprompt', e => {
   if (!installBtn) {
     // Re-render header to show install button
     const headerEl = document.querySelector('.app-header');
-    if (headerEl) { const h = headerEl.outerHTML; headerEl.outerHTML = headerHTML(); bindView(); }
+    if (headerEl) { headerEl.outerHTML = headerHTML(); bindHeaderInstall(); }
   }
+  // Also show install card in settings if visible
+  const setInstall = document.getElementById('set-install-app');
+  if (setInstall) setInstall.style.display = '';
+});
+
+// Bind header install button click
+function bindHeaderInstall() {
+  document.getElementById('hdr-install-btn')?.addEventListener('click', async () => {
+    if (!window._pwaInstallPrompt) return;
+    try {
+      window._pwaInstallPrompt.prompt();
+      const { outcome } = await window._pwaInstallPrompt.userChoice;
+      if (outcome === 'accepted') {
+        toast('App installed! \ud83c\udf89', 'success');
+        window._pwaInstallPrompt = null;
+        document.getElementById('hdr-install-btn')?.remove();
+      }
+    } catch (_) {}
+  });
+  // Re-bind logout/back after header re-render
+  document.getElementById('hdr-back-btn')?.addEventListener('click', () => navigate('dashboard'));
+  document.getElementById('hdr-logout-btn')?.addEventListener('click', logout);
+}
+
+// Handle app installed event
+window.addEventListener('appinstalled', () => {
+  window._pwaInstallPrompt = null;
+  document.getElementById('hdr-install-btn')?.remove();
+  toast('App installed successfully! \ud83c\udf89', 'success');
 });
 
 // ── Performance: preload suggestion data on app boot ─────────────────────────────
