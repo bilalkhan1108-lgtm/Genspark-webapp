@@ -149,6 +149,7 @@ html, body {
   letter-spacing: 0.5px;
 }
 .role-admin { background: #E53935; color: #fff; }
+.role-manager { background: #FB8C00; color: #fff; }
 .role-staff { background: #1E88E5; color: #fff; }
 
 /* ── Icon button ───────────────────────────────────────────────────────────── */

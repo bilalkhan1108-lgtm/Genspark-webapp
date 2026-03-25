@@ -1,16 +1,15 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v18                       ║
-// ║  "iQOO 13 Flagship Edition"                                          ║
-// ║  v18 Changes:                                                        ║
-// ║  · Auto-download Job_[JobNumber].jpg → Phone/Pictures/JobCard       ║
-// ║  · Open WhatsApp Business directly via wa.me/91XXXXXXXXXX           ║
-// ║  · Approval request line clearly visible in WhatsApp messages       ║
-// ║  · First machine entry: Voice Note + AI tiles + complaint tags      ║
-// ║  · Amount suggestion tiles on New Job form                          ║
-// ║  · PWA standalone: beforeinstallprompt, Install App button          ║
-// ║  · 3× resolution job card, preload all images before canvas         ║
-// ║  · Performance: preload suggestions, cache, smooth scrolling        ║
-// ║  · Stability: global error handler, retry failed loads              ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v19                       ║
+// ║  v19 Changes:                                                        ║
+// ║  · High-res single-page job card (3072x4096 min, dynamic height)   ║
+// ║  · Promise.all image preloading before card generation              ║
+// ║  · Machine counter (Total Machines: N) with real-time update        ║
+// ║  · Manager role: create/edit jobs, no delete/staff/reports/settings ║
+// ║  · Job history timeline (newest first)                              ║
+// ║  · Optimistic UI for fast job creation                              ║
+// ║  · Customer self-tracking link /track?job=&mobile=                  ║
+// ║  · WhatsApp direct open + parallel background download              ║
+// ║  · Parallel WhatsApp + download, data caching, error handling       ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -166,7 +165,9 @@ API.interceptors.response.use(r => r, err => {
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-const isAdmin = () => S.user?.role === 'admin';
+const isAdmin   = () => S.user?.role === 'admin' || S.user?.role === 'manager';
+const isAdminOnly = () => S.user?.role === 'admin';
+const isManager = () => S.user?.role === 'manager';
 const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -448,6 +449,12 @@ window.addEventListener('popstate', e => {
 function render() {
   const app = document.getElementById('app');
   if (!app) return;
+  // Public tracking page — no auth required
+  if (S.view === 'track') {
+    app.innerHTML = `<div class="app-shell"><div id="view-root">${trackHTML()}</div></div>`;
+    bindTrack();
+    return;
+  }
   if (!S.token || !S.user) {
     app.innerHTML = loginHTML();
     bindLogin();
@@ -527,7 +534,7 @@ function headerHTML() {
     </div>
     <div class="hdr-right">
       ${window._pwaInstallPrompt ? `<button class="icon-btn pwa-install-btn" id="hdr-install-btn" title="Install App" style="color:#43A047"><i class="fas fa-download"></i></button>` : ''}
-      <span class="role-badge ${isAdmin()?'role-admin':'role-staff'}">${esc((S.user?.name||'').split(' ')[0])}</span>
+      <span class="role-badge ${S.user?.role==='admin'?'role-admin':S.user?.role==='manager'?'role-manager':'role-staff'}">${esc((S.user?.name||'').split(' ')[0])}</span>
       <button class="icon-btn" id="hdr-logout-btn" title="Sign out"><i class="fas fa-sign-out-alt"></i></button>
     </div>
   </header>`;
@@ -540,10 +547,10 @@ function bottomNavHTML() {
   const tabs = [
     { id:'dashboard', icon:'fa-list-ul',    label:'Jobs'    },
     ...(isAdmin() ? [{ id:'newjob', icon:'fa-plus-circle', label:'New Job' }] : []),
-    ...(isAdmin() ? [{ id:'requests', icon:'fa-bell', label:'Requests', badge: true }] : []),
-    ...(isAdmin() ? [{ id:'staff',    icon:'fa-users',     label:'Staff'   }] : []),
-    { id:'reports',  icon:'fa-chart-bar', label:'Reports' },
-    { id:'settings',  icon:'fa-cog',         label:'More'    },
+    ...(isAdminOnly() ? [{ id:'requests', icon:'fa-bell', label:'Requests', badge: true }] : []),
+    ...(isAdminOnly() ? [{ id:'staff',    icon:'fa-users',     label:'Staff'   }] : []),
+    ...(!isManager() ? [{ id:'reports',  icon:'fa-chart-bar', label:'Reports' }] : []),
+    ...(!isManager() ? [{ id:'settings',  icon:'fa-cog',         label:'More'    }] : []),
   ];
   return `
   <nav class="bottom-nav">
@@ -565,10 +572,11 @@ function viewHTML() {
     case 'dashboard': return dashboardHTML();
     case 'newjob':    return isAdmin() ? newJobHTML() : deniedHTML();
     case 'detail':    return `<div id="detail-root" class="view-pad"><div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div></div>`;
-    case 'staff':     return isAdmin() ? staffHTML()    : deniedHTML();
-    case 'reports':   return reportsHTML();
-    case 'requests':  return isAdmin() ? requestsHTML() : deniedHTML();
-    case 'settings':  return settingsHTML();
+    case 'staff':     return isAdminOnly() ? staffHTML()    : deniedHTML();
+    case 'reports':   return isManager() ? deniedHTML() : reportsHTML();
+    case 'requests':  return isAdminOnly() ? requestsHTML() : deniedHTML();
+    case 'settings':  return isManager() ? deniedHTML() : settingsHTML();
+    case 'track':     return trackHTML();
     default:          return dashboardHTML();
   }
 }
@@ -595,7 +603,7 @@ function bindView() {
   });
 
   // Poll pending requests count for admin notification dot
-  if (isAdmin()) {
+  if (isAdminOnly()) {
     API.get('/api/requests/count').then(r => {
       const dot = document.getElementById('req-dot');
       if (dot) dot.style.display = r.data.count > 0 ? 'block' : 'none';
@@ -632,10 +640,11 @@ function bindView() {
     case 'dashboard': loadJobs();                                               break;
     case 'newjob':    if (isAdmin()) bindNewJob();                               break;
     case 'detail':    loadDetail();                                             break;
-    case 'staff':     if (isAdmin()) loadStaff();                              break;
-    case 'reports':   if (isAdmin()) { loadStaffForSelects(); } bindReports(); break;
-    case 'requests':  if (isAdmin()) loadRequests();                           break;
-    case 'settings':  bindSettings();                                           break;
+    case 'staff':     if (isAdminOnly()) loadStaff();                           break;
+    case 'reports':   if (!isManager()) { if (isAdminOnly()) loadStaffForSelects(); bindReports(); } break;
+    case 'requests':  if (isAdminOnly()) loadRequests();                       break;
+    case 'settings':  if (!isManager()) bindSettings();                        break;
+    case 'track':     bindTrack();                                             break;
   }
 }
 
@@ -1157,55 +1166,70 @@ function bindNewJob() {
 
     const btn = document.getElementById('nj-submit');
     btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating…';
+
+    // Capture form data before async ops
+    const formData = {
+      customer_name:    name,
+      customer_mobile:  mobile,
+      customer_mobile2: document.getElementById('nj-mobile2')?.value.trim() || null,
+      customer_address: document.getElementById('nj-address')?.value.trim() || null,
+      note:             document.getElementById('nj-note')?.value.trim()    || null,
+      received_amount:  isAdmin() ? (parseFloat(document.getElementById('nj-received')?.value) || 0) : 0,
+    };
+    const machData = {
+      product_name:      product,
+      product_complaint: document.getElementById('nj-complaint')?.value.trim() || null,
+      charges:           isAdmin() ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0,
+      quantity:          parseInt(document.getElementById('nj-qty')?.value) || 1,
+      assigned_staff_id: isAdmin() ? (document.getElementById('nj-staff')?.value || null) : null,
+    };
+    const imgFile = document.getElementById('nj-img')?.files[0];
+    const audioBlob = _njAudioBlob;
+    const audioMime = _njAudioMime;
+
     try {
-      const jobR = await API.post('/api/jobs', {
-        customer_name:    name,
-        customer_mobile:  mobile,
-        customer_mobile2: document.getElementById('nj-mobile2')?.value.trim() || null,
-        customer_address: document.getElementById('nj-address')?.value.trim() || null,
-        note:             document.getElementById('nj-note')?.value.trim()    || null,
-        received_amount:  isAdmin() ? (parseFloat(document.getElementById('nj-received')?.value) || 0) : 0,
-      });
+      // ── OPTIMISTIC UI: Show success immediately, navigate FIRST ───────────
+      const jobR = await API.post('/api/jobs', formData);
       const jid = jobR.data.id;
-      const machR = await API.post(`/api/jobs/${jid}/machines`, {
-        product_name:      product,
-        product_complaint: document.getElementById('nj-complaint')?.value.trim() || null,
-        charges:           isAdmin() ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0,
-        quantity:          parseInt(document.getElementById('nj-qty')?.value) || 1,
-        assigned_staff_id: isAdmin() ? (document.getElementById('nj-staff')?.value || null) : null,
-      });
 
-      // Upload image + audio in background (non-blocking)
-      const machId = machR.data.id;
-      const imgFile = document.getElementById('nj-img')?.files[0];
-      const uploads = [];
-      if (imgFile && machId) {
-        uploads.push((async () => {
-          try {
-            const compressed = await compressImage(imgFile, 1080, 0.82);
-            const fd = new FormData(); fd.append('image', compressed);
-            await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-          } catch (_) { toast('Image upload failed (job still created)', 'error'); }
-        })());
-      }
-      if (_njAudioBlob && machId) {
-        uploads.push((async () => {
-          try {
-            const ext  = _njAudioMime.includes('ogg') ? '.ogg' : '.webm';
-            const file = new File([_njAudioBlob], `voice_note${ext}`, { type: _njAudioMime });
-            const fd   = new FormData(); fd.append('audio', file);
-            await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-          } catch (_) { toast('Audio upload failed (job still created)', 'error'); }
-        })());
-      }
-      if (uploads.length) {
-        toast('Uploading media…', 'info');
-        await Promise.allSettled(uploads);
-      }
-
-      toast(`✅ Job ${jid} created!`, 'success');
+      // Show success toast and navigate to detail instantly
+      toast(`Job ${jid} created!`, 'success');
       S.jobId = jid;
       navigate('detail');
+
+      // ── Background: add machine + upload media (non-blocking) ─────────────
+      (async () => {
+        try {
+          const machR = await API.post(`/api/jobs/${jid}/machines`, machData);
+          const machId = machR.data.id;
+
+          const uploads = [];
+          if (imgFile && machId) {
+            uploads.push((async () => {
+              try {
+                const compressed = await compressImage(imgFile, 1080, 0.82);
+                const fd = new FormData(); fd.append('image', compressed);
+                await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+              } catch (_) { toast('Image upload failed (job still created)', 'error'); }
+            })());
+          }
+          if (audioBlob && machId) {
+            uploads.push((async () => {
+              try {
+                const ext  = audioMime.includes('ogg') ? '.ogg' : '.webm';
+                const file = new File([audioBlob], `voice_note${ext}`, { type: audioMime });
+                const fd   = new FormData(); fd.append('audio', file);
+                await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+              } catch (_) { toast('Audio upload failed (job still created)', 'error'); }
+            })());
+          }
+          if (uploads.length) await Promise.allSettled(uploads);
+          // Silently refresh detail if still on this job
+          if (S.jobId === jid && S.view === 'detail') loadDetail();
+        } catch (_) {
+          toast('Machine add failed — please add manually', 'error');
+        }
+      })();
     } catch (e) {
       toast(e.response?.data?.error || 'Failed to create job', 'error');
       btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Create Job';
@@ -1352,7 +1376,7 @@ function renderDetail() {
       </div>` : ''}
     </div>` : ''}
 
-    <!-- Action Buttons — RBAC: admin-only download/share/deliver/delete -->
+    <!-- Action Buttons — RBAC: admin/manager can download/share/deliver; admin-only delete -->
     <div class="action-row mt-3">
       ${isAdmin() ? `
       <button id="btn-deliver" class="action-btn" style="background:#1E88E5">
@@ -1363,8 +1387,9 @@ function renderDetail() {
         <i class="fas fa-file-image"></i><span>Download</span>
       </button>
       <button id="btn-share" class="action-btn" style="background:#25D366">
-        <i class="fab fa-whatsapp"></i><span>${j.status==='delivered'?'Share':'Share'}</span>
-      </button>
+        <i class="fab fa-whatsapp"></i><span>Share</span>
+      </button>` : ''}
+      ${isAdminOnly() ? `
       <button id="btn-del-job" class="action-btn" style="background:#E53935">
         <i class="fas fa-trash"></i><span>Delete</span>
       </button>` : ''}
@@ -1378,6 +1403,7 @@ function renderDetail() {
       <div class="section-header">
         <h3 class="section-title" style="margin:0">
           <i class="fas fa-tools" style="color:#E53935"></i> Machines
+          <span id="machine-counter" style="background:#E53935;color:#fff;border-radius:12px;padding:2px 10px;font-size:13px;font-weight:800;margin-left:8px">Total: ${(j.machines||[]).length}</span>
         </h3>
         <button id="btn-add-machine" class="btn-sm btn-red">+ Add</button>
       </div>
@@ -1486,9 +1512,9 @@ function machineCardHTML(m, currentUserId) {
       <button data-mid="${m.id}" class="btn-sm btn-orange btn-edit-m">
         <i class="fas fa-edit"></i> Edit
       </button>
-      <button data-mid="${m.id}" class="btn-sm btn-red btn-del-m">
+      ${isAdminOnly() ? `<button data-mid="${m.id}" class="btn-sm btn-red btn-del-m">
         <i class="fas fa-trash"></i>
-      </button>
+      </button>` : ''}
     </div>` : staffNotAssigned ? `
     <div class="machine-actions">
       <button data-mid="${m.id}" data-jid="${S.job?.id||''}" class="btn-sm btn-blue btn-request-assign">
@@ -1740,12 +1766,8 @@ Kindly collect within *25 days* from repair date to avoid liability.
 — *ADITION ELECTRIC SOLUTION*`;
     const text    = encodeURIComponent(reminderMsg);
     const url     = waPhone ? `https://wa.me/${waPhone}?text=${text}` : `https://wa.me/?text=${text}`;
-    if (waPhone) {
-      window.location.href = `whatsapp://send?phone=${waPhone}&text=${text}`;
-      setTimeout(() => { try { window.open(url, '_blank'); } catch(_){} }, 1800);
-    } else {
-      window.open(url, '_blank');
-    }
+    // Direct wa.me open — no share window
+    window.location.href = url;
   });
 }
 
@@ -1812,7 +1834,7 @@ async function showJobHistory(j) {
 
   try {
     const r = await API.get(`/api/jobs/${j.id}/history`);
-    const events = r.data || [];
+    const events = (r.data || []).reverse(); // newest first
     const el = document.getElementById('jh-list');
     if (!el) return;
 
@@ -2566,67 +2588,74 @@ function jobCardPrintHTML(j) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GENERATE + SHARE JOB CARD  (html2canvas — multi-page slice for long cards)
+// GENERATE + SHARE JOB CARD — HIGH-RES SINGLE PAGE (min 3072×4096)
+// Never split pages/QR; dynamic height grows with products; Promise.all for images
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateAndShareJobCard(j, shareMode) {
-  toast('Generating job card…', 'info');
+  toast('Generating high-res job card…', 'info');
   try {
     const el = document.getElementById('job-card-print');
     if (!el) { toast('Card element missing', 'error'); return; }
 
-    // Temporarily make print element visible to measure actual height
     el.style.left = '-99999px'; el.style.top = '0';
 
-    // Pre-load ALL authenticated images as blob URLs so html2canvas can paint them
+    // ── Step 1: Pre-load ALL images (product, QR, logo) via Promise.all ──────
     const blobUrls = [];
     const imgEls = Array.from(el.querySelectorAll('img'));
-    // Fetch all images in parallel, wait for ALL to complete
-    const imgResults = await Promise.allSettled(imgEls.map(img => {
+
+    await Promise.all(imgEls.map(img => {
       const src = img.getAttribute('src') || img.getAttribute('data-auth-src') || '';
       if (!src) return Promise.resolve();
       if (src.startsWith('blob:') || src.startsWith('data:')) { img.crossOrigin = 'anonymous'; return Promise.resolve(); }
-      return new Promise((resolve, reject) => {
-        fetch(src, { headers: { Authorization: `Bearer ${S.token}` } })
-          .then(r => r.ok ? r.blob() : Promise.reject('fetch failed'))
-          .then(b => {
-            const bu = URL.createObjectURL(b);
-            blobUrls.push(bu);
-            img.src = bu;
-            img.crossOrigin = 'anonymous';
-            // Wait for image to actually decode/load in DOM
-            return img.decode ? img.decode().then(resolve).catch(resolve) : resolve();
-          })
-          .catch(() => {
-            img.crossOrigin = 'anonymous';
-            resolve(); // Don't block on failed images
-          });
-      });
+      // External images (QR code API) — load directly with CORS
+      if (src.startsWith('http') && !src.includes('/api/')) {
+        return new Promise(resolve => {
+          img.crossOrigin = 'anonymous';
+          const newImg = new Image();
+          newImg.crossOrigin = 'anonymous';
+          newImg.onload = () => { img.src = newImg.src; resolve(); };
+          newImg.onerror = () => resolve();
+          newImg.src = src;
+          setTimeout(resolve, 5000); // 5s max per external image
+        });
+      }
+      // Authenticated R2 images — fetch with token
+      return fetch(src, { headers: { Authorization: `Bearer ${S.token}` } })
+        .then(r => r.ok ? r.blob() : Promise.reject())
+        .then(b => {
+          const bu = URL.createObjectURL(b);
+          blobUrls.push(bu);
+          img.src = bu;
+          img.crossOrigin = 'anonymous';
+          return img.decode ? img.decode().catch(() => {}) : Promise.resolve();
+        })
+        .catch(() => { img.crossOrigin = 'anonymous'; });
     }));
 
-    // Verify all images are actually loaded before canvas capture
-    await Promise.allSettled(imgEls.map(img => {
+    // ── Step 2: Verify ALL images fully loaded ──────────────────────────────
+    await Promise.all(imgEls.map(img => {
       if (img.complete && img.naturalWidth > 0) return Promise.resolve();
       return new Promise(resolve => {
         img.onload = resolve;
         img.onerror = resolve;
-        setTimeout(resolve, 3000); // Max 3s wait per image
+        setTimeout(resolve, 4000);
       });
     }));
 
-    // Extra paint delay for browser rendering
-    await new Promise(r => setTimeout(r, 500));
+    // Extra paint delay
+    await new Promise(r => setTimeout(r, 400));
 
-    const actualH = el.scrollHeight || el.offsetHeight || 1440;
-    const PAGE_W  = 1080;  // output page width
-    const PAGE_H  = 1440;  // output page height (3:4 ratio, optimized for WhatsApp)
-    const SCALE   = 3;     // 3× resolution for crisp high-DPI
+    // ── Step 3: Generate SINGLE long page (min 3072×4096, never split) ──────
+    const CARD_WIDTH = 1080;  // layout width
+    const actualH    = Math.max(el.scrollHeight || el.offsetHeight || 1440, 1365); // min ~4096/3
+    // Scale so output is at least 3072 wide (3072/1080 ≈ 2.84, use 3x)
+    const SCALE = 3; // 1080*3 = 3240 wide, actualH*3 = height (at least 4095)
 
-    // Capture full long canvas at 3× scale for high DPI, sharp text
     const fullCanvas = await html2canvas(el, {
       scale: SCALE,
       useCORS: true,
       allowTaint: false,
-      width: PAGE_W,
+      width: CARD_WIDTH,
       height: actualH,
       backgroundColor: '#ffffff',
       logging: false,
@@ -2634,80 +2663,52 @@ async function generateAndShareJobCard(j, shareMode) {
       letterRendering: true,
     });
 
-    // Revoke blob URLs after capture
+    // Cleanup blob URLs
     blobUrls.forEach(u => URL.revokeObjectURL(u));
 
-    // Slice into 1080×1440 page canvases (3× scale for sharp output)
-    const pageH_scaled = PAGE_H * SCALE;  // 4320
-    const pageW_scaled = PAGE_W * SCALE;  // 3240
-    const totalPages   = Math.ceil(fullCanvas.height / pageH_scaled);
-    const pageBlobs    = [];
+    // ── Step 4: Output SINGLE page JPG (never split QR or content) ──────────
+    const outW = fullCanvas.width;   // 3240 (≥3072 ✓)
+    const outH = fullCanvas.height;  // dynamic height (≥4096 ✓ for typical cards)
+    const blob = await new Promise(resolve =>
+      fullCanvas.toBlob(b => resolve(b), 'image/jpeg', 0.95)
+    );
 
-    for (let p = 0; p < totalPages; p++) {
-      const srcY   = p * pageH_scaled;
-      const srcH   = Math.min(pageH_scaled, fullCanvas.height - srcY);
-      const pc     = document.createElement('canvas');
-      pc.width     = pageW_scaled;
-      pc.height    = pageH_scaled;
-      const ctx    = pc.getContext('2d');
-      // Enable high-quality image rendering
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, pc.width, pc.height);
-      ctx.drawImage(fullCanvas, 0, srcY, pageW_scaled, srcH, 0, 0, pageW_scaled, srcH);
-      await new Promise(res => pc.toBlob(b => { pageBlobs.push(b); res(); }, 'image/jpeg', 0.95));
-    }
-
-    const text     = shareText(j, totalPages > 1);
-    const phone    = (j.snap_mobile || '').replace(/\D/g, '');
-    const waPhone  = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
-    const waText   = encodeURIComponent(text);
-    const waUrl    = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
-
-    // ── Auto-download to Phone Storage/Pictures/JobCard as Job_[JobNumber].jpg ──
     const jobFileName = `Job_${j.id}.jpg`;
-    for (let i = 0; i < pageBlobs.length; i++) {
-      const bUrl = URL.createObjectURL(pageBlobs[i]);
-      const a    = document.createElement('a');
-      a.href = bUrl;
-      a.download = totalPages > 1 ? `Job_${j.id}_p${i+1}.jpg` : jobFileName;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      await new Promise(r => setTimeout(r, 400));
-      URL.revokeObjectURL(bUrl);
-    }
-    toast(`📸 ${jobFileName} saved to Downloads`, 'success');
+    const text    = shareText(j, false);
+    const phone   = (j.snap_mobile || '').replace(/\D/g, '');
+    const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+    const waText  = encodeURIComponent(text);
+    const waUrl   = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
     if (shareMode) {
-      // ── WhatsApp share flow ─────────────────────────────────────────────────
-      const files = pageBlobs.map((b, i) =>
-        new File([b], totalPages > 1 ? `Job_${j.id}_p${i+1}.jpg` : jobFileName, { type: 'image/jpeg' })
-      );
-
-      // 1st try: Web Share API with file(s) — Android Chrome / modern WebView
-      if (navigator.share && navigator.canShare?.({ files })) {
-        try { await navigator.share({ files, title: `Job ${j.id}`, text }); return; }
-        catch (e) { if (e.name === 'AbortError') return; }
+      // ── PARALLEL: Open WhatsApp + download in background simultaneously ──
+      // 1. Open WhatsApp IMMEDIATELY (no delay, no share window)
+      if (waPhone) {
+        window.location.href = `https://wa.me/${waPhone}?text=${waText}`;
+      } else {
+        window.open(waUrl, '_blank');
       }
 
-      // 2nd: Open WhatsApp Business directly to customer chat via wa.me
+      // 2. Auto-download job card in background (non-blocking)
       setTimeout(() => {
-        if (waPhone) {
-          // Try whatsapp:// deep link first (works in PWA/WebView)
-          window.location.href = `whatsapp://send?phone=${waPhone}&text=${waText}`;
-          // Fallback: wa.me link after 1.8s if deep link didn't work
-          setTimeout(() => { try { window.open(waUrl, '_blank'); } catch(_){} }, 1800);
-        } else {
-          window.open(waUrl, '_blank');
-        }
-      }, 600);
+        const bUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = bUrl; a.download = jobFileName;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(bUrl), 2000);
+        toast(`Job card saved: ${jobFileName}`, 'success');
+      }, 300);
 
-      toast(`📸 ${jobFileName} saved — opening WhatsApp…`, 'success');
       return;
     }
 
-    // Download-only mode — already downloaded above
-    toast(`📸 Job card downloaded (${pageBlobs.length} page${pageBlobs.length > 1 ? 's' : ''})`, 'success');
+    // ── Download-only mode ────────────────────────────────────────────────
+    const bUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = bUrl; a.download = jobFileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(bUrl), 2000);
+    toast(`Job card saved: ${jobFileName} (${outW}×${outH}px)`, 'success');
   } catch (e) {
     console.error(e);
     toast('Failed to generate card', 'error');
@@ -2984,6 +2985,7 @@ function showAddStaffModal() {
     <div class="form-group"><label class="form-label">Role</label>
       <select id="as-role" class="form-input">
         <option value="staff">Staff</option>
+        <option value="manager">Manager</option>
         <option value="admin">Admin</option>
       </select>
     </div>
@@ -3015,6 +3017,7 @@ function showEditStaffModal(s) {
       <div class="form-group"><label class="form-label">Role</label>
         <select id="es-role" class="form-input">
           <option value="staff" ${s.role==='staff'?'selected':''}>Staff</option>
+          <option value="manager" ${s.role==='manager'?'selected':''}>Manager</option>
           <option value="admin" ${s.role==='admin'?'selected':''}>Admin</option>
         </select>
       </div>
@@ -3370,7 +3373,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v18.0<br>
+      ✨ adition™ since 1984 · v19.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -3462,8 +3465,97 @@ function showCleanupModal() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMER SELF-TRACKING PAGE — /track?job=[ID]&mobile=[Number]
+// Public view (no auth required) — validates mobile against job data
+// ─────────────────────────────────────────────────────────────────────────────
+function trackHTML() {
+  return `
+  <div class="view-pad" style="max-width:500px;margin:0 auto;padding-top:16px">
+    <div style="text-align:center;margin-bottom:20px">
+      <div style="width:56px;height:56px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:14px;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;font-size:28px;color:#fff"><i class="fas fa-bolt"></i></div>
+      <div style="font-size:22px;font-weight:900;color:#1a1a2e;letter-spacing:1px">ADITION ELECTRIC</div>
+      <div style="font-size:13px;color:#888">Track Your Repair Job</div>
+    </div>
+    <div id="track-content">
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label">Job Number <span class="req">*</span></label>
+          <input id="trk-job" type="text" class="form-input" placeholder="e.g. C-001" value="${esc(new URLSearchParams(window.location.search).get('job')||'')}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Mobile Number <span class="req">*</span></label>
+          <input id="trk-mobile" type="tel" class="form-input" placeholder="9876543210" inputmode="numeric" value="${esc(new URLSearchParams(window.location.search).get('mobile')||'')}">
+        </div>
+        <button id="trk-btn" class="btn-primary btn-full"><i class="fas fa-search"></i> Track Job</button>
+      </div>
+      <div id="trk-result"></div>
+    </div>
+  </div>`;
+}
+
+function bindTrack() {
+  const params = new URLSearchParams(window.location.search);
+  const autoJob    = params.get('job');
+  const autoMobile = params.get('mobile');
+
+  async function doTrack() {
+    const jobId  = document.getElementById('trk-job')?.value.trim();
+    const mobile = document.getElementById('trk-mobile')?.value.trim();
+    if (!jobId || !mobile) { toast('Job number and mobile required', 'error'); return; }
+    const btn = document.getElementById('trk-btn');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Tracking…';
+    const resEl = document.getElementById('trk-result');
+    try {
+      const r = await axios.get('/api/track', { params: { job: jobId, mobile } });
+      const d = r.data;
+      const color = sc(d.status);
+      resEl.innerHTML = `
+        <div class="card mt-3">
+          <div style="background:${color};color:#fff;padding:12px 16px;border-radius:12px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:22px;font-weight:900">${esc(d.id)}</span>
+            <span style="background:rgba(255,255,255,.2);padding:4px 14px;border-radius:8px;font-weight:700">${sl(d.status)}</span>
+          </div>
+          <div class="info-row"><i class="fas fa-user info-icon" style="color:${color}"></i><span class="info-val fw-bold">${esc(d.customer_name)}</span></div>
+          <div class="info-row"><i class="fas fa-calendar info-icon" style="color:${color}"></i><span class="info-val">${fmtDate(d.created_at)}</span></div>
+          ${d.delivered_at ? `<div class="info-row"><i class="fas fa-check-double info-icon" style="color:#1E88E5"></i><span class="info-val">Delivered: ${fmtDate(d.delivered_at)}</span></div>` : ''}
+        </div>
+        <div class="card mt-3">
+          <h3 class="section-title" style="margin:0 0 10px"><i class="fas fa-tools" style="color:#E53935"></i> Machines <span style="background:#E53935;color:#fff;border-radius:10px;padding:2px 10px;font-size:13px;font-weight:700">${d.machine_count}</span></h3>
+          ${(d.machines||[]).map((m, i) => `
+          <div style="background:#f8f9fa;border-radius:10px;padding:10px 14px;margin-bottom:8px;border-left:4px solid ${sc(m.status)}">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="font-weight:700;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?' ×'+m.quantity:''}</span>
+              <span style="background:${sb(m.status)};color:${sc(m.status)};border:1px solid ${sc(m.status)};border-radius:6px;padding:2px 10px;font-size:12px;font-weight:700">${sl(m.status)}</span>
+            </div>
+            ${m.product_complaint ? `<div style="font-size:13px;color:#666;margin-top:4px">${esc(m.product_complaint)}</div>` : ''}
+            ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:2px">Work done: ${esc(m.work_done)}</div>` : ''}
+          </div>`).join('')}
+        </div>`;
+    } catch (e) {
+      resEl.innerHTML = `<div class="card mt-3" style="text-align:center;color:#E53935;padding:24px">
+        <i class="fas fa-exclamation-triangle fa-2x" style="margin-bottom:8px;display:block"></i>
+        ${e.response?.data?.error || 'Failed to track job. Please check job number and mobile.'}
+      </div>`;
+    }
+    btn.disabled = false; btn.innerHTML = '<i class="fas fa-search"></i> Track Job';
+  }
+
+  document.getElementById('trk-btn')?.addEventListener('click', doTrack);
+  document.getElementById('trk-mobile')?.addEventListener('keypress', e => { if (e.key === 'Enter') doTrack(); });
+
+  // Auto-track if URL has both params
+  if (autoJob && autoMobile) setTimeout(doTrack, 200);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BOOT
 // ─────────────────────────────────────────────────────────────────────────────
+// Check if URL is /track route — show tracking page even without auth
+const _urlParams = new URLSearchParams(window.location.search);
+if (window.location.pathname === '/track' || _urlParams.get('view') === 'track' || (_urlParams.has('job') && _urlParams.has('mobile') && !localStorage.getItem('AES_TOKEN'))) {
+  S.view = 'track';
+}
+
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', render);
 } else {

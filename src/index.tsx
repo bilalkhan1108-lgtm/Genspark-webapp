@@ -160,7 +160,8 @@ app.get('/api/customers/by-mobile', authMiddleware, async (c) => {
 
 // ── API: Dashboard Analytics ──────────────────────────────────────────────────
 app.get('/api/analytics', authMiddleware, async (c) => {
-  const isAdmin = c.get('userRole') === 'admin'
+  const role = c.get('userRole')
+  const isAdmin = role === 'admin' || role === 'manager'
   const userId  = c.get('userId')
 
   // Staff see all jobs in analytics (no filter needed)
@@ -210,13 +211,14 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const staffId  = c.req.query('staff_id') || ''
   const from     = c.req.query('from')   || ''
   const to       = c.req.query('to')     || ''
-  const isAdmin  = c.get('userRole') === 'admin'
+  const role     = c.get('userRole')
+  const isAdmin  = role === 'admin' || role === 'manager'
   const userId   = c.get('userId')
   const conds: string[] = []
   const params: any[] = []
 
   if (status) { conds.push('j.status=?'); params.push(status) }
-  // Staff: hide delivered jobs only (can see all non-delivered jobs)
+  // Staff: hide delivered jobs only (managers and admin can see all)
   if (!isAdmin) {
     conds.push("j.status != 'delivered'")
   }
@@ -438,7 +440,8 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
-  const isAdmin = c.get('userRole') === 'admin'
+  const role    = c.get('userRole')
+  const isAdmin = role === 'admin' || role === 'manager'
   const userId  = c.get('userId')
   const machine = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(id).first<any>()
   if (!machine) return c.json({ error: 'Not found' }, 404)
@@ -519,7 +522,8 @@ app.post('/api/machines/:id/images', authMiddleware, async (c) => {
   if (!machine) return c.json({ error: 'Machine not found' }, 404)
 
   // Staff can only upload to their assigned machines
-  const isAdmin = c.get('userRole') === 'admin'
+  const role = c.get('userRole')
+  const isAdmin = role === 'admin' || role === 'manager'
   if (!isAdmin && machine.assigned_staff_id !== c.get('userId'))
     return c.json({ error: 'Not assigned to this machine' }, 403)
 
@@ -570,7 +574,8 @@ app.post('/api/machines/:id/audio', authMiddleware, async (c) => {
   const machine   = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(machineId).first<any>()
   if (!machine) return c.json({ error: 'Machine not found' }, 404)
 
-  const isAdmin = c.get('userRole') === 'admin'
+  const role = c.get('userRole')
+  const isAdmin = role === 'admin' || role === 'manager'
   if (!isAdmin && machine.assigned_staff_id !== c.get('userId'))
     return c.json({ error: 'Not assigned to this machine' }, 403)
 
@@ -796,11 +801,13 @@ app.post('/api/staff', authMiddleware, adminOnly, async (c) => {
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
   const { name, email, password, role, active } = body
   if (!name || !email || !password) return c.json({ error: 'name, email, password required' }, 400)
+  const validRoles = ['admin', 'manager', 'staff']
+  const userRole = validRoles.includes(role) ? role : 'staff'
   const hash = await bcrypt.hash(password, 10)
   try {
     await c.env.DB.prepare(
       'INSERT INTO users(name,email,password_hash,role,active) VALUES(?,?,?,?,?)'
-    ).bind(name, email, hash, role || 'staff', active !== undefined ? active : 1).run()
+    ).bind(name, email, hash, userRole, active !== undefined ? active : 1).run()
     return c.json({ ok: true }, 201)
   } catch (e: any) {
     if (e.message?.includes('UNIQUE')) return c.json({ error: 'Email already exists' }, 409)
@@ -820,7 +827,7 @@ app.put('/api/staff/:id', authMiddleware, adminOnly, async (c) => {
     const hash = await bcrypt.hash(body.password, 10)
     fields.push('password_hash=?'); vals.push(hash)
   }
-  if (body.role)               { fields.push('role=?');   vals.push(body.role) }
+  if (body.role && ['admin','manager','staff'].includes(body.role)) { fields.push('role=?');   vals.push(body.role) }
   if (body.active !== undefined) { fields.push('active=?'); vals.push(body.active) }
   if (!fields.length) return c.json({ error: 'Nothing to update' }, 400)
   vals.push(id)
@@ -1209,6 +1216,50 @@ app.delete('/api/cleanup', authMiddleware, adminOnly, async (c) => {
     return c.json({ ok: true, deleted })
   }
   return c.json({ error: 'Provide from/to dates or full_reset:true' }, 400)
+})
+
+// ── API: Customer Self-Tracking (PUBLIC — no auth) ──────────────────────────
+app.get('/api/track', async (c) => {
+  const jobId  = c.req.query('job')    || ''
+  const mobile = c.req.query('mobile') || ''
+  if (!jobId || !mobile) return c.json({ error: 'job and mobile parameters required' }, 400)
+
+  const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first<any>()
+  if (!job) return c.json({ error: 'Job not found' }, 404)
+
+  // Validate mobile matches the job's customer
+  const jobMobile  = (job.snap_mobile  || '').replace(/\D/g, '')
+  const jobMobile2 = (job.snap_mobile2 || '').replace(/\D/g, '')
+  const queryMob   = mobile.replace(/\D/g, '')
+  if (queryMob !== jobMobile && queryMob !== jobMobile2 && '91' + queryMob !== jobMobile && queryMob !== '91' + jobMobile) {
+    return c.json({ error: 'Mobile number does not match this job' }, 403)
+  }
+
+  // Return limited public info (no financial data, no staff info)
+  const { results: machines } = await c.env.DB.prepare(`
+    SELECT m.product_name, m.product_complaint, m.status, m.quantity, m.work_done,
+           (SELECT json_group_array(json_object('url',mi.url)) FROM machine_images mi WHERE mi.machine_id=m.id) AS images_json
+    FROM machines m WHERE m.job_id=? ORDER BY m.id
+  `).bind(jobId).all<any>()
+
+  const enriched = machines.map((m: any) => ({
+    product_name: m.product_name,
+    product_complaint: m.product_complaint,
+    status: m.status,
+    quantity: m.quantity,
+    work_done: m.work_done,
+    images: (() => { try { return JSON.parse(m.images_json || '[]') } catch { return [] } })()
+  }))
+
+  return c.json({
+    id: job.id,
+    customer_name: job.snap_name,
+    status: job.status,
+    created_at: job.created_at,
+    delivered_at: job.delivered_at,
+    machine_count: enriched.length,
+    machines: enriched,
+  })
 })
 
 // ── Static + SPA ──────────────────────────────────────────────────────────────
