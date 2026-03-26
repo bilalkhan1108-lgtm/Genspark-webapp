@@ -1,7 +1,7 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v19
+// Service Worker — ADITION ELECTRIC SOLUTION v20
 // Strategy: Cache-first for static UI  ·  Network-first for API
 // Scope: / (serves entire app shell)
-const CACHE_VER  = 'aes-v19';
+const CACHE_VER  = 'aes-v20';
 const STATIC_URLS = [
   '/',
   '/static/app.js',

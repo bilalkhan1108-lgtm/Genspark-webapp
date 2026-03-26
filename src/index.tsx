@@ -347,7 +347,8 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
-  const isAdmin = c.get('userRole') === 'admin'
+  const role = c.get('userRole')
+  const isAdmin = role === 'admin' || role === 'manager'
   if (!isAdmin) return c.json({ error: 'Forbidden' }, 403)
 
   const fields: string[] = []
@@ -751,7 +752,7 @@ app.get('/api/jobs/:id/history', authMiddleware, async (c) => {
       )
     `).run()
     const { results } = await c.env.DB.prepare(`
-      SELECT * FROM job_history WHERE job_id=? ORDER BY created_at ASC
+      SELECT * FROM job_history WHERE job_id=? ORDER BY created_at DESC
     `).bind(jobId).all<any>()
     return c.json(results || [])
   } catch (_) {
@@ -1079,6 +1080,24 @@ app.get('/api/customers/search', authMiddleware, async (c) => {
     WHERE c.name LIKE ? OR c.mobile LIKE ? OR c.mobile2 LIKE ?
     ORDER BY c.name LIMIT 8
   `).bind(term, term, term).all<any>()
+  return c.json(results)
+})
+
+// ── API: Customer list (all customers with stats) ─────────────────────────────
+app.get('/api/customers', authMiddleware, async (c) => {
+  const role = c.get('userRole')
+  const isAdminRole = role === 'admin' || role === 'manager'
+  if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
+  const { results } = await c.env.DB.prepare(`
+    SELECT c.id, c.name, c.mobile, c.mobile2, c.address,
+           COUNT(DISTINCT j.id) AS total_jobs,
+           SUM(CASE WHEN j.status='delivered' THEN 1 ELSE 0 END) AS delivered_jobs,
+           MAX(j.created_at) AS last_job_date
+    FROM customers c
+    LEFT JOIN jobs j ON j.customer_id = c.id
+    GROUP BY c.id ORDER BY c.name
+    LIMIT 500
+  `).all<any>()
   return c.json(results)
 })
 

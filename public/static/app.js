@@ -1,15 +1,15 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v19                       ║
-// ║  v19 Changes:                                                        ║
-// ║  · High-res single-page job card (3072x4096 min, dynamic height)   ║
-// ║  · Promise.all image preloading before card generation              ║
-// ║  · Machine counter (Total Machines: N) with real-time update        ║
-// ║  · Manager role: create/edit jobs, no delete/staff/reports/settings ║
-// ║  · Job history timeline (newest first)                              ║
-// ║  · Optimistic UI for fast job creation                              ║
-// ║  · Customer self-tracking link /track?job=&mobile=                  ║
-// ║  · WhatsApp direct open + parallel background download              ║
-// ║  · Parallel WhatsApp + download, data caching, error handling       ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v20                       ║
+// ║  v20 Changes:                                                        ║
+// ║  · Image loading: robust retry/fallback with Promise.all + timeout  ║
+// ║  · Job history: all actions logged to DB + timeline in UI           ║
+// ║  · WhatsApp messages: shorter, professional, with tracking link     ║
+// ║  · Auto-download JPG: programmatic <a> click, no popup/permission   ║
+// ║  · Delivery form: optional fields (receiver mobile, courier etc.)   ║
+// ║  · Delivered filter visible in dashboard chip bar                   ║
+// ║  · Customer Master section in Reports                               ║
+// ║  · UI compactness: tighter spacing, better mobile layout            ║
+// ║  · Stability: retry logic, fallback, global error handling          ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -1754,16 +1754,22 @@ function bindDetail(j) {
     const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
     const balance = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
     const products = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
-    const reminderMsg = `Hello ${j.snap_name || 'Valued Customer'},
+    const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(waPhone.replace(/^91/, ''))}`;
+    const reminderMsg = `⚡ *ADITION ELECTRIC*
 
-⚠️ *Reminder* — Your job *#${j.id}* is ready and awaiting collection.
+Dear ${j.snap_name || 'Valued Customer'},
 
-*Products:*
+⚠️ *Reminder* — Job *#${j.id}* awaits collection.
+
+*Items:*
 ${products}
-${balance > 0 ? `\n*Amount Due: ₹${balance}*\nPlease complete payment to proceed with delivery.\n` : ''}
-Kindly collect within *25 days* from repair date to avoid liability.
+${balance > 0 ? `\n*Due: ₹${balance}*\nPlease pay to proceed.\n` : ''}
+🔗 *Track:* ${trackLink}
 
-— *ADITION ELECTRIC SOLUTION*`;
+Collect within *25 days* to avoid liability.
+
+📞 7801990001
+— *ADITION ELECTRIC* ✨`;
     const text    = encodeURIComponent(reminderMsg);
     const url     = waPhone ? `https://wa.me/${waPhone}?text=${text}` : `https://wa.me/?text=${text}`;
     // Direct wa.me open — no share window
@@ -1834,7 +1840,7 @@ async function showJobHistory(j) {
 
   try {
     const r = await API.get(`/api/jobs/${j.id}/history`);
-    const events = (r.data || []).reverse(); // newest first
+    const events = r.data || []; // server returns newest first
     const el = document.getElementById('jh-list');
     if (!el) return;
 
@@ -2372,7 +2378,7 @@ function showDeliveryModal(j) {
       </select>
     </div>
     <div class="form-group">
-      <label class="form-label">Receiver Name <span class="req">*</span></label>
+      <label class="form-label">Receiver Name <span style="color:#999;font-size:12px">(optional)</span></label>
       <input id="dm-rname" type="text" class="form-input" placeholder="Person who collected the device">
     </div>
     <div class="form-group">
@@ -2416,8 +2422,7 @@ function showDeliveryModal(j) {
   toggleCourierFields('in_person'); // default dim courier fields
 
   document.getElementById('dm-confirm')?.addEventListener('click', async () => {
-    const rname = document.getElementById('dm-rname')?.value.trim();
-    if (!rname) { toast('Receiver name required', 'error'); return; }
+    const rname = document.getElementById('dm-rname')?.value.trim() || null;
     try {
       await API.put(`/api/jobs/${j.id}`, {
         status:                   'delivered',
@@ -2429,7 +2434,13 @@ function showDeliveryModal(j) {
         delivery_address:         document.getElementById('dm-addr')?.value    || null,
         ...(isAdmin() ? { received_amount: parseFloat(document.getElementById('dm-recv')?.value) || 0 } : {}),
       });
-      closeModal(); toast('Job marked as delivered ✅', 'success'); await loadDetail();
+      closeModal(); toast('Job marked as delivered ✅', 'success');
+      // Log delivery to history
+      API.post(`/api/jobs/${j.id}/history`, {
+        action: 'Delivered',
+        detail: `Delivered to: ${rname || 'Customer'}${document.getElementById('dm-method')?.value === 'courier' ? ' via courier' : ' in person'}`
+      }).catch(() => {});
+      await loadDetail();
     } catch (_) { toast('Failed to update', 'error'); }
   });
 }
@@ -2541,6 +2552,22 @@ function jobCardPrintHTML(j) {
 
   const noteBlock = j.note ? `<div style="margin:0 30px 8px;background:#fffde7;border-radius:8px;padding:10px 14px;font-size:15px;color:#795548"><b>Note:</b> ${esc(j.note)}</div>` : '';
 
+  // Tracking link for job card print
+  const trackPhone = (j.snap_mobile || '').replace(/\D/g, '');
+  const printTrackUrl = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(trackPhone)}`;
+
+  const trackingBlock = `
+    <div style="margin:0 30px 10px;background:#E3F2FD;border:2px solid #1565C0;border-radius:10px;padding:12px 16px;display:flex;align-items:center;gap:12px">
+      <div style="flex-shrink:0">
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=${encodeURIComponent(printTrackUrl)}" style="width:80px;height:80px;border-radius:6px" crossorigin="anonymous" onerror="this.style.display='none'">
+      </div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:15px;font-weight:800;color:#1565C0;margin-bottom:3px">🔗 Track Your Job Online</div>
+        <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.4">${printTrackUrl}</div>
+        <div style="font-size:11px;color:#888;margin-top:2px">Scan QR code or visit the link above</div>
+      </div>
+    </div>`;
+
   const footerBlock = `
     <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:18px 30px;margin-top:auto">
       <div style="color:#fff;font-size:16px;font-weight:700">✨ adition™ since 1984</div>
@@ -2583,6 +2610,7 @@ function jobCardPrintHTML(j) {
     ${noteBlock}
     ${paymentBlock}
     ${deliveryBlock}
+    ${trackingBlock}
     ${footerBlock}
   </div>`;
 }
@@ -2599,51 +2627,71 @@ async function generateAndShareJobCard(j, shareMode) {
 
     el.style.left = '-99999px'; el.style.top = '0';
 
-    // ── Step 1: Pre-load ALL images (product, QR, logo) via Promise.all ──────
+    // ── Step 1: Pre-load ALL images (product, QR, logo) via Promise.all + retry ──
     const blobUrls = [];
     const imgEls = Array.from(el.querySelectorAll('img'));
 
-    await Promise.all(imgEls.map(img => {
+    // Robust image loader with retry and fallback
+    async function loadImageWithRetry(img, maxRetries = 2) {
       const src = img.getAttribute('src') || img.getAttribute('data-auth-src') || '';
-      if (!src) return Promise.resolve();
-      if (src.startsWith('blob:') || src.startsWith('data:')) { img.crossOrigin = 'anonymous'; return Promise.resolve(); }
-      // External images (QR code API) — load directly with CORS
+      if (!src) return;
+      if (src.startsWith('blob:') || src.startsWith('data:')) { img.crossOrigin = 'anonymous'; return; }
+
+      // External images (QR code API) — load directly with CORS + retry
       if (src.startsWith('http') && !src.includes('/api/')) {
-        return new Promise(resolve => {
-          img.crossOrigin = 'anonymous';
-          const newImg = new Image();
-          newImg.crossOrigin = 'anonymous';
-          newImg.onload = () => { img.src = newImg.src; resolve(); };
-          newImg.onerror = () => resolve();
-          newImg.src = src;
-          setTimeout(resolve, 5000); // 5s max per external image
-        });
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            await new Promise((resolve, reject) => {
+              const newImg = new Image();
+              newImg.crossOrigin = 'anonymous';
+              newImg.onload = () => { img.src = newImg.src; resolve(); };
+              newImg.onerror = () => reject(new Error('load failed'));
+              newImg.src = src + (attempt > 0 ? '&_r=' + attempt : '');
+              setTimeout(() => reject(new Error('timeout')), 8000);
+            });
+            return; // success
+          } catch (_) {
+            if (attempt === maxRetries) { img.crossOrigin = 'anonymous'; }
+            else { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); }
+          }
+        }
+        return;
       }
-      // Authenticated R2 images — fetch with token
-      return fetch(src, { headers: { Authorization: `Bearer ${S.token}` } })
-        .then(r => r.ok ? r.blob() : Promise.reject())
-        .then(b => {
-          const bu = URL.createObjectURL(b);
+
+      // Authenticated R2 images — fetch with token + retry
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const resp = await fetch(src, { headers: { Authorization: `Bearer ${S.token}` } });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const blob = await resp.blob();
+          const bu = URL.createObjectURL(blob);
           blobUrls.push(bu);
           img.src = bu;
           img.crossOrigin = 'anonymous';
-          return img.decode ? img.decode().catch(() => {}) : Promise.resolve();
-        })
-        .catch(() => { img.crossOrigin = 'anonymous'; });
-    }));
+          if (img.decode) await img.decode().catch(() => {});
+          return; // success
+        } catch (_) {
+          if (attempt === maxRetries) { img.crossOrigin = 'anonymous'; }
+          else { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); }
+        }
+      }
+    }
 
-    // ── Step 2: Verify ALL images fully loaded ──────────────────────────────
+    // Load all images in parallel with individual retry
+    await Promise.all(imgEls.map(img => loadImageWithRetry(img, 2)));
+
+    // ── Step 2: Verify ALL images fully loaded (double-check) ──────────────
     await Promise.all(imgEls.map(img => {
       if (img.complete && img.naturalWidth > 0) return Promise.resolve();
       return new Promise(resolve => {
         img.onload = resolve;
         img.onerror = resolve;
-        setTimeout(resolve, 4000);
+        setTimeout(resolve, 5000);
       });
     }));
 
-    // Extra paint delay
-    await new Promise(r => setTimeout(r, 400));
+    // Extra paint delay for rendering
+    await new Promise(r => setTimeout(r, 500));
 
     // ── Step 3: Generate SINGLE long page (min 3072×4096, never split) ──────
     const CARD_WIDTH = 1080;  // layout width
@@ -2680,35 +2728,64 @@ async function generateAndShareJobCard(j, shareMode) {
     const waText  = encodeURIComponent(text);
     const waUrl   = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
-    if (shareMode) {
-      // ── PARALLEL: Open WhatsApp + download in background simultaneously ──
-      // 1. Open WhatsApp IMMEDIATELY (no delay, no share window)
-      if (waPhone) {
-        window.location.href = `https://wa.me/${waPhone}?text=${waText}`;
-      } else {
-        window.open(waUrl, '_blank');
-      }
-
-      // 2. Auto-download job card in background (non-blocking)
-      setTimeout(() => {
-        const bUrl = URL.createObjectURL(blob);
+    // ── Auto-download helper: programmatic <a> click, no permission popup ──
+    function autoDownloadBlob(blobData, fileName) {
+      try {
+        const bUrl = URL.createObjectURL(blobData);
         const a = document.createElement('a');
-        a.href = bUrl; a.download = jobFileName;
-        document.body.appendChild(a); a.click(); document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(bUrl), 2000);
-        toast(`Job card saved: ${jobFileName}`, 'success');
-      }, 300);
+        a.href = bUrl;
+        a.download = fileName;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        // Cleanup after a delay
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(bUrl);
+        }, 3000);
+        return true;
+      } catch (e) {
+        console.error('[AES] Auto-download failed:', e);
+        return false;
+      }
+    }
+
+    if (shareMode) {
+      // ── PARALLEL: Open WhatsApp + auto-download simultaneously ──
+      // 1. Start auto-download FIRST (programmatic <a> click — no permission popup)
+      autoDownloadBlob(blob, jobFileName);
+      toast(`Downloading ${jobFileName}…`, 'success');
+
+      // 2. Open WhatsApp Business directly via wa.me (no share window)
+      setTimeout(() => {
+        if (waPhone) {
+          window.location.href = `https://wa.me/${waPhone}?text=${waText}`;
+        } else {
+          window.open(waUrl, '_blank');
+        }
+      }, 150);
+
+      // 3. Log to job history in background
+      API.post(`/api/jobs/${j.id}/history`, {
+        action: 'Job Card Shared',
+        detail: `Sent via WhatsApp to ${j.snap_mobile}. File: ${jobFileName} (${outW}×${outH}px)`
+      }).catch(() => {});
 
       return;
     }
 
-    // ── Download-only mode ────────────────────────────────────────────────
-    const bUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = bUrl; a.download = jobFileName;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(bUrl), 2000);
-    toast(`Job card saved: ${jobFileName} (${outW}×${outH}px)`, 'success');
+    // ── Download-only mode: programmatic <a> click ────────────────────────
+    const downloaded = autoDownloadBlob(blob, jobFileName);
+    if (downloaded) {
+      toast(`Job card saved: ${jobFileName} (${outW}×${outH}px)`, 'success');
+    } else {
+      toast('Download failed — please try again', 'error');
+    }
+    // Log to job history
+    API.post(`/api/jobs/${j.id}/history`, {
+      action: 'Job Card Downloaded',
+      detail: `File: ${jobFileName} (${outW}×${outH}px)`
+    }).catch(() => {});
   } catch (e) {
     console.error(e);
     toast('Failed to generate card', 'error');
@@ -2722,6 +2799,10 @@ function shareText(j, multiPage) {
   const isDelivered = j.status === 'delivered';
   const total       = j.total_charges || 0;
   const received    = j.received_amount || 0;
+  const phone       = (j.snap_mobile || '').replace(/\D/g, '');
+
+  // Tracking link — always include in messages
+  const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(phone)}`;
 
   // Build itemized product list with individual prices
   const products = (j.machines||[]).map(m => {
@@ -2733,85 +2814,74 @@ function shareText(j, multiPage) {
   }).join('\n') || '• Your device';
 
   if (isRepaired && balance > 0) {
-    return `🔧 *ADITION ELECTRIC SOLUTION* 🔧
-—————————————————
+    // PAYMENT PENDING — short, professional, tracking link included
+    return `⚡ *ADITION ELECTRIC SOLUTION*
 
-Hello *${custName}*,
+Dear *${custName}*,
 
-Your repair job *#${j.id}* is ready for collection! 🎉
+Your job *#${j.id}* is *ready for collection!* 🎉
 
-📋 *Products Repaired:*
+📋 *Items:*
 ${products}
 
-💰 *Payment Summary:*
-Total Repair Amount: ₹${total.toLocaleString('en-IN')}
-Amount Received: ₹${received.toLocaleString('en-IN')}
-⚠️ *Amount Due: ₹${balance.toLocaleString('en-IN')}*
+💰 *Total:* ₹${total.toLocaleString('en-IN')}
+✅ *Paid:* ₹${received.toLocaleString('en-IN')}
+⚠️ *Due: ₹${balance.toLocaleString('en-IN')}*
 
-To receive your device, kindly complete the payment.
-Payment details (UPI / Bank) are shown in the job card image.
+Please complete payment to collect. UPI/Bank details in attached job card.
 
-✅ *Approval:* By collecting the device, you confirm that the repair work has been completed to your satisfaction and you approve the charges mentioned above.
+🔗 *Track your job:* ${trackLink}
 
-⚠️ *Important:* Please collect your device within *25 days* from this notice. After this period, we shall not be held liable for any claims, loss, or damage.
+✅ By collecting, you approve the repair charges.
+⚠️ Collect within *25 days* — we are not liable after.
 
-📞 *Contact:* 7801990001
-📍 Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001
-
-— *ADITION ELECTRIC SOLUTION* ✨
-_Since 1984_`;
+📞 7801990001
+— *ADITION ELECTRIC* ✨ _Since 1984_`;
   }
 
   if (isDelivered) {
-    return `🔧 *ADITION ELECTRIC SOLUTION* 🔧
-—————————————————
+    return `⚡ *ADITION ELECTRIC SOLUTION*
 
-Hello *${custName}*,
+Dear *${custName}*,
 
-Your job *#${j.id}* has been successfully delivered! ✅
+Your job *#${j.id}* has been *delivered* ✅
 
-📋 *Products:*
+📋 *Items:*
 ${products}
+${total > 0 ? `\n💰 Total: ₹${total.toLocaleString('en-IN')} | Paid: ₹${received.toLocaleString('en-IN')}` : ''}
 
-✅ *Approval:* Delivery confirmed. Thank you for approving the completed repair work.
+🔗 *Track:* ${trackLink}
 
-Thank you for trusting us with your repair needs! 🙏
+Thank you for choosing us! 🙏
 
-📞 *Contact:* 7801990001
-📍 Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001
-
-— *ADITION ELECTRIC SOLUTION* ✨
-_Since 1984_`;
+📞 7801990001
+— *ADITION ELECTRIC* ✨ _Since 1984_`;
   }
 
-  // Under repair / just created — job creation message with exact format
-  return `🔧 *ADITION ELECTRIC SOLUTION* 🔧
-—————————————————
+  // APPROVAL MESSAGE — job creation, short & professional, tracking link
+  return `⚡ *ADITION ELECTRIC SOLUTION*
 
-Hello *${custName}*,
+Dear *${custName}*,
 
-Your job has been successfully registered! ✅
+Your job is registered! ✅
 
-🆔 *Job Number:* ${j.id}
+🆔 *Job:* ${j.id}
 📅 *Date:* ${fmtDate(j.created_at)}
 
-📋 *Products Registered:*
+📋 *Items:*
 ${products}
-${total > 0 ? `\n💰 *Estimated Repair Amount:* ₹${total.toLocaleString('en-IN')}` : ''}
-${received > 0 ? `\n✅ *Advance Received:* ₹${received.toLocaleString('en-IN')}` : ''}
-${balance > 0 ? `\n⚠️ *Balance Due:* ₹${balance.toLocaleString('en-IN')}` : ''}
+${total > 0 ? `\n💰 *Est. Amount:* ₹${total.toLocaleString('en-IN')}` : ''}
+${received > 0 ? `✅ *Advance:* ₹${received.toLocaleString('en-IN')}` : ''}
+${balance > 0 ? `⚠️ *Balance:* ₹${balance.toLocaleString('en-IN')}` : ''}
 
-✅ *Approval:* By handing over the device for repair, you approve the estimated charges and agree to the terms of service.
+🔗 *Track your job:* ${trackLink}
 
-We will notify you once the repair is complete. 🔔
+✅ By handing over the device, you approve the estimated charges.
+We'll notify you once repair is complete. 🔔
+⚠️ Collect within *25 days* of notification.
 
-⚠️ *Important:* Please collect your device within *25 days* from the date of notification. After this period, we shall not be held liable for any claims, loss, or damage to uncollected items.
-
-📞 *Contact:* 7801990001
-📍 Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001
-
-— *ADITION ELECTRIC SOLUTION* ✨
-_Since 1984_`;
+📞 7801990001
+— *ADITION ELECTRIC* ✨ _Since 1984_`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2937,7 +3007,7 @@ function renderStaffList() {
   el.innerHTML = S.staff.map(s => `
   <div class="staff-card">
     <div>
-      <div class="staff-name">${esc(s.name)} <span class="role-badge ${s.role==='admin'?'role-admin':'role-staff'}">${s.role}</span></div>
+      <div class="staff-name">${esc(s.name)} <span class="role-badge ${s.role==='admin'?'role-admin':s.role==='manager'?'role-manager':'role-staff'}">${s.role}</span></div>
       <div class="staff-email">${esc(s.email)}</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
@@ -3078,6 +3148,17 @@ function reportsHTML() {
   }
   return `
   <div class="view-pad">
+    <div class="report-card" id="customer-master-card">
+      <div class="report-title"><i class="fas fa-address-book" style="color:#00897B"></i> Customer Master</div>
+      <div class="report-desc">Search, view all customers and their job history</div>
+      <div class="form-group" style="margin-top:10px">
+        <div style="display:flex;gap:8px">
+          <input id="cm-search" type="text" class="form-input" placeholder="Search by name or mobile…" autocomplete="off" style="flex:1">
+          <button id="btn-cm-search" class="btn-sm" style="background:#00897B;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer"><i class="fas fa-search"></i></button>
+        </div>
+      </div>
+      <div id="cm-results" style="max-height:320px;overflow-y:auto;margin-top:8px"></div>
+    </div>
     <div class="report-card">
       <div class="report-title"><i class="fas fa-users" style="color:#1E88E5"></i> Customer Data Export</div>
       <div class="report-desc">Export all customers: name, phone, total jobs (deduplicated)</div>
@@ -3314,6 +3395,42 @@ function bindReports() {
   };
   document.getElementById('btn-ledger-a')?.addEventListener('click', () => dlLedger('A'));
   document.getElementById('btn-ledger-b')?.addEventListener('click', () => dlLedger('B'));
+
+  // ── Customer Master search ──────────────────────────────────────────────
+  const cmSearch = async () => {
+    const q = document.getElementById('cm-search')?.value.trim();
+    if (!q || q.length < 2) { toast('Enter at least 2 characters', 'error'); return; }
+    const resEl = document.getElementById('cm-results');
+    if (!resEl) return;
+    resEl.innerHTML = '<div class="loader-wrap"><i class="fas fa-spinner fa-spin"></i></div>';
+    try {
+      const r = await API.get('/api/customers/search', { params: { q } });
+      const custs = r.data || [];
+      if (!custs.length) {
+        resEl.innerHTML = '<p style="text-align:center;color:#888;padding:16px">No customers found</p>';
+        return;
+      }
+      resEl.innerHTML = custs.map(c => `
+        <div style="padding:10px 12px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-weight:700;color:#1a1a2e;font-size:15px">${esc(c.name)}</div>
+            <div style="font-size:13px;color:#888">${c.mobile||''}${c.mobile2?' / '+c.mobile2:''}</div>
+            ${c.address ? `<div style="font-size:12px;color:#aaa">${esc(c.address)}</div>` : ''}
+          </div>
+          <button class="btn-sm btn-blue cm-view-history" data-mobile="${c.mobile}" data-name="${esc(c.name)}" style="white-space:nowrap">
+            <i class="fas fa-history"></i> History
+          </button>
+        </div>`).join('');
+      // Bind history buttons
+      resEl.querySelectorAll('.cm-view-history').forEach(btn => {
+        btn.addEventListener('click', () => showCustomerHistory(btn.dataset.mobile, btn.dataset.name));
+      });
+    } catch (_) {
+      resEl.innerHTML = '<p style="text-align:center;color:#e53935;padding:16px">Search failed</p>';
+    }
+  };
+  document.getElementById('btn-cm-search')?.addEventListener('click', cmSearch);
+  document.getElementById('cm-search')?.addEventListener('keypress', e => { if (e.key === 'Enter') cmSearch(); });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3373,7 +3490,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v19.0<br>
+      ✨ adition™ since 1984 · v20.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
