@@ -91,7 +91,7 @@ async function ensureDbSchema(db: D1Database) {
     // Add work_done / return_reason columns if not exist (idempotent)
     await db.prepare(`ALTER TABLE machines ADD COLUMN work_done TEXT`).run().catch(() => {})
     await db.prepare(`ALTER TABLE machines ADD COLUMN return_reason TEXT`).run().catch(() => {})
-    // Ensure job_history audit table exists
+    // Ensure job_history audit table exists with index
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS job_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,12 +103,28 @@ async function ensureDbSchema(db: D1Database) {
         created_at TEXT DEFAULT (datetime('now'))
       )
     `).run().catch(() => {})
+    // Performance indexes for high-volume operations (lakhs of jobs)
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_job ON job_history(job_id)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_created ON job_history(created_at)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_mobile ON jobs(snap_mobile)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_name ON jobs(snap_name)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_status_date ON jobs(status, created_at)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_cust_name ON customers(name)`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
 
-// ── Job status auto-update ────────────────────────────────────────────────────
-async function updateJobStatus(db: D1Database, jobId: string) {
+// ── Job history helper — fire-and-forget, never blocks ───────────────────────
+async function logHistory(db: D1Database, jobId: string, action: string, detail: string, userName: string, userRole: string) {
+  try {
+    await db.prepare(
+      `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
+    ).bind(jobId, action, detail, userName, userRole).run()
+  } catch (_) {}
+}
+
+// ── Job status auto-update (with history logging) ──────────────────────────────
+async function updateJobStatus(db: D1Database, jobId: string, userName?: string, userRole?: string) {
   const { results: machines } = await db.prepare(
     'SELECT status FROM machines WHERE job_id=?'
   ).bind(jobId).all<any>()
@@ -118,8 +134,13 @@ async function updateJobStatus(db: D1Database, jobId: string) {
   const allReturned    = machines.every((m: any) => m.status === 'returned')
   const anyUnderRepair = machines.some((m: any)  => m.status === 'under_repair')
   let newStatus = anyUnderRepair ? 'under_repair' : allReturned ? 'returned' : 'repaired'
+  const oldStatus = job?.status
   await db.prepare(`UPDATE jobs SET status=?,updated_at=datetime('now') WHERE id=?`)
     .bind(newStatus, jobId).run()
+  // Log auto status transition
+  if (oldStatus !== newStatus && userName) {
+    logHistory(db, jobId, `Auto Status: ${newStatus}`, `Job status auto-changed from ${oldStatus} to ${newStatus}`, userName, userRole || 'system')
+  }
 }
 
 // ── API: Auth ─────────────────────────────────────────────────────────────────
@@ -181,7 +202,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
       SELECT j.status, COUNT(j.id) AS cnt FROM jobs j GROUP BY j.status ORDER BY cnt DESC
     `).all<any>() : { results: [] },
     isAdmin ? c.env.DB.prepare(`
-      SELECT u.name, COUNT(m.id) AS cnt, SUM(m.charges) AS total_charges
+      SELECT u.name, COUNT(m.id) AS cnt, SUM(m.charges * m.quantity) AS total_charges
       FROM machines m JOIN users u ON m.assigned_staff_id=u.id
       GROUP BY u.id, u.name ORDER BY cnt DESC LIMIT 10
     `).all<any>() : { results: [] },
@@ -211,6 +232,8 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const staffId  = c.req.query('staff_id') || ''
   const from     = c.req.query('from')   || ''
   const to       = c.req.query('to')     || ''
+  const limit    = Math.min(parseInt(c.req.query('limit') || '100'), 500)
+  const offset   = parseInt(c.req.query('offset') || '0') || 0
   const role     = c.get('userRole')
   const isAdmin  = role === 'admin' || role === 'manager'
   const userId   = c.get('userId')
@@ -240,12 +263,12 @@ app.get('/api/jobs', authMiddleware, async (c) => {
     SELECT j.id, j.snap_name, j.snap_mobile, j.status,
            j.received_amount, j.created_at, j.updated_at,
            (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
-           (SELECT SUM(charges) FROM machines WHERE job_id=j.id) AS total_charges,
+           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS total_charges,
            (SELECT url FROM machine_images mi
             JOIN machines m2 ON mi.machine_id=m2.id
             WHERE m2.job_id=j.id ORDER BY mi.id LIMIT 1) AS thumb
     FROM jobs j ${where}
-    ORDER BY j.created_at DESC LIMIT 500
+    ORDER BY j.created_at DESC LIMIT ${limit} OFFSET ${offset}
   `).bind(...params).all<any>()
 
   return c.json(results.map((r: any) => ({
@@ -296,20 +319,53 @@ app.post('/api/jobs', authMiddleware, async (c) => {
 
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first<any>()
   // Log history: job created
-  try {
-    await c.env.DB.prepare(
-      `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
-    ).bind(jobId, 'Job Created', `Customer: ${customer_name} (${customer_mobile})`,
-           c.get('userName') || 'System', c.get('userRole') || 'admin').run()
-  } catch (_) {}
+  logHistory(c.env.DB, jobId, 'Job Created', `Customer: ${customer_name} (${customer_mobile})${body.note ? ' | Note: ' + body.note : ''}`, c.get('userName') || 'System', c.get('userRole') || 'admin')
   return c.json(job, 201)
 })
+// ── API: Delivered jobs with filters (date range, delivery type) ─────────────
+// MUST be registered BEFORE /api/jobs/:id to avoid route conflict
+app.get('/api/jobs/delivered', authMiddleware, async (c) => {
+  const role = c.get('userRole')
+  const isAdminRole = role === 'admin' || role === 'manager'
+  if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
+  const from     = c.req.query('from') || ''
+  const to       = c.req.query('to')   || ''
+  const method   = c.req.query('method') || ''
+  const search   = c.req.query('q') || ''
+  const conds: string[] = ["j.status='delivered'"]
+  const params: any[] = []
+  if (from) { conds.push('DATE(j.delivered_at)>=?'); params.push(from) }
+  if (to)   { conds.push('DATE(j.delivered_at)<=?'); params.push(to) }
+  if (method && (method === 'in_person' || method === 'courier')) {
+    conds.push('j.delivery_method=?'); params.push(method)
+  }
+  if (search) {
+    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.id LIKE ?)')
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+  }
+  const where = `WHERE ${conds.join(' AND ')}`
+  const { results } = await c.env.DB.prepare(`
+    SELECT j.id, j.snap_name, j.snap_mobile, j.status,
+           j.received_amount, j.delivered_at, j.delivery_method,
+           j.delivery_receiver_name, j.delivery_courier_name,
+           (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
+           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS total_charges
+    FROM jobs j ${where}
+    ORDER BY j.delivered_at DESC LIMIT 500
+  `).bind(...params).all<any>()
+  return c.json(results.map((r: any) => ({
+    ...r,
+    balance_due: Math.max(0, (r.total_charges || 0) - (r.received_amount || 0))
+  })))
+})
+
 app.get('/api/jobs/:id', authMiddleware, async (c) => {
   const id  = c.req.param('id')
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(id).first<any>()
   if (!job) return c.json({ error: 'Not found' }, 404)
 
-  const isAdmin = c.get('userRole') === 'admin'
+  const role2 = c.get('userRole')
+  const isAdmin = role2 === 'admin' || role2 === 'manager'
   const userId  = c.get('userId')
 
   // Staff can't fetch delivered job details
@@ -332,7 +388,8 @@ app.get('/api/jobs/:id', authMiddleware, async (c) => {
     ...m,
     images: (() => { try { return JSON.parse(m.images_json || '[]') } catch { return [] } })()
   }))
-  const totalCharges = enriched.reduce((s: number, m: any) => s + (m.charges || 0), 0)
+  // Correct calculation: productTotal = price × quantity; totalAmount = sum of all
+  const totalCharges = enriched.reduce((s: number, m: any) => s + ((parseFloat(m.charges) || 0) * (parseInt(m.quantity) || 1)), 0)
 
   return c.json({
     ...job,
@@ -368,25 +425,28 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
   fields.push(`updated_at=datetime('now')`)
   vals.push(id)
   await c.env.DB.prepare(`UPDATE jobs SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
-  // Log history for status changes and payment updates
-  try {
-    if (body.status) {
-      const detail = body.status === 'delivered'
-        ? `Delivered to: ${body.delivery_receiver_name || '?'} via ${body.delivery_method || 'in_person'}`
-        : `Status changed to ${body.status}`
-      await c.env.DB.prepare(
-        `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
-      ).bind(id, `Status: ${body.status}`, detail, c.get('userName') || 'Admin', c.get('userRole') || 'admin').run()
-    } else if ('received_amount' in body) {
-      await c.env.DB.prepare(
-        `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
-      ).bind(id, 'Payment Updated', `Received amount updated to ₹${body.received_amount}`, c.get('userName') || 'Admin', c.get('userRole') || 'admin').run()
-    }
-  } catch (_) {}
+  // Log history for ALL update types
+  const uName = c.get('userName') || 'Admin'
+  const uRole = c.get('userRole') || 'admin'
+  if (body.status) {
+    const detail = body.status === 'delivered'
+      ? `Delivered to: ${body.delivery_receiver_name || 'Customer'} via ${body.delivery_method || 'in_person'}${body.delivery_courier_name ? ' (' + body.delivery_courier_name + ')' : ''}${body.delivery_tracking ? ' Tracking: ' + body.delivery_tracking : ''}`
+      : `Status changed to ${body.status}`
+    logHistory(c.env.DB, id, `Status: ${body.status}`, detail, uName, uRole)
+  }
+  if ('received_amount' in body) {
+    logHistory(c.env.DB, id, 'Payment Updated', `Received amount: ₹${body.received_amount}`, uName, uRole)
+  }
+  if (body.snap_name || body.snap_mobile || body.snap_address) {
+    logHistory(c.env.DB, id, 'Customer Info Updated', `Name: ${body.snap_name || '—'}, Mobile: ${body.snap_mobile || '—'}`, uName, uRole)
+  }
+  if (body.note !== undefined) {
+    logHistory(c.env.DB, id, 'Note Updated', body.note || '(cleared)', uName, uRole)
+  }
   return c.json({ ok: true })
 })
 
-// ── API: Jobs — delete (admin only) ──────────────────────────────────────────
+// ── API: Jobs — delete (admin only) — NEVER deletes customer data ────────────
 app.delete('/api/jobs/:id', authMiddleware, adminOnly, async (c) => {
   const id = c.req.param('id')
   const { results: imgs } = await c.env.DB.prepare(
@@ -402,9 +462,12 @@ app.delete('/api/jobs/:id', authMiddleware, adminOnly, async (c) => {
   for (const m of audioMachines) {
     try { await c.env.PRODUCT_IMAGES.delete(m.audio_note_key) } catch (_) {}
   }
+  await c.env.DB.prepare('DELETE FROM job_history WHERE job_id=?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM assignment_requests WHERE job_id=?').bind(id).run()
+  await c.env.DB.prepare('DELETE FROM machine_images WHERE machine_id IN (SELECT id FROM machines WHERE job_id=?)').bind(id).run()
   await c.env.DB.prepare('DELETE FROM machines WHERE job_id=?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM jobs WHERE id=?').bind(id).run()
+  // NOTE: Customer data is NEVER deleted — only job+machine data
   return c.json({ ok: true })
 })
 
@@ -415,24 +478,23 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
   if (!body.product_name) return c.json({ error: 'product_name required' }, 400)
   const isAdmin = c.get('userRole') === 'admin'
+  const charges = isAdmin ? (parseFloat(body.charges) || 0) : 0
+  const qty = parseInt(body.quantity) || 1
   const result = await c.env.DB.prepare(
     `INSERT INTO machines(job_id,product_name,product_complaint,charges,quantity,assigned_staff_id,status)
      VALUES(?,?,?,?,?,?,?)`
   ).bind(
     jobId, body.product_name, body.product_complaint || null,
-    isAdmin ? (body.charges || 0) : 0,
-    body.quantity || 1,
+    charges, qty,
     body.assigned_staff_id || null,
     'under_repair'
   ).run()
-  await updateJobStatus(c.env.DB, jobId)
-  // Log history: machine added
-  try {
-    await c.env.DB.prepare(
-      `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
-    ).bind(jobId, 'Machine Added', `${body.product_name}${body.product_complaint ? ' — ' + body.product_complaint : ''}`,
-           c.get('userName') || 'System', c.get('userRole') || 'admin').run()
-  } catch (_) {}
+  const uName = c.get('userName') || 'System'
+  const uRole = c.get('userRole') || 'admin'
+  await updateJobStatus(c.env.DB, jobId, uName, uRole)
+  // Log history: machine added with charges
+  const lineTotal = charges * qty
+  logHistory(c.env.DB, jobId, 'Machine Added', `${body.product_name}${qty > 1 ? ' ×' + qty : ''}${body.product_complaint ? ' — ' + body.product_complaint : ''}${charges > 0 ? ' | ₹' + lineTotal : ''}${body.assigned_staff_id ? ' | Assigned staff ID: ' + body.assigned_staff_id : ''}`, uName, uRole)
   return c.json({ id: result.meta.last_row_id }, 201)
 })
 
@@ -459,18 +521,16 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
       const setClause = ['status=?', ...extraFields, `updated_at=datetime('now')`].join(',')
       await c.env.DB.prepare(`UPDATE machines SET ${setClause} WHERE id=?`)
         .bind(body.status, ...extraVals, id).run()
-      await updateJobStatus(c.env.DB, machine.job_id)
+      const staffName = c.get('userName') || 'Staff'
+      const staffRole = c.get('userRole') || 'staff'
+      await updateJobStatus(c.env.DB, machine.job_id, staffName, staffRole)
       // Log history: machine status change
-      try {
-        const detail = body.status === 'repaired' && body.work_done
-          ? `${machine.product_name} → Repaired. Work: ${body.work_done}`
-          : body.status === 'returned' && body.return_reason
-          ? `${machine.product_name} → Returned. Reason: ${body.return_reason}`
-          : `${machine.product_name} → ${body.status}`
-        await c.env.DB.prepare(
-          `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
-        ).bind(machine.job_id, `Machine: ${body.status}`, detail, c.get('userName') || 'Staff', c.get('userRole') || 'staff').run()
-      } catch (_) {}
+      const detail = body.status === 'repaired' && body.work_done
+        ? `${machine.product_name} → Repaired. Work: ${body.work_done}`
+        : body.status === 'returned' && body.return_reason
+        ? `${machine.product_name} → Returned. Reason: ${body.return_reason}`
+        : `${machine.product_name} → ${body.status}`
+      logHistory(c.env.DB, machine.job_id, `Machine: ${body.status}`, detail, staffName, staffRole)
       return c.json({ ok: true })
     }
     return c.json({ error: 'Nothing to update' }, 400)
@@ -486,16 +546,19 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
   fields.push(`updated_at=datetime('now')`)
   vals.push(id)
   await c.env.DB.prepare(`UPDATE machines SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
-  await updateJobStatus(c.env.DB, machine.job_id)
-  // Log history for admin machine status changes
-  try {
-    if (body.status) {
-      await c.env.DB.prepare(
-        `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
-      ).bind(machine.job_id, `Machine: ${body.status}`, `${machine.product_name} → ${body.status}`,
-             c.get('userName') || 'Admin', 'admin').run()
-    }
-  } catch (_) {}
+  const adminName = c.get('userName') || 'Admin'
+  const adminRole = c.get('userRole') || 'admin'
+  await updateJobStatus(c.env.DB, machine.job_id, adminName, adminRole)
+  // Log history for ALL admin machine changes
+  const changes: string[] = []
+  if (body.status) changes.push(`Status → ${body.status}`)
+  if (body.product_name && body.product_name !== machine.product_name) changes.push(`Name: ${body.product_name}`)
+  if (body.charges !== undefined) changes.push(`Charges: ₹${body.charges}`)
+  if (body.assigned_staff_id !== undefined) changes.push(`Staff assigned: ID ${body.assigned_staff_id}`)
+  if (body.work_done) changes.push(`Work: ${body.work_done}`)
+  if (body.return_reason) changes.push(`Return reason: ${body.return_reason}`)
+  const editDetail = changes.length ? `${machine.product_name}: ${changes.join(', ')}` : `${machine.product_name} edited`
+  logHistory(c.env.DB, machine.job_id, body.status ? `Machine: ${body.status}` : 'Machine Edited', editDetail, adminName, adminRole)
   return c.json({ ok: true })
 })
 app.delete('/api/machines/:id', authMiddleware, adminOnly, async (c) => {
@@ -1000,8 +1063,8 @@ app.get('/api/reports/jobs', authMiddleware, adminOnly, async (c) => {
     SELECT j.id, j.snap_name AS customer, j.snap_mobile AS mobile, j.status,
            j.received_amount,
            COUNT(m.id) AS machines,
-           SUM(m.charges) AS total_charges,
-           MAX(0, SUM(m.charges) - j.received_amount) AS balance_due,
+           SUM(m.charges * m.quantity) AS total_charges,
+           MAX(0, SUM(m.charges * m.quantity) - j.received_amount) AS balance_due,
            j.created_at
     FROM jobs j LEFT JOIN machines m ON j.id=m.job_id
     WHERE 1=1`
@@ -1083,6 +1146,48 @@ app.get('/api/customers/search', authMiddleware, async (c) => {
   return c.json(results)
 })
 
+// ── API: Customer update (edit name, mobile, address) ────────────────────────
+app.put('/api/customers/:id', authMiddleware, async (c) => {
+  const role = c.get('userRole')
+  const isAdminRole = role === 'admin' || role === 'manager'
+  if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
+  const id = c.req.param('id')
+  let body: any
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const fields: string[] = []
+  const vals: any[] = []
+  if (body.name)    { fields.push('name=?');    vals.push(body.name) }
+  if (body.mobile)  { fields.push('mobile=?');  vals.push(body.mobile) }
+  if (body.mobile2 !== undefined) { fields.push('mobile2=?'); vals.push(body.mobile2 || null) }
+  if (body.address !== undefined) { fields.push('address=?'); vals.push(body.address || null) }
+  if (!fields.length) return c.json({ error: 'Nothing to update' }, 400)
+  fields.push(`updated_at=datetime('now')`)
+  vals.push(id)
+  try {
+    await c.env.DB.prepare(`UPDATE customers SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
+    // Also update snap fields in all linked jobs
+    if (body.name || body.mobile || body.address) {
+      const cust = await c.env.DB.prepare('SELECT * FROM customers WHERE id=?').bind(id).first<any>()
+      if (cust) {
+        const jobFields: string[] = []
+        const jobVals: any[] = []
+        if (body.name)    { jobFields.push('snap_name=?');    jobVals.push(body.name) }
+        if (body.mobile)  { jobFields.push('snap_mobile=?');  jobVals.push(body.mobile) }
+        if (body.mobile2 !== undefined) { jobFields.push('snap_mobile2=?'); jobVals.push(body.mobile2 || null) }
+        if (body.address !== undefined) { jobFields.push('snap_address=?'); jobVals.push(body.address || null) }
+        if (jobFields.length) {
+          jobVals.push(id)
+          await c.env.DB.prepare(`UPDATE jobs SET ${jobFields.join(',')},updated_at=datetime('now') WHERE customer_id=?`).bind(...jobVals).run()
+        }
+      }
+    }
+    return c.json({ ok: true })
+  } catch (e: any) {
+    if (e.message?.includes('UNIQUE')) return c.json({ error: 'Mobile already in use' }, 409)
+    return c.json({ error: 'Update failed' }, 500)
+  }
+})
+
 // ── API: Customer list (all customers with stats) ─────────────────────────────
 app.get('/api/customers', authMiddleware, async (c) => {
   const role = c.get('userRole')
@@ -1108,7 +1213,7 @@ app.get('/api/customers/history', authMiddleware, async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.created_at,
            j.received_amount,
-           (SELECT SUM(charges) FROM machines WHERE job_id=j.id) AS total_charges,
+           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS total_charges,
            (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
            (SELECT GROUP_CONCAT(product_name,', ') FROM machines WHERE job_id=j.id) AS products
     FROM jobs j
@@ -1135,7 +1240,7 @@ app.get('/api/reports/ledger', authMiddleware, adminOnly, async (c) => {
   const { results: jobs } = await c.env.DB.prepare(`
     SELECT j.id AS job_number, j.snap_name AS customer, j.snap_mobile AS phone,
            j.status, j.received_amount AS received,
-           (SELECT SUM(charges) FROM machines WHERE job_id=j.id) AS amount,
+           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS amount,
            j.created_at AS date
     FROM jobs j ${jConds} ORDER BY j.created_at DESC
   `).bind(...jParams).all<any>()
@@ -1204,13 +1309,15 @@ app.delete('/api/cleanup', authMiddleware, adminOnly, async (c) => {
   const { from, to, full_reset } = body
 
   if (full_reset) {
+    await c.env.DB.prepare('DELETE FROM job_history').run()
     await c.env.DB.prepare('DELETE FROM assignment_requests').run()
     await c.env.DB.prepare('DELETE FROM machine_images').run()
     await c.env.DB.prepare('DELETE FROM machines').run()
     await c.env.DB.prepare('DELETE FROM jobs').run()
-    await c.env.DB.prepare('DELETE FROM customers').run()
+    // NOTE: Customer data is NEVER deleted in cleanup — only job+machine data
+    // await c.env.DB.prepare('DELETE FROM customers').run() — REMOVED
     await c.env.DB.prepare('UPDATE job_counter SET last_seq=0 WHERE id=1').run()
-    return c.json({ ok: true, message: 'Full reset done — counter reset to C-001' })
+    return c.json({ ok: true, message: 'Full reset done — counter reset, customer data preserved' })
   }
 
   if (from && to) {
@@ -1298,7 +1405,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ADITION ELECTRIC SOLUTION</title>
+<title>ADITION ELECTRIC SOLUTION v21</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">

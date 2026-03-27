@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'staff' CHECK(role IN ('admin','staff')),
+  role TEXT NOT NULL DEFAULT 'staff' CHECK(role IN ('admin','manager','staff')),
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now'))
 );

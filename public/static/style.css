@@ -1036,11 +1036,11 @@ button, a, label, select, input[type="file"] + label, [role="button"] {
 }
 
 /* Better form spacing */
-.form-group { margin-bottom: 14px; }
-.form-label { font-size: 13px; font-weight: 600; margin-bottom: 5px; display: block; }
+.form-group { margin-bottom: 10px; }
+.form-label { font-size: 13px; font-weight: 600; margin-bottom: 4px; display: block; }
 
 /* Card header improvements */
-.card { border-radius: 18px; padding: 16px; margin-bottom: 14px; }
+.card { border-radius: 14px; padding: 12px; margin-bottom: 8px; }
 
 /* Larger modal */
 .modal-sheet {
