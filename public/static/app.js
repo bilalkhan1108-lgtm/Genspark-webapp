@@ -1,18 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v21                       ║
-// ║  v21 Changes:                                                        ║
-// ║  · Job history: comprehensive logging all actions to DB + timeline  ║
-// ║  · Calculation fix: productTotal = price × qty; totalAmount = sum   ║
-// ║  · Customer editing: name, mobile, address with save + DB update   ║
-// ║  · Delivery tab: date range & delivery type filters (In Person/Courier) ║
-// ║  · CSS cleanup: removed excess whitespace, margin/padding, overflow ║
-// ║  · Cleanup: only deletes job+machine data, never customer data     ║
-// ║  · Manager role: fixed status update permission                     ║
-// ║  · Performance: 300ms search debounce, infinite scroll, caching    ║
-// ║  · Job card: mobile-first horizontal layout, side-by-side          ║
-// ║  · WhatsApp: full templates with tracking link                     ║
-// ║  · Promise.all image loading with retry before JPG generation      ║
-// ║  · Auto-download JPG: programmatic <a> click, no popup/permission  ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v22                       ║
+// ║  v22: Returned exclusion, partial_delivered, qty UX, Promise.all   ║
+// ║  images, compact job card, customer save by mobile, manager fix    ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -175,9 +164,9 @@ const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { mini
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', delivered:'#1E88E5' };
-const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', delivered:'#E3F2FD' };
-const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', delivered:'Delivered' };
+const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5' };
+const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD' };
+const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered' };
 const sc = s => STATUS_COLOR[s] || '#888';
 const sb = s => STATUS_BG[s]    || '#f5f5f5';
 const sl = s => STATUS_LABEL[s] || s;
@@ -660,6 +649,7 @@ function dashboardHTML() {
     { s:'under_repair', label:'Under Repair',  color:sc('under_repair') },
     { s:'repaired',     label:'Repaired',      color:sc('repaired') },
     { s:'returned',     label:'Returned',      color:sc('returned') },
+    { s:'partial_delivered', label:'Partial',    color:sc('partial_delivered') },
     { s:'delivered',    label:'Delivered',     color:sc('delivered') },
   ];
   return `
@@ -730,19 +720,43 @@ function _applyChipCounts(d) {
   });
 }
 
-// Job cache for deduplication
+// Job cache for deduplication + localStorage persistence
 let _jobsLoading = false;
 let _jobsHasMore = true;
 let _jobsOffset  = 0;
 const JOBS_PER_PAGE = 50;
+
+// localStorage job cache for instant dashboard load
+const _jobCache = {
+  _key: 'AES_JOBS_CACHE_V2',
+  save(filter, jobs) {
+    try { localStorage.setItem(this._key + '_' + (filter||'all'), JSON.stringify({ ts: Date.now(), data: jobs.slice(0, 50) })); } catch {}
+  },
+  load(filter) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this._key + '_' + (filter||'all')) || 'null');
+      if (!raw || !raw.data) return null;
+      // Cache valid for 5 minutes
+      if (Date.now() - raw.ts > 300000) return null;
+      return raw.data;
+    } catch { return null; }
+  }
+};
 
 async function loadJobs(append = false) {
   const wrap = document.getElementById('vlist-wrap');
   if (!append) {
     _jobsOffset = 0;
     _jobsHasMore = true;
-    S.jobs = [];
-    if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+    // Show cached data instantly while fetching (lazy-load pattern)
+    const cached = !S.search && !S.fromDate && !S.toDate && !S.myJobsOnly ? _jobCache.load(S.filter) : null;
+    if (cached && cached.length) {
+      S.jobs = cached;
+      renderVList(false);
+    } else {
+      S.jobs = [];
+      if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+    }
   }
   if (_jobsLoading || !_jobsHasMore) return;
   _jobsLoading = true;
@@ -763,6 +777,10 @@ async function loadJobs(append = false) {
       S.jobs = [...S.jobs, ...newJobs];
     } else {
       S.jobs = newJobs;
+      // Save to localStorage cache for instant load next time
+      if (!S.search && !S.fromDate && !S.toDate && !S.myJobsOnly) {
+        _jobCache.save(S.filter, S.jobs);
+      }
     }
     renderVList(append);
   } catch {
@@ -797,7 +815,22 @@ async function loadJobs(append = false) {
   document.getElementById('del-filter-btn')?.addEventListener('click', () => {
     S.fromDate = document.getElementById('del-from')?.value || '';
     S.toDate   = document.getElementById('del-to')?.value || '';
-    loadJobs();
+    const delType = document.getElementById('del-type')?.value || '';
+    // Use delivered endpoint with method filter
+    if (S.filter === 'delivered' && (S.fromDate || S.toDate || delType)) {
+      _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
+      const wrap = document.getElementById('vlist-wrap');
+      if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+      API.get('/api/jobs/delivered', { params: { from: S.fromDate, to: S.toDate, method: delType, q: S.search } })
+        .then(r => {
+          S.jobs = r.data || [];
+          _jobsHasMore = false;
+          renderVList(false);
+        })
+        .catch(() => { if (wrap) wrap.innerHTML = '<div class="empty-state"><p>Filter failed</p></div>'; });
+    } else {
+      loadJobs();
+    }
   });
 }
 
@@ -970,21 +1003,22 @@ function newJobHTML() {
         <div id="nj-comp-sugs"></div>
       </div>
 
-      <!-- 5. Repair Amount + Quantity -->
-      <div class="form-row-2">
-        ${isAdmin() ? `
-        <div class="form-group">
-          <label class="form-label">Repair Amount (₹)</label>
-          <input id="nj-charges" type="number" class="form-input" placeholder="0" min="0" inputmode="decimal">
-          <div id="nj-amt-sugs"></div>
-        </div>` : ''}
-        <div class="form-group">
-          <label class="form-label">Quantity</label>
-          <input id="nj-qty" type="number" class="form-input" placeholder="1" min="1" value="1" inputmode="numeric">
-        </div>
+      <!-- 5. Repair Amount -->
+      ${isAdmin() ? `
+      <div class="form-group">
+        <label class="form-label">Repair Amount (₹)</label>
+        <input id="nj-charges" type="number" class="form-input" placeholder="0" min="0" inputmode="decimal">
+        <div id="nj-amt-sugs"></div>
+      </div>` : ''}
+
+      <!-- 6. Quantity (below Repair Amount, default 1, clear on focus) -->
+      <div class="form-group">
+        <label class="form-label">Quantity</label>
+        <input id="nj-qty" type="number" class="form-input" placeholder="1" min="1" value="1" inputmode="numeric"
+               onfocus="if(this.value==='1')this.value=''" onblur="if(!this.value)this.value='1'">
       </div>
 
-      <!-- 6. Assign Staff -->
+      <!-- 7. Assign Staff -->
       ${isAdmin() ? `
       <div class="form-group">
         <label class="form-label">Assign Staff</label>
@@ -1382,9 +1416,10 @@ function renderDetail() {
       <div class="fin-title"><i class="fas fa-rupee-sign"></i> Financials</div>
         ${(j.machines||[]).filter(m => (parseFloat(m.charges)||0) > 0).map(m => {
           const lineAmt = (parseFloat(m.charges)||0) * (parseInt(m.quantity)||1);
-          return `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:13px;color:#555">
-            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.product_name)}${m.quantity > 1 ? ' ×' + m.quantity : ''}</span>
-            <span style="font-weight:600;color:#1a1a2e;flex-shrink:0;margin-left:8px">${fmtRs(lineAmt)}</span>
+          const isReturned = m.status === 'returned';
+          return `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:13px;color:${isReturned?'#999':'#555'}${isReturned?';text-decoration:line-through':''}">
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.product_name)}${m.quantity > 1 ? ' ×' + m.quantity : ''}${isReturned?' (Returned)':''}</span>
+            <span style="font-weight:600;color:${isReturned?'#999':'#1a1a2e'};flex-shrink:0;margin-left:8px">${fmtRs(lineAmt)}</span>
           </div>`;
         }).join('')}
         <div class="fin-row" style="border-top:1px solid #e0e0e0;margin-top:4px;padding-top:6px">
@@ -1531,7 +1566,7 @@ function machineCardHTML(m, currentUserId) {
         ${m.staff_name ? `<div class="machine-staff"><i class="fas fa-user-cog"></i> ${esc(m.staff_name)}</div>` : ''}
       </div>
       <div class="machine-right">
-        ${isAdmin() ? `<div class="machine-charges">${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:11px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
+        ${isAdmin() ? `<div class="machine-charges" ${m.status==='returned'?'style="text-decoration:line-through;color:#999"':''}>${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:11px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
         ${isAssigned ? `
         <select data-mid="${m.id}" class="status-sel" style="border-color:${color};color:${color}">
           <option value="under_repair" ${m.status==='under_repair'?'selected':''}>Under Repair</option>
@@ -1878,7 +1913,11 @@ function showEditCustomerModal(j) {
     const address = document.getElementById('ec-address')?.value.trim() || null;
     if (!name || !mobile) { toast('Name and mobile are required', 'error'); return; }
     try {
-      // Update via jobs endpoint (which also updates customer table)
+      // Save customer data immediately via customer API using mobile as unique key
+      if (j.customer_id) {
+        await API.put(`/api/customers/${j.customer_id}`, { name, mobile, mobile2, address });
+      }
+      // Also update snap fields on this job
       await API.put(`/api/jobs/${j.id}`, {
         snap_name: name,
         snap_mobile: mobile,
@@ -1886,7 +1925,7 @@ function showEditCustomerModal(j) {
         snap_address: address
       });
       closeModal();
-      toast('Customer info updated ✅', 'success');
+      toast('Customer info saved ✅', 'success');
       await loadDetail();
     } catch (e) {
       toast(e.response?.data?.error || 'Update failed', 'error');
@@ -2211,17 +2250,18 @@ function showAddMachineModal(jobId) {
     </div>
 
     <!-- 5. Repair Amount -->
-    <div class="form-row-2">
-      ${isAdmin() ? `
-      <div class="form-group">
-        <label class="form-label">Repair Amount (₹)</label>
-        <input id="am-chg" type="number" class="form-input" min="0" placeholder="0" inputmode="decimal">
-        <div id="am-amt-sugs">${suggestionTilesHTML(amtSugs.map(a => '₹' + a), 'am-chg', 'amt-sugs')}</div>
-      </div>` : ''}
-      <div class="form-group">
-        <label class="form-label">Qty</label>
-        <input id="am-qty" type="number" class="form-input" min="1" value="1" inputmode="numeric">
-      </div>
+    ${isAdmin() ? `
+    <div class="form-group">
+      <label class="form-label">Repair Amount (₹)</label>
+      <input id="am-chg" type="number" class="form-input" min="0" placeholder="0" inputmode="decimal">
+      <div id="am-amt-sugs">${suggestionTilesHTML(amtSugs.map(a => '₹' + a), 'am-chg', 'amt-sugs')}</div>
+    </div>` : ''}
+
+    <!-- 6. Quantity (below Repair Amount, default 1, clear on focus) -->
+    <div class="form-group">
+      <label class="form-label">Quantity</label>
+      <input id="am-qty" type="number" class="form-input" min="1" value="1" inputmode="numeric"
+             onfocus="if(this.value==='1')this.value=''" onblur="if(!this.value)this.value='1'">
     </div>
 
     <!-- 6. Assign Staff -->
@@ -2442,18 +2482,17 @@ function showEditMachineModal(m) {
       <label class="form-label">Complaint / Issue</label>
       <textarea id="em-comp" class="form-input" rows="2">${esc(m.product_complaint||'')}</textarea>
     </div>
-    <div class="form-row-2">
-      ${isAdmin() ? `
-      <div class="form-group">
-        <label class="form-label">Repair Amount (₹)</label>
-        <input id="em-chg" type="number" class="form-input" min="0"
-               value="${m.charges||0}" inputmode="decimal">
-      </div>` : ''}
-      <div class="form-group">
-        <label class="form-label">Qty</label>
-        <input id="em-qty" type="number" class="form-input" min="1"
-               value="${m.quantity||1}" inputmode="numeric">
-      </div>
+    ${isAdmin() ? `
+    <div class="form-group">
+      <label class="form-label">Repair Amount (₹)</label>
+      <input id="em-chg" type="number" class="form-input" min="0"
+             value="${m.charges||0}" inputmode="decimal">
+    </div>` : ''}
+    <div class="form-group">
+      <label class="form-label">Quantity</label>
+      <input id="em-qty" type="number" class="form-input" min="1"
+             value="${m.quantity||1}" inputmode="numeric"
+             onfocus="if(this.value==='1')this.value=''" onblur="if(!this.value)this.value='1'">
     </div>
     ${isAdmin() ? `
     <div class="form-group">
@@ -2629,25 +2668,26 @@ function jobCardPrintHTML(j) {
       <div style="color:#fff;font-size:18px;font-weight:700;background:rgba(0,0,0,.2);padding:5px 14px;border-radius:8px">${sl(j.status)}</div>
     </div>`;
 
-  // Machines — compact cards with images and individual prices
+  // Machines — compact cards with images and individual prices (exclude returned from total display)
   const machinesBlock = `
-    <div style="padding:10px 30px 0">
-      <div style="font-size:13px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px">Products (${(j.machines||[]).length})</div>
+    <div style="padding:8px 30px 0">
+      <div style="font-size:13px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px">Products (${(j.machines||[]).length})</div>
       ${(j.machines||[]).map((m,i) => {
         const firstImg = (m.images||[])[0];
+        const isReturned = m.status === 'returned';
         return `
-      <div style="background:#f8f9fa;border-radius:10px;padding:10px 12px;margin-bottom:8px;border-left:4px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:10px">
+      <div style="background:${isReturned?'#f5f5f5':'#f8f9fa'};border-radius:10px;padding:8px 10px;margin-bottom:6px;border-left:4px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:8px${isReturned?';opacity:0.7':''}">
         ${firstImg
-          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:70px;height:70px;border-radius:6px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
-          : `<div style="width:70px;height:70px;border-radius:6px;background:#e8eaed;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:26px;color:#bbb">⚡</div>`}
+          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:60px;height:60px;border-radius:6px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
+          : `<div style="width:60px;height:60px;border-radius:6px;background:#e8eaed;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:22px;color:#bbb">⚡</div>`}
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:4px">
-            <div style="font-size:18px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-weight:600">×${m.quantity}</span>`:''}</div>
-            <div style="background:${sc(m.status)};color:#fff;border-radius:5px;padding:2px 8px;font-size:12px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
+            <div style="font-size:17px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-weight:600">×${m.quantity}</span>`:''}</div>
+            <div style="background:${sc(m.status)};color:#fff;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
           </div>
-          ${m.product_complaint ? `<div style="font-size:13px;color:#666;margin-top:2px">${esc(m.product_complaint)}</div>` : ''}
-          ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:2px">✅ ${esc(m.work_done)}</div>` : ''}
-          <div style="margin-top:4px;font-size:16px;font-weight:700;color:#1a1a2e">₹${((m.charges||0)*1).toLocaleString('en-IN')}${m.quantity>1?` <span style="color:#888;font-size:13px">(×${m.quantity} = ${fmtRs((m.charges||0)*m.quantity)})</span>`:''}</div>
+          ${m.product_complaint ? `<div style="font-size:13px;color:#666;margin-top:1px">${esc(m.product_complaint)}</div>` : ''}
+          ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:1px">✅ ${esc(m.work_done)}</div>` : ''}
+          <div style="margin-top:3px;font-size:16px;font-weight:700;color:${isReturned?'#999':'#1a1a2e'}${isReturned?';text-decoration:line-through':''}">₹${((m.charges||0)*1).toLocaleString('en-IN')}${m.quantity>1?` <span style="color:#888;font-size:13px">(×${m.quantity} = ${fmtRs((m.charges||0)*m.quantity)})</span>`:''}</div>
         </div>
       </div>`;
       }).join('')}
@@ -3607,7 +3647,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v21.0<br>
+      ✨ adition™ since 1984 · v22.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;

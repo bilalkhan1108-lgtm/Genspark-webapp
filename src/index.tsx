@@ -133,7 +133,10 @@ async function updateJobStatus(db: D1Database, jobId: string, userName?: string,
   if (job?.status === 'delivered') return
   const allReturned    = machines.every((m: any) => m.status === 'returned')
   const anyUnderRepair = machines.some((m: any)  => m.status === 'under_repair')
-  let newStatus = anyUnderRepair ? 'under_repair' : allReturned ? 'returned' : 'repaired'
+  const anyReturned    = machines.some((m: any)  => m.status === 'returned')
+  const anyRepaired    = machines.some((m: any)  => m.status === 'repaired')
+  // partial_delivered: some returned + some repaired/under_repair
+  let newStatus = anyUnderRepair ? 'under_repair' : allReturned ? 'returned' : (anyReturned && anyRepaired) ? 'partial_delivered' : 'repaired'
   const oldStatus = job?.status
   await db.prepare(`UPDATE jobs SET status=?,updated_at=datetime('now') WHERE id=?`)
     .bind(newStatus, jobId).run()
@@ -202,7 +205,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
       SELECT j.status, COUNT(j.id) AS cnt FROM jobs j GROUP BY j.status ORDER BY cnt DESC
     `).all<any>() : { results: [] },
     isAdmin ? c.env.DB.prepare(`
-      SELECT u.name, COUNT(m.id) AS cnt, SUM(m.charges * m.quantity) AS total_charges
+      SELECT u.name, COUNT(m.id) AS cnt, SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END) AS total_charges
       FROM machines m JOIN users u ON m.assigned_staff_id=u.id
       GROUP BY u.id, u.name ORDER BY cnt DESC LIMIT 10
     `).all<any>() : { results: [] },
@@ -263,7 +266,7 @@ app.get('/api/jobs', authMiddleware, async (c) => {
     SELECT j.id, j.snap_name, j.snap_mobile, j.status,
            j.received_amount, j.created_at, j.updated_at,
            (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
-           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS total_charges,
+           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges,
            (SELECT url FROM machine_images mi
             JOIN machines m2 ON mi.machine_id=m2.id
             WHERE m2.job_id=j.id ORDER BY mi.id LIMIT 1) AS thumb
@@ -349,7 +352,7 @@ app.get('/api/jobs/delivered', authMiddleware, async (c) => {
            j.received_amount, j.delivered_at, j.delivery_method,
            j.delivery_receiver_name, j.delivery_courier_name,
            (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
-           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS total_charges
+           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges
     FROM jobs j ${where}
     ORDER BY j.delivered_at DESC LIMIT 500
   `).bind(...params).all<any>()
@@ -388,8 +391,11 @@ app.get('/api/jobs/:id', authMiddleware, async (c) => {
     ...m,
     images: (() => { try { return JSON.parse(m.images_json || '[]') } catch { return [] } })()
   }))
-  // Correct calculation: productTotal = price × quantity; totalAmount = sum of all
-  const totalCharges = enriched.reduce((s: number, m: any) => s + ((parseFloat(m.charges) || 0) * (parseInt(m.quantity) || 1)), 0)
+  // Correct calculation: productTotal = price × quantity; exclude returned products
+  const totalCharges = enriched.reduce((s: number, m: any) => {
+    if (m.status === 'returned') return s; // Returned products excluded from total
+    return s + ((parseFloat(m.charges) || 0) * (parseInt(m.quantity) || 1));
+  }, 0)
 
   return c.json({
     ...job,
@@ -417,10 +423,27 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
     'snap_name', 'snap_mobile', 'snap_mobile2', 'snap_address',
     'received_amount'
   ]
+  // Also update customer table when snap fields change
+  if (body.snap_name || body.snap_mobile || body.snap_address) {
+    const currentJob = await c.env.DB.prepare('SELECT customer_id,snap_mobile FROM jobs WHERE id=?').bind(id).first<any>()
+    if (currentJob?.customer_id) {
+      const custFields: string[] = []
+      const custVals: any[] = []
+      if (body.snap_name) { custFields.push('name=?'); custVals.push(body.snap_name) }
+      if (body.snap_mobile) { custFields.push('mobile=?'); custVals.push(body.snap_mobile) }
+      if (body.snap_mobile2 !== undefined) { custFields.push('mobile2=?'); custVals.push(body.snap_mobile2 || null) }
+      if (body.snap_address !== undefined) { custFields.push('address=?'); custVals.push(body.snap_address || null) }
+      if (custFields.length) {
+        custFields.push(`updated_at=datetime('now')`)
+        custVals.push(currentJob.customer_id)
+        await c.env.DB.prepare(`UPDATE customers SET ${custFields.join(',')} WHERE id=?`).bind(...custVals).run().catch(() => {})
+      }
+    }
+  }
   for (const k of allowed) {
     if (k in body) { fields.push(`${k}=?`); vals.push(body[k]) }
   }
-  if (body.status === 'delivered') fields.push(`delivered_at=datetime('now')`)
+  if (body.status === 'delivered' || body.status === 'partial_delivered') fields.push(`delivered_at=datetime('now')`)
   if (!fields.length) return c.json({ error: 'No fields to update' }, 400)
   fields.push(`updated_at=datetime('now')`)
   vals.push(id)
@@ -477,8 +500,8 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
   if (!body.product_name) return c.json({ error: 'product_name required' }, 400)
-  const isAdmin = c.get('userRole') === 'admin'
-  const charges = isAdmin ? (parseFloat(body.charges) || 0) : 0
+  const isAdminOrMgr = c.get('userRole') === 'admin' || c.get('userRole') === 'manager'
+  const charges = isAdminOrMgr ? (parseFloat(body.charges) || 0) : 0
   const qty = parseInt(body.quantity) || 1
   const result = await c.env.DB.prepare(
     `INSERT INTO machines(job_id,product_name,product_complaint,charges,quantity,assigned_staff_id,status)
@@ -1063,8 +1086,8 @@ app.get('/api/reports/jobs', authMiddleware, adminOnly, async (c) => {
     SELECT j.id, j.snap_name AS customer, j.snap_mobile AS mobile, j.status,
            j.received_amount,
            COUNT(m.id) AS machines,
-           SUM(m.charges * m.quantity) AS total_charges,
-           MAX(0, SUM(m.charges * m.quantity) - j.received_amount) AS balance_due,
+           SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END) AS total_charges,
+           MAX(0, SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END) - j.received_amount) AS balance_due,
            j.created_at
     FROM jobs j LEFT JOIN machines m ON j.id=m.job_id
     WHERE 1=1`
@@ -1213,7 +1236,7 @@ app.get('/api/customers/history', authMiddleware, async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.created_at,
            j.received_amount,
-           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS total_charges,
+           (SELECT SUM(CASE WHEN status != 'returned' THEN charges * quantity ELSE 0 END) FROM machines WHERE job_id=j.id) AS total_charges,
            (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
            (SELECT GROUP_CONCAT(product_name,', ') FROM machines WHERE job_id=j.id) AS products
     FROM jobs j
@@ -1240,7 +1263,7 @@ app.get('/api/reports/ledger', authMiddleware, adminOnly, async (c) => {
   const { results: jobs } = await c.env.DB.prepare(`
     SELECT j.id AS job_number, j.snap_name AS customer, j.snap_mobile AS phone,
            j.status, j.received_amount AS received,
-           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id) AS amount,
+           (SELECT SUM(CASE WHEN status != 'returned' THEN charges * quantity ELSE 0 END) FROM machines WHERE job_id=j.id) AS amount,
            j.created_at AS date
     FROM jobs j ${jConds} ORDER BY j.created_at DESC
   `).bind(...jParams).all<any>()
@@ -1405,7 +1428,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ADITION ELECTRIC SOLUTION v21</title>
+<title>ADITION ELECTRIC SOLUTION v22</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">

@@ -16,13 +16,15 @@
 html, body {
   margin: 0; padding: 0;
   height: 100%; width: 100%;
-  overflow: hidden;          /* no address bar bounce */
+  overflow: hidden;
   overscroll-behavior: none;
   background: #1a1a2e;
   font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
   font-size: 15px;
   color: #1a1a2e;
+  /* Full-screen: use 100dvh for mobile to avoid bottom white space */
+  height: 100dvh;
 }
 
 /* Hide scrollbars globally */
@@ -31,13 +33,13 @@ html, body {
 
 /* ── App shell ─────────────────────────────────────────────────────────────── */
 #app {
-  height: 100%;
+  height: 100dvh;
   width: 100%;
 }
 .app-shell {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: 100dvh;
   max-width: 480px;
   margin: 0 auto;
   background: #f4f4f8;
@@ -101,7 +103,7 @@ html, body {
   touch-action: pan-y;
   overscroll-behavior-y: contain;
   will-change: scroll-position;
-  padding-bottom: 72px; /* bottom nav height */
+  padding-bottom: 64px; /* bottom nav height - reduced */
 }
 
 /* ── Bottom navigation ─────────────────────────────────────────────────────── */
@@ -170,7 +172,7 @@ html, body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 100vh;
+  min-height: 100dvh;
   background: linear-gradient(160deg, #1a1a2e 0%, #0f3460 60%, #16213e 100%);
   padding: 24px 16px;
 }
@@ -203,7 +205,7 @@ html, body {
 .filter-bar {
   display: flex;
   gap: 8px;
-  padding: 10px 12px 8px;
+  padding: 10px 12px 6px;
   overflow-x: auto;
   flex-shrink: 0;
   background: #fff;
@@ -322,13 +324,13 @@ html, body {
 /* ── Cards ─────────────────────────────────────────────────────────────────── */
 .card {
   background: #fff;
-  border-radius: 16px;
-  padding: 16px;
-  margin-bottom: 12px;
+  border-radius: 14px;
+  padding: 10px;
+  margin-bottom: 6px;
   box-shadow: 0 1px 4px rgba(0,0,0,.07);
 }
-.view-pad { padding: 12px; }
-.mt-3     { margin-top: 12px; }
+.view-pad { padding: 8px; }
+.mt-3     { margin-top: 8px; }
 
 /* ── Section title ─────────────────────────────────────────────────────────── */
 .section-title {
@@ -1040,7 +1042,7 @@ button, a, label, select, input[type="file"] + label, [role="button"] {
 .form-label { font-size: 13px; font-weight: 600; margin-bottom: 4px; display: block; }
 
 /* Card header improvements */
-.card { border-radius: 14px; padding: 12px; margin-bottom: 8px; }
+.card { border-radius: 14px; padding: 10px; margin-bottom: 6px; }
 
 /* Larger modal */
 .modal-sheet {
