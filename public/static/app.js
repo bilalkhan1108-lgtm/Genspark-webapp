@@ -1,7 +1,8 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v22                       ║
-// ║  v22: Returned exclusion, partial_delivered, qty UX, Promise.all   ║
-// ║  images, compact job card, customer save by mobile, manager fix    ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v23                       ║
+// ║  v23: Premium job card with base64 images, Call button, 2-col      ║
+// ║  customer layout, horizontal products, financial summary,          ║
+// ║  Promise.all base64 conversion, rAF+setTimeout safety delay       ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -2602,8 +2603,9 @@ function showDeliveryModal(j) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JOB CARD PRINT HTML  — Dynamic height, ALL products, no overflow truncation
-// Multi-page: generateAndShareJobCard slices long cards into 1080×1920 pages
+// JOB CARD PRINT HTML — Premium mobile-first layout, single-page, high-res
+// Centered logo, 2-column customer, horizontal product rows, financial summary
+// Call Customer button, collection notice / delivery info, tracking QR, footer
 // ─────────────────────────────────────────────────────────────────────────────
 function jobCardPrintHTML(j) {
   const total      = j.total_charges   || 0;
@@ -2613,153 +2615,211 @@ function jobCardPrintHTML(j) {
   const isDelivered = j.status === 'delivered';
   const isRepaired  = j.status === 'repaired';
   const showPayment = balance > 0 && !isDelivered;
+  const trackPhone  = (j.snap_mobile || '').replace(/\D/g, '');
+  const callPhone   = trackPhone.startsWith('91') ? trackPhone : (trackPhone ? '91' + trackPhone : '');
+  const printTrackUrl = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(trackPhone)}`;
 
-  const deliveryBlock = isDelivered ? `
-    <div style="margin:0 30px 14px;background:#E3F2FD;border:2px solid #1E88E5;border-radius:12px;padding:14px 16px">
-      <div style="font-size:18px;font-weight:800;color:#1565C0;margin-bottom:8px">📦 Delivery Information</div>
-      <table style="width:100%;border-collapse:collapse;font-size:16px">
-        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:3px 0;width:160px">Received By</td><td style="font-weight:700;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
-        ${j.delivery_receiver_mobile ? `<tr><td style="color:#555;padding:3px 0">Mobile</td><td style="font-weight:700;color:#1565C0">${j.delivery_receiver_mobile}</td></tr>` : ''}
-        ${j.delivery_method          ? `<tr><td style="color:#555;padding:3px 0">Method</td><td style="font-weight:700">${j.delivery_method==='courier'?'Courier':'In Person'}</td></tr>` : ''}
-        ${j.delivery_courier_name    ? `<tr><td style="color:#555;padding:3px 0">Courier</td><td style="font-weight:700">${esc(j.delivery_courier_name)}</td></tr>` : ''}
-        ${j.delivery_tracking        ? `<tr><td style="color:#555;padding:3px 0">Tracking</td><td style="font-weight:700">${esc(j.delivery_tracking)}</td></tr>` : ''}
-        ${j.delivered_at             ? `<tr><td style="color:#555;padding:3px 0">Date</td><td style="font-weight:700">${fmtDate(j.delivered_at)}</td></tr>` : ''}
-      </table>
-    </div>` : `
-    <div style="margin:0 30px 14px;background:#fff8e1;border:2px solid #FFC107;border-radius:12px;padding:14px 16px">
-      <div style="font-size:17px;font-weight:800;color:#e65100;margin-bottom:6px">⚠️ Collection Notice</div>
-      <div style="font-size:15px;color:#5D4037;line-height:1.5">
-        Kindly collect your machine(s) within <strong>25 days</strong> from the date of this notice.
-        After this period, we shall <strong>not be held liable</strong> for any claims, loss, or damage to uncollected items.
-      </div>
-    </div>`;
-
-  const paymentBlock = showPayment ? `
-    <div style="margin:0 30px 14px;background:#E8F5E9;border:2px solid #43A047;border-radius:12px;padding:16px">
-      <div style="font-size:18px;font-weight:900;color:#2E7D32;margin-bottom:10px;text-align:center">💳 Complete Payment to Proceed</div>
-      <div style="display:flex;gap:16px;align-items:flex-start">
-        <div style="text-align:center;flex-shrink:0">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:150px;height:150px;border-radius:8px;border:2px solid #43A047" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:13px;color:#555;margin-top:4px">Scan to Pay ₹${balance}</div>
-        </div>
-        <div style="flex:1;min-width:0">
-          <div style="font-size:16px;font-weight:800;color:#1a1a2e;margin-bottom:8px">UPI / Bank Details</div>
-          <table style="border-collapse:collapse;font-size:14px;width:100%">
-            <tr><td style="color:#555;padding:3px 0;width:80px">UPI</td><td style="font-weight:700">9375940444@okbizaxis</td></tr>
-            <tr><td style="color:#555;padding:3px 0">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-            <tr><td colspan="2" style="padding:4px 0"><hr style="border:1px solid #ccc"></td></tr>
-            <tr><td style="color:#555;padding:3px 0">Bank</td><td style="font-weight:700">State Bank Of India</td></tr>
-            <tr><td style="color:#555;padding:3px 0">A/C No.</td><td style="font-weight:700">37321811864</td></tr>
-            <tr><td style="color:#555;padding:3px 0">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
-          </table>
-        </div>
-      </div>
-    </div>` : '';
-
-  // Compact header
+  // ── 1. PREMIUM HEADER — centered logo + company name ──────────────────────
   const headerBlock = `
-    <div style="background:linear-gradient(135deg,#1a1a2e 0%,#0f3460 100%);padding:24px 30px 18px;text-align:center">
-      <div style="width:56px;height:56px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:14px;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;font-size:32px">⚡</div>
-      <div style="color:#fff;font-size:28px;font-weight:900;letter-spacing:2px">ADITION ELECTRIC SOLUTION</div>
-      <div style="color:rgba(255,255,255,.6);font-size:14px;margin-top:3px;letter-spacing:1px">SERVICE MANAGEMENT SYSTEM</div>
+    <div style="background:linear-gradient(135deg,#0d1b2a 0%,#1b2838 50%,#0f3460 100%);padding:28px 30px 20px;text-align:center;position:relative;overflow:hidden">
+      <div style="position:absolute;top:-40px;right:-40px;width:160px;height:160px;border-radius:50%;background:rgba(229,57,53,.08)"></div>
+      <div style="position:absolute;bottom:-30px;left:-30px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.03)"></div>
+      <div style="width:64px;height:64px;background:linear-gradient(135deg,#E53935,#B71C1C);border-radius:16px;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;font-size:36px;box-shadow:0 4px 20px rgba(229,57,53,.4);position:relative;z-index:1">⚡</div>
+      <div style="color:#fff;font-size:30px;font-weight:900;letter-spacing:3px;text-shadow:0 2px 10px rgba(0,0,0,.3);position:relative;z-index:1">ADITION ELECTRIC</div>
+      <div style="color:rgba(255,255,255,.5);font-size:13px;margin-top:4px;letter-spacing:2px;font-weight:600;position:relative;z-index:1">SINCE 1984 · SERVICE MANAGEMENT</div>
     </div>
-    <div style="background:${color};padding:12px 30px;display:flex;justify-content:space-between;align-items:center">
-      <div style="color:#fff;font-size:36px;font-weight:900;letter-spacing:3px">${j.id}</div>
-      <div style="color:#fff;font-size:18px;font-weight:700;background:rgba(0,0,0,.2);padding:5px 14px;border-radius:8px">${sl(j.status)}</div>
+    <div style="background:${color};padding:14px 30px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="color:rgba(255,255,255,.7);font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Job Number</div>
+        <div style="color:#fff;font-size:34px;font-weight:900;letter-spacing:3px;line-height:1.1">${j.id}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="color:#fff;font-size:20px;font-weight:800;background:rgba(0,0,0,.2);padding:6px 18px;border-radius:10px;letter-spacing:1px">${sl(j.status)}</div>
+        <div style="color:rgba(255,255,255,.7);font-size:12px;margin-top:4px;font-weight:600">${fmtDate(j.created_at)}</div>
+      </div>
     </div>`;
 
-  // Machines — compact cards with images and individual prices (exclude returned from total display)
+  // ── 2. CUSTOMER DETAILS — 2-column grid ───────────────────────────────────
+  const custBlock = `
+    <div style="padding:18px 30px 12px">
+      <div style="font-size:12px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:3px;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+        <span style="width:24px;height:2px;background:#E53935;display:inline-block"></span>
+        CUSTOMER DETAILS
+        <span style="flex:1;height:1px;background:#e0e0e0"></span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 24px">
+        <div>
+          <div style="font-size:11px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Name</div>
+          <div style="font-size:22px;font-weight:900;color:#1a1a2e;line-height:1.2">${esc(j.snap_name)}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Mobile</div>
+          <div style="font-size:20px;font-weight:800;color:#1565C0">${j.snap_mobile || '—'}</div>
+          ${j.snap_mobile2 ? `<div style="font-size:14px;color:#1976D2;font-weight:600;margin-top:2px">${j.snap_mobile2}</div>` : ''}
+        </div>
+        <div style="grid-column:1/-1">
+          <div style="font-size:11px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">Address</div>
+          <div style="font-size:15px;color:#444;line-height:1.4;font-weight:500">${j.snap_address ? esc(j.snap_address) : '<span style="color:#ccc">Not provided</span>'}</div>
+        </div>
+      </div>
+    </div>
+    ${callPhone ? `
+    <div style="margin:0 30px 12px">
+      <div style="background:linear-gradient(135deg,#1565C0,#0D47A1);border-radius:12px;padding:14px 20px;display:flex;align-items:center;justify-content:center;gap:12px">
+        <div style="width:40px;height:40px;background:rgba(255,255,255,.2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;flex-shrink:0">📞</div>
+        <div style="color:#fff;font-size:18px;font-weight:800;letter-spacing:1px">Call Customer: +${callPhone}</div>
+      </div>
+    </div>` : `
+    <div style="margin:0 30px 12px">
+      <div style="background:#f5f5f5;border:2px dashed #ccc;border-radius:12px;padding:12px 20px;text-align:center">
+        <div style="font-size:14px;color:#999;font-weight:600">📞 No phone number available</div>
+      </div>
+    </div>`}
+    <div style="border-top:2px solid #f0f0f0;margin:0 30px 6px"></div>`;
+
+  // ── 3. PRODUCTS — horizontal rows with image, name, complaint, status badge, price ─
   const machinesBlock = `
-    <div style="padding:8px 30px 0">
-      <div style="font-size:13px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px">Products (${(j.machines||[]).length})</div>
+    <div style="padding:10px 30px 4px">
+      <div style="font-size:12px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:3px;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+        <span style="width:24px;height:2px;background:#E53935;display:inline-block"></span>
+        PRODUCTS (${(j.machines||[]).length})
+        <span style="flex:1;height:1px;background:#e0e0e0"></span>
+      </div>
       ${(j.machines||[]).map((m,i) => {
         const firstImg = (m.images||[])[0];
         const isReturned = m.status === 'returned';
+        const lineAmt = (parseFloat(m.charges)||0) * (parseInt(m.quantity)||1);
+        const mColor = sc(m.status);
         return `
-      <div style="background:${isReturned?'#f5f5f5':'#f8f9fa'};border-radius:10px;padding:8px 10px;margin-bottom:6px;border-left:4px solid ${sc(m.status)};display:flex;align-items:flex-start;gap:8px${isReturned?';opacity:0.7':''}">
+      <div style="background:${isReturned?'#fafafa':'#f8f9fb'};border-radius:12px;padding:12px;margin-bottom:8px;border-left:5px solid ${mColor};display:flex;align-items:center;gap:12px${isReturned?';opacity:0.65':''}">
         ${firstImg
-          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:60px;height:60px;border-radius:6px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
-          : `<div style="width:60px;height:60px;border-radius:6px;background:#e8eaed;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:22px;color:#bbb">⚡</div>`}
+          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:68px;height:68px;border-radius:10px;object-fit:cover;flex-shrink:0;border:2px solid #e8eaed" crossorigin="anonymous" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+          : ''}
+        ${firstImg
+          ? `<div style="width:68px;height:68px;border-radius:10px;background:#e8eaed;display:none;align-items:center;justify-content:center;flex-shrink:0;font-size:26px;color:#bbb">⚡</div>`
+          : `<div style="width:68px;height:68px;border-radius:10px;background:linear-gradient(135deg,#e8eaed,#f0f2f5);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:26px;color:#bbb;border:2px solid #e0e0e0">⚡</div>`}
         <div style="flex:1;min-width:0">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:4px">
-            <div style="font-size:17px;font-weight:800;color:#1a1a2e">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-weight:600">×${m.quantity}</span>`:''}</div>
-            <div style="background:${sc(m.status)};color:#fff;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap">${sl(m.status)}</div>
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:3px">
+            <div style="font-size:18px;font-weight:800;color:#1a1a2e;line-height:1.2">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-size:14px;font-weight:600">x${m.quantity}</span>`:''}</div>
+            <div style="background:${mColor};color:#fff;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:800;white-space:nowrap;letter-spacing:.5px;flex-shrink:0">${sl(m.status)}</div>
           </div>
-          ${m.product_complaint ? `<div style="font-size:13px;color:#666;margin-top:1px">${esc(m.product_complaint)}</div>` : ''}
-          ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:1px">✅ ${esc(m.work_done)}</div>` : ''}
-          <div style="margin-top:3px;font-size:16px;font-weight:700;color:${isReturned?'#999':'#1a1a2e'}${isReturned?';text-decoration:line-through':''}">₹${((m.charges||0)*1).toLocaleString('en-IN')}${m.quantity>1?` <span style="color:#888;font-size:13px">(×${m.quantity} = ${fmtRs((m.charges||0)*m.quantity)})</span>`:''}</div>
+          ${m.product_complaint ? `<div style="font-size:14px;color:#666;line-height:1.3;margin-bottom:2px">${esc(m.product_complaint)}</div>` : ''}
+          ${m.work_done ? `<div style="font-size:13px;color:#2E7D32;font-weight:600">✅ ${esc(m.work_done)}</div>` : ''}
+          ${m.return_reason ? `<div style="font-size:13px;color:#E65100;font-weight:600">↩ ${esc(m.return_reason)}</div>` : ''}
+          <div style="margin-top:4px;font-size:18px;font-weight:800;color:${isReturned?'#aaa':'#1a1a2e'}${isReturned?';text-decoration:line-through':''}">
+            ${fmtRs(lineAmt)}${m.quantity>1?` <span style="color:#999;font-size:13px;font-weight:600">(${fmtRs(m.charges||0)} x ${m.quantity})</span>`:''}
+          </div>
         </div>
       </div>`;
       }).join('')}
     </div>`;
 
+  // ── 4. FINANCIAL SUMMARY — clean table ────────────────────────────────────
   const financialBlock = `
-    <div style="margin:10px 30px;background:#f8f9fa;border-radius:12px;padding:14px 18px">
-      <div style="display:flex;justify-content:space-between;font-size:18px;padding:5px 0;border-bottom:1px solid #e0e0e0">
-        <span style="color:#555;font-weight:600">Total Amount</span><span style="font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
+    <div style="margin:10px 30px 12px;background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border-radius:14px;padding:16px 20px;border:1px solid #e0e0e0">
+      <div style="font-size:12px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">Financial Summary</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #e0e0e0">
+        <span style="color:#555;font-size:16px;font-weight:600">Total Amount</span>
+        <span style="font-size:18px;font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:18px;padding:5px 0;border-bottom:1px solid #e0e0e0">
-        <span style="color:#555;font-weight:600">Amount Received</span><span style="font-weight:800;color:#43A047">${fmtRs(received)}</span>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #e0e0e0">
+        <span style="color:#555;font-size:16px;font-weight:600">Amount Received</span>
+        <span style="font-size:18px;font-weight:800;color:#43A047">${fmtRs(received)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:22px;padding:7px 0">
-        <span style="font-weight:700;color:#1a1a2e">Amount Due</span>
-        <span style="font-weight:900;color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;margin-top:2px">
+        <span style="font-size:18px;font-weight:800;color:#1a1a2e">Balance Due</span>
+        <span style="font-size:24px;font-weight:900;color:${balance>0?'#E53935':'#43A047'};letter-spacing:.5px">${fmtRs(balance)}</span>
       </div>
     </div>`;
 
-  const noteBlock = j.note ? `<div style="margin:0 30px 8px;background:#fffde7;border-radius:8px;padding:10px 14px;font-size:15px;color:#795548"><b>Note:</b> ${esc(j.note)}</div>` : '';
+  // ── 5. NOTE ────────────────────────────────────────────────────────────────
+  const noteBlock = j.note ? `
+    <div style="margin:0 30px 10px;background:#fffde7;border:1px solid #FFF176;border-radius:10px;padding:12px 16px;font-size:15px;color:#795548;line-height:1.4">
+      <span style="font-weight:800;color:#F57F17">📝 Note:</span> ${esc(j.note)}
+    </div>` : '';
 
-  // Tracking link for job card print
-  const trackPhone = (j.snap_mobile || '').replace(/\D/g, '');
-  const printTrackUrl = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(trackPhone)}`;
+  // ── 6. PAYMENT BLOCK (QR + Bank details) ──────────────────────────────────
+  const paymentBlock = showPayment ? `
+    <div style="margin:0 30px 12px;background:linear-gradient(135deg,#E8F5E9,#C8E6C9);border:2px solid #43A047;border-radius:14px;padding:18px;position:relative;overflow:hidden">
+      <div style="position:absolute;top:-20px;right:-20px;width:80px;height:80px;border-radius:50%;background:rgba(67,160,71,.1)"></div>
+      <div style="font-size:18px;font-weight:900;color:#2E7D32;margin-bottom:12px;text-align:center;position:relative;z-index:1">💳 Complete Payment to Proceed</div>
+      <div style="display:flex;gap:18px;align-items:flex-start;position:relative;z-index:1">
+        <div style="text-align:center;flex-shrink:0">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:140px;height:140px;border-radius:10px;border:3px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:14px;color:#2E7D32;margin-top:6px;font-weight:700">Scan to Pay ${fmtRs(balance)}</div>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:16px;font-weight:800;color:#1a1a2e;margin-bottom:10px">UPI / Bank Details</div>
+          <table style="border-collapse:collapse;font-size:14px;width:100%">
+            <tr><td style="color:#555;padding:4px 0;width:80px;font-weight:600">UPI</td><td style="font-weight:800;color:#2E7D32">9375940444@okbizaxis</td></tr>
+            <tr><td style="color:#555;padding:4px 0;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+            <tr><td colspan="2" style="padding:6px 0"><div style="border-top:1px dashed #aaa"></div></td></tr>
+            <tr><td style="color:#555;padding:4px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank Of India</td></tr>
+            <tr><td style="color:#555;padding:4px 0;font-weight:600">A/C No.</td><td style="font-weight:700">37321811864</td></tr>
+            <tr><td style="color:#555;padding:4px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>` : '';
 
+  // ── 7. DELIVERY INFO or COLLECTION NOTICE ─────────────────────────────────
+  const deliveryBlock = isDelivered ? `
+    <div style="margin:0 30px 12px;background:linear-gradient(135deg,#E3F2FD,#BBDEFB);border:2px solid #1E88E5;border-radius:14px;padding:16px 18px">
+      <div style="font-size:17px;font-weight:900;color:#1565C0;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:22px">📦</span> Delivery Information
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:15px">
+        ${j.delivery_receiver_name   ? `<tr><td style="color:#555;padding:4px 0;width:140px;font-weight:600">Received By</td><td style="font-weight:800;color:#1a1a2e">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
+        ${j.delivery_receiver_mobile ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Mobile</td><td style="font-weight:700;color:#1565C0">${j.delivery_receiver_mobile}</td></tr>` : ''}
+        ${j.delivery_method          ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Method</td><td style="font-weight:700">${j.delivery_method==='courier'?'📮 Courier':'🤝 In Person'}</td></tr>` : ''}
+        ${j.delivery_courier_name    ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Courier</td><td style="font-weight:700">${esc(j.delivery_courier_name)}</td></tr>` : ''}
+        ${j.delivery_tracking        ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Tracking</td><td style="font-weight:700">${esc(j.delivery_tracking)}</td></tr>` : ''}
+        ${j.delivered_at             ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Date</td><td style="font-weight:700">${fmtDate(j.delivered_at)}</td></tr>` : ''}
+      </table>
+    </div>` : `
+    <div style="margin:0 30px 12px;background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:14px;padding:16px 18px;position:relative;overflow:hidden">
+      <div style="position:absolute;top:-15px;right:-15px;width:60px;height:60px;border-radius:50%;background:rgba(255,160,0,.1)"></div>
+      <div style="font-size:17px;font-weight:900;color:#E65100;margin-bottom:8px;display:flex;align-items:center;gap:8px;position:relative;z-index:1">
+        <span style="font-size:22px">⚠️</span> Collection Notice
+      </div>
+      <div style="font-size:15px;color:#5D4037;line-height:1.6;position:relative;z-index:1">
+        Kindly collect your machine(s) within <strong>25 days</strong> from the date of this notice.
+        After this period, we shall <strong>not be held liable</strong> for any claims, loss, or damage to uncollected items.
+      </div>
+    </div>`;
+
+  // ── 8. TRACKING QR ────────────────────────────────────────────────────────
   const trackingBlock = `
-    <div style="margin:0 30px 10px;background:#E3F2FD;border:2px solid #1565C0;border-radius:10px;padding:12px 16px;display:flex;align-items:center;gap:12px">
+    <div style="margin:0 30px 12px;background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:14px 18px;display:flex;align-items:center;gap:14px">
       <div style="flex-shrink:0">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=${encodeURIComponent(printTrackUrl)}" style="width:80px;height:80px;border-radius:6px" crossorigin="anonymous" onerror="this.style.display='none'">
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:88px;height:88px;border-radius:8px;border:2px solid #1565C0;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
       </div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:15px;font-weight:800;color:#1565C0;margin-bottom:3px">🔗 Track Your Job Online</div>
-        <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.4">${printTrackUrl}</div>
-        <div style="font-size:11px;color:#888;margin-top:2px">Scan QR code or visit the link above</div>
+        <div style="font-size:16px;font-weight:900;color:#1565C0;margin-bottom:4px">🔗 Track Your Job Online</div>
+        <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.4;font-weight:500">${printTrackUrl}</div>
+        <div style="font-size:11px;color:#999;margin-top:3px;font-weight:600">Scan QR code or visit the link above</div>
       </div>
     </div>`;
 
+  // ── 9. FOOTER ─────────────────────────────────────────────────────────────
   const footerBlock = `
-    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:18px 30px;margin-top:auto">
-      <div style="color:#fff;font-size:16px;font-weight:700">✨ adition™ since 1984</div>
-      <div style="color:rgba(255,255,255,.6);font-size:13px;margin-top:3px">Opp. Metropolitan Court Gate 2, Gheekanta, Ahmedabad 380001</div>
-      <div style="color:rgba(255,255,255,.35);font-size:11px;margin-top:2px">Subjected to Ahmedabad Jurisdiction only</div>
-    </div>`;
-
-  // Customer info — 2-column: Name/Mobile left, Address/Date right — compact, mobile-optimized
-  const custBlock = `
-    <div style="padding:14px 30px 8px">
-      <div style="font-size:13px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">Customer Details</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 20px">
+    <div style="background:linear-gradient(135deg,#0d1b2a,#1b2838,#0f3460);padding:22px 30px 18px;margin-top:auto;position:relative;overflow:hidden">
+      <div style="position:absolute;top:-20px;right:-20px;width:100px;height:100px;border-radius:50%;background:rgba(229,57,53,.06)"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;position:relative;z-index:1">
         <div>
-          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Name</div>
-          <div style="font-size:20px;font-weight:800;color:#1a1a2e;line-height:1.2">${esc(j.snap_name)}</div>
+          <div style="color:#fff;font-size:17px;font-weight:800;letter-spacing:1px">✨ adition™ since 1984</div>
+          <div style="color:rgba(255,255,255,.55);font-size:13px;margin-top:4px;line-height:1.4">Opp. Metropolitan Court Gate 2,<br>Gheekanta, Ahmedabad 380001</div>
         </div>
-        <div>
-          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Mobile</div>
-          <div style="font-size:18px;font-weight:700;color:#1565C0">${j.snap_mobile}${j.snap_mobile2?'<br><span style="font-size:14px">'+j.snap_mobile2+'</span>':''}</div>
-        </div>
-        <div>
-          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Address</div>
-          <div style="font-size:14px;color:#333;line-height:1.3">${j.snap_address ? esc(j.snap_address) : '<span style="color:#bbb">—</span>'}</div>
-        </div>
-        <div>
-          <div style="font-size:12px;color:#999;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Date</div>
-          <div style="font-size:15px;color:#555;font-weight:600">${fmtDate(j.created_at)}</div>
+        <div style="text-align:right">
+          <div style="color:rgba(255,255,255,.7);font-size:14px;font-weight:700">📞 7801990001</div>
+          <div style="color:rgba(255,255,255,.3);font-size:11px;margin-top:6px;font-style:italic">Subject to Ahmedabad Jurisdiction</div>
         </div>
       </div>
-    </div>
-    <div style="border-top:2px solid #f0f0f0;margin:0 30px 4px"></div>`;
+    </div>`;
 
-  // Compact layout — 1080px wide, minimal padding, fits more products per page
+  // ── ASSEMBLE — single-page, 1080px wide, dynamic height ──────────────────
   return `
-  <div style="width:1080px;background:#fff;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column">
+  <div style="width:1080px;background:#fff;font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;display:flex;flex-direction:column;min-height:1440px">
     ${headerBlock}
     ${custBlock}
     ${machinesBlock}
@@ -2774,109 +2834,139 @@ function jobCardPrintHTML(j) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GENERATE + SHARE JOB CARD — HIGH-RES SINGLE PAGE (min 3072×4096)
-// Never split pages/QR; dynamic height grows with products; Promise.all for images
+// v23: Convert ALL images (product, QR, logo) to base64 data URIs via Promise.all
+// Uses canvas-based conversion to avoid CORS/taint issues with html2canvas
+// Safety: requestAnimationFrame + setTimeout delay before html2canvas capture
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Convert any image URL to base64 data URI (handles CORS + auth + retry)
+async function imageUrlToBase64(url, token, maxRetries = 2) {
+  if (!url) return null;
+  if (url.startsWith('data:')) return url; // Already base64
+  if (url.startsWith('blob:')) {
+    // Convert blob URL to base64
+    try {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      return await blobToBase64(blob);
+    } catch (_) { return null; }
+  }
+
+  // External URLs (QR code API, etc.) — fetch with CORS
+  const isExternal = url.startsWith('http') && !url.includes('/api/');
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const headers = {};
+      if (!isExternal && token) headers['Authorization'] = 'Bearer ' + token;
+      const resp = await fetch(url + (isExternal && attempt > 0 ? (url.includes('?') ? '&' : '?') + '_r=' + attempt : ''), { headers });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const blob = await resp.blob();
+      return await blobToBase64(blob);
+    } catch (_) {
+      if (attempt < maxRetries) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
+  return null;
+}
+
+// Convert Blob to base64 data URI string
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 async function generateAndShareJobCard(j, shareMode) {
-  toast('Generating high-res job card…', 'info');
+  toast('Generating premium job card…', 'info');
   try {
     const el = document.getElementById('job-card-print');
     if (!el) { toast('Card element missing', 'error'); return; }
 
     el.style.left = '-99999px'; el.style.top = '0';
 
-    // ── Step 1: Pre-load ALL images (product, QR, logo) via Promise.all + retry ──
-    const blobUrls = [];
+    // ── Step 1: Gather ALL <img> elements in the print card ──────────────────
     const imgEls = Array.from(el.querySelectorAll('img'));
+    console.log('[AES] Job card images to process:', imgEls.length);
 
-    // Robust image loader with retry and fallback
-    async function loadImageWithRetry(img, maxRetries = 2) {
-      const src = img.getAttribute('src') || img.getAttribute('data-auth-src') || '';
-      if (!src) return;
-      if (src.startsWith('blob:') || src.startsWith('data:')) { img.crossOrigin = 'anonymous'; return; }
-
-      // External images (QR code API) — load directly with CORS + retry
-      if (src.startsWith('http') && !src.includes('/api/')) {
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            await new Promise((resolve, reject) => {
-              const newImg = new Image();
-              newImg.crossOrigin = 'anonymous';
-              newImg.onload = () => { img.src = newImg.src; resolve(); };
-              newImg.onerror = () => reject(new Error('load failed'));
-              newImg.src = src + (attempt > 0 ? '&_r=' + attempt : '');
-              setTimeout(() => reject(new Error('timeout')), 8000);
-            });
-            return; // success
-          } catch (_) {
-            if (attempt === maxRetries) { img.crossOrigin = 'anonymous'; }
-            else { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); }
-          }
-        }
-        return;
+    // ── Step 2: Convert ALL images to base64 data URIs via Promise.all ───────
+    // This avoids CORS taint issues — html2canvas can render base64 images cleanly
+    const base64Results = await Promise.all(imgEls.map(async (img) => {
+      const src = img.getAttribute('data-auth-src') || img.getAttribute('src') || '';
+      if (!src) return { img, base64: null };
+      try {
+        const base64 = await imageUrlToBase64(src, S.token, 2);
+        return { img, base64 };
+      } catch (_) {
+        return { img, base64: null };
       }
+    }));
 
-      // Authenticated R2 images — fetch with token + retry
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          const resp = await fetch(src, { headers: { Authorization: `Bearer ${S.token}` } });
-          if (!resp.ok) throw new Error('HTTP ' + resp.status);
-          const blob = await resp.blob();
-          const bu = URL.createObjectURL(blob);
-          blobUrls.push(bu);
-          img.src = bu;
-          img.crossOrigin = 'anonymous';
-          if (img.decode) await img.decode().catch(() => {});
-          return; // success
-        } catch (_) {
-          if (attempt === maxRetries) { img.crossOrigin = 'anonymous'; }
-          else { await new Promise(r => setTimeout(r, 500 * (attempt + 1))); }
-        }
+    // ── Step 3: Replace ALL img src with base64 data URIs ────────────────────
+    let successCount = 0;
+    base64Results.forEach(({ img, base64 }) => {
+      if (base64) {
+        img.src = base64;
+        img.removeAttribute('data-auth-src');
+        img.crossOrigin = 'anonymous';
+        successCount++;
       }
-    }
+    });
+    console.log(`[AES] Images converted to base64: ${successCount}/${imgEls.length}`);
 
-    // Load all images in parallel with individual retry
-    await Promise.all(imgEls.map(img => loadImageWithRetry(img, 2)));
-
-    // ── Step 2: Verify ALL images fully loaded (double-check) ──────────────
+    // ── Step 4: Wait for ALL images to fully decode in DOM ───────────────────
     await Promise.all(imgEls.map(img => {
       if (img.complete && img.naturalWidth > 0) return Promise.resolve();
       return new Promise(resolve => {
         img.onload = resolve;
         img.onerror = resolve;
-        setTimeout(resolve, 5000);
+        setTimeout(resolve, 6000); // 6s safety timeout per image
       });
     }));
 
-    // Extra paint delay for rendering
-    await new Promise(r => setTimeout(r, 500));
+    // ── Step 5: Safety delay — requestAnimationFrame + setTimeout ────────────
+    // Ensures browser has painted all images before html2canvas captures
+    await new Promise(resolve => {
+      requestAnimationFrame(() => {
+        setTimeout(resolve, 600); // 600ms paint delay after rAF
+      });
+    });
 
-    // ── Step 3: Generate SINGLE long page (min 3072×4096, never split) ──────
-    const CARD_WIDTH = 1080;  // layout width
-    const actualH    = Math.max(el.scrollHeight || el.offsetHeight || 1440, 1365); // min ~4096/3
-    // Scale so output is at least 3072 wide (3072/1080 ≈ 2.84, use 3x)
-    const SCALE = 3; // 1080*3 = 3240 wide, actualH*3 = height (at least 4095)
+    // ── Step 6: Generate SINGLE long page (min 3072px wide, dynamic height) ──
+    const CARD_WIDTH = 1080;  // CSS layout width
+    const actualH    = Math.max(el.scrollHeight || el.offsetHeight || 1440, 1365);
+    const SCALE = 3; // 1080 x 3 = 3240px wide (>= 3072 ✓)
+
+    console.log(`[AES] Capturing: ${CARD_WIDTH}x${actualH} @ ${SCALE}x = ${CARD_WIDTH*SCALE}x${actualH*SCALE}px`);
 
     const fullCanvas = await html2canvas(el, {
       scale: SCALE,
       useCORS: true,
-      allowTaint: false,
+      allowTaint: true, // Safe because all images are now base64
       width: CARD_WIDTH,
       height: actualH,
       backgroundColor: '#ffffff',
       logging: false,
       imageTimeout: 30000,
       letterRendering: true,
+      removeContainer: false,
     });
 
-    // Cleanup blob URLs
-    blobUrls.forEach(u => URL.revokeObjectURL(u));
+    // ── Step 7: Output SINGLE page high-quality JPG ──────────────────────────
+    const outW = fullCanvas.width;
+    const outH = fullCanvas.height;
+    console.log(`[AES] Canvas generated: ${outW}x${outH}px`);
 
-    // ── Step 4: Output SINGLE page JPG (never split QR or content) ──────────
-    const outW = fullCanvas.width;   // 3240 (≥3072 ✓)
-    const outH = fullCanvas.height;  // dynamic height (≥4096 ✓ for typical cards)
     const blob = await new Promise(resolve =>
       fullCanvas.toBlob(b => resolve(b), 'image/jpeg', 0.95)
     );
+
+    if (!blob || blob.size < 1000) {
+      toast('Card generation failed — empty image', 'error');
+      return;
+    }
 
     const jobFileName = `Job_${j.id}.jpg`;
     const text    = shareText(j, false);
@@ -2885,7 +2975,7 @@ async function generateAndShareJobCard(j, shareMode) {
     const waText  = encodeURIComponent(text);
     const waUrl   = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
-    // ── Auto-download helper: programmatic <a> click, no permission popup ──
+    // ── Auto-download: programmatic <a> click, no permission popup ───────────
     function autoDownloadBlob(blobData, fileName) {
       try {
         const bUrl = URL.createObjectURL(blobData);
@@ -2895,7 +2985,6 @@ async function generateAndShareJobCard(j, shareMode) {
         a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
-        // Cleanup after a delay
         setTimeout(() => {
           document.body.removeChild(a);
           URL.revokeObjectURL(bUrl);
@@ -2908,12 +2997,10 @@ async function generateAndShareJobCard(j, shareMode) {
     }
 
     if (shareMode) {
-      // ── PARALLEL: Open WhatsApp + auto-download simultaneously ──
-      // 1. Start auto-download FIRST (programmatic <a> click — no permission popup)
+      // ── PARALLEL: Download + WhatsApp simultaneously ──────────────────────
       autoDownloadBlob(blob, jobFileName);
-      toast(`Downloading ${jobFileName}…`, 'success');
+      toast(`Downloading ${jobFileName} (${outW}x${outH}px)…`, 'success');
 
-      // 2. Open WhatsApp Business directly via wa.me (no share window)
       setTimeout(() => {
         if (waPhone) {
           window.location.href = `https://wa.me/${waPhone}?text=${waText}`;
@@ -2922,30 +3009,29 @@ async function generateAndShareJobCard(j, shareMode) {
         }
       }, 150);
 
-      // 3. Log to job history in background
       API.post(`/api/jobs/${j.id}/history`, {
         action: 'Job Card Shared',
-        detail: `Sent via WhatsApp to ${j.snap_mobile}. File: ${jobFileName} (${outW}×${outH}px)`
+        detail: `WhatsApp to ${j.snap_mobile}. File: ${jobFileName} (${outW}x${outH}px, ${(blob.size/1024).toFixed(0)}KB)`
       }).catch(() => {});
-
       return;
     }
 
-    // ── Download-only mode: programmatic <a> click ────────────────────────
+    // ── Download-only mode ───────────────────────────────────────────────────
     const downloaded = autoDownloadBlob(blob, jobFileName);
     if (downloaded) {
-      toast(`Job card saved: ${jobFileName} (${outW}×${outH}px)`, 'success');
+      toast(`Job card saved: ${jobFileName} (${outW}x${outH}px, ${(blob.size/1024).toFixed(0)}KB)`, 'success');
     } else {
       toast('Download failed — please try again', 'error');
     }
-    // Log to job history
+
     API.post(`/api/jobs/${j.id}/history`, {
       action: 'Job Card Downloaded',
-      detail: `File: ${jobFileName} (${outW}×${outH}px)`
+      detail: `File: ${jobFileName} (${outW}x${outH}px, ${(blob.size/1024).toFixed(0)}KB)`
     }).catch(() => {});
+
   } catch (e) {
-    console.error(e);
-    toast('Failed to generate card', 'error');
+    console.error('[AES] Job card generation error:', e);
+    toast('Failed to generate card — try again', 'error');
   }
 }
 
@@ -3647,7 +3733,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v22.0<br>
+      ✨ adition™ since 1984 · v23.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
