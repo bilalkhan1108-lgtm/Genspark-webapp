@@ -1155,6 +1155,31 @@ app.get('/api/reports/customers', authMiddleware, adminOnly, async (c) => {
   })
 })
 
+// ── API: Customer insights (total jobs, spending, last visit) ────────────────
+app.get('/api/customers/insights', authMiddleware, async (c) => {
+  const mobile = c.req.query('mobile') || ''
+  if (!mobile) return c.json({ error: 'mobile required' }, 400)
+  try {
+    const row = await c.env.DB.prepare(`
+      SELECT COUNT(DISTINCT j.id) AS total_jobs,
+             SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END) AS total_spending,
+             MAX(j.created_at) AS last_visit,
+             MIN(j.created_at) AS first_visit
+      FROM jobs j
+      LEFT JOIN machines m ON m.job_id = j.id
+      WHERE j.snap_mobile = ? OR j.snap_mobile2 = ?
+    `).bind(mobile, mobile).first<any>()
+    return c.json({
+      total_jobs: row?.total_jobs || 0,
+      total_spending: row?.total_spending || 0,
+      last_visit: row?.last_visit || null,
+      first_visit: row?.first_visit || null,
+    })
+  } catch (_) {
+    return c.json({ total_jobs: 0, total_spending: 0, last_visit: null, first_visit: null })
+  }
+})
+
 // ── API: Customer search by name/mobile ──────────────────────────────────────
 app.get('/api/customers/search', authMiddleware, async (c) => {
   const q = (c.req.query('q') || '').trim()
@@ -1428,7 +1453,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ADITION ELECTRIC SOLUTION v22</title>
+<title>ADITION ELECTRIC SOLUTION v24</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">
