@@ -214,6 +214,35 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='returned'`).first<any>(),
   ])
 
+  // Revenue data for admin dashboard
+  let revenueData: any = { todayRevenue: 0, monthRevenue: 0, totalRevenue: 0, pendingDues: 0 }
+  let monthlyRevenue: any[] = []
+  if (isAdmin) {
+    const [todayRev, monthRev, totalRev, pendDues, monthlyRev] = await Promise.all([
+      c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE DATE(j.created_at)=?`).bind(today).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE j.created_at>=?`).bind(monthStart).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j`).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END),0) - COALESCE(SUM(DISTINCT j.received_amount),0) AS amt FROM jobs j LEFT JOIN machines m ON m.job_id=j.id WHERE j.status != 'delivered'`).first<any>(),
+      c.env.DB.prepare(`
+        SELECT strftime('%Y-%m', j.created_at) AS month,
+               COUNT(DISTINCT j.id) AS jobs,
+               COALESCE(SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END),0) AS charges,
+               COALESCE(SUM(DISTINCT j.received_amount),0) AS received
+        FROM jobs j LEFT JOIN machines m ON m.job_id=j.id
+        WHERE j.created_at >= datetime('now','-6 months')
+        GROUP BY strftime('%Y-%m', j.created_at)
+        ORDER BY month DESC LIMIT 6
+      `).all<any>(),
+    ])
+    revenueData = {
+      todayRevenue: todayRev?.amt || 0,
+      monthRevenue: monthRev?.amt || 0,
+      totalRevenue: totalRev?.amt || 0,
+      pendingDues: Math.max(0, pendDues?.amt || 0),
+    }
+    monthlyRevenue = monthlyRev.results || []
+  }
+
   return c.json({
     total: total?.cnt || 0,
     pending: pending?.cnt || 0,
@@ -225,6 +254,8 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     returned: retCount?.cnt || 0,
     byStatus: isAdmin ? byStatus.results : [],
     byStaff: isAdmin ? byStaff.results : [],
+    ...revenueData,
+    monthlyRevenue,
   })
 })
 
@@ -265,7 +296,7 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT j.id, j.snap_name, j.snap_mobile, j.status,
            j.received_amount, j.created_at, j.updated_at,
-           (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
+           (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
            (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges,
            (SELECT url FROM machine_images mi
             JOIN machines m2 ON mi.machine_id=m2.id
@@ -351,7 +382,7 @@ app.get('/api/jobs/delivered', authMiddleware, async (c) => {
     SELECT j.id, j.snap_name, j.snap_mobile, j.status,
            j.received_amount, j.delivered_at, j.delivery_method,
            j.delivery_receiver_name, j.delivery_courier_name,
-           (SELECT COUNT(*) FROM machines WHERE job_id=j.id) AS machine_count,
+           (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
            (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges
     FROM jobs j ${where}
     ORDER BY j.delivered_at DESC LIMIT 500
@@ -1085,7 +1116,7 @@ app.get('/api/reports/jobs', authMiddleware, adminOnly, async (c) => {
   let q = `
     SELECT j.id, j.snap_name AS customer, j.snap_mobile AS mobile, j.status,
            j.received_amount,
-           COUNT(m.id) AS machines,
+           COALESCE(SUM(m.quantity),0) AS machines,
            SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END) AS total_charges,
            MAX(0, SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END) - j.received_amount) AS balance_due,
            j.created_at
@@ -1453,7 +1484,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ADITION ELECTRIC SOLUTION v24</title>
+<title>ADITION ELECTRIC SOLUTION v25</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">

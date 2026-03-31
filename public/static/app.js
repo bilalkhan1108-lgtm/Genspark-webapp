@@ -1,8 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v24                       ║
-// ║  v24: Image cache-bust+retry, redesigned job card (no call btn),  ║
-// ║  side-by-side QR+notice, compact WhatsApp msg, customer insights, ║
-// ║  owner dashboard, Promise.all base64, rAF+setTimeout safety       ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v25                       ║
+// ║  v25: Filter panel, admin dashboard, print address, QR+bank split, ║
+// ║  WhatsApp community link, machine count=SUM(qty), manager fixes    ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -507,7 +506,7 @@ function bindLogin() {
 // ─────────────────────────────────────────────────────────────────────────────
 function headerHTML() {
   const titles = {
-    dashboard:'Jobs Dashboard', newjob:'New Job',
+    dashboard:'Jobs Dashboard', newjob:'New Job', admindash:'Dashboard',
     detail:'Job Details', staff:'Staff Panel',
     reports:'Reports', settings:'Settings', requests:'Requests'
   };
@@ -540,6 +539,7 @@ function bottomNavHTML() {
   const tabs = [
     { id:'dashboard', icon:'fa-list-ul',    label:'Jobs'    },
     ...(isAdmin() ? [{ id:'newjob', icon:'fa-plus-circle', label:'New Job' }] : []),
+    ...(isAdmin() ? [{ id:'admindash', icon:'fa-chart-line', label:'Dashboard' }] : []),
     ...(isAdminOnly() ? [{ id:'requests', icon:'fa-bell', label:'Requests', badge: true }] : []),
     ...(isAdminOnly() ? [{ id:'staff',    icon:'fa-users',     label:'Staff'   }] : []),
     ...(!isManager() ? [{ id:'reports',  icon:'fa-chart-bar', label:'Reports' }] : []),
@@ -564,6 +564,7 @@ function viewHTML() {
   switch (S.view) {
     case 'dashboard': return dashboardHTML();
     case 'newjob':    return isAdmin() ? newJobHTML() : deniedHTML();
+    case 'admindash': return isAdmin() ? adminDashHTML() : deniedHTML();
     case 'detail':    return `<div id="detail-root" class="view-pad"><div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div></div>`;
     case 'staff':     return isAdminOnly() ? staffHTML()    : deniedHTML();
     case 'reports':   return isManager() ? deniedHTML() : reportsHTML();
@@ -632,6 +633,7 @@ function bindView() {
   switch (S.view) {
     case 'dashboard': loadJobs();                                               break;
     case 'newjob':    if (isAdmin()) bindNewJob();                               break;
+    case 'admindash': if (isAdmin()) loadAdminDash();                           break;
     case 'detail':    loadDetail();                                             break;
     case 'staff':     if (isAdminOnly()) loadStaff();                           break;
     case 'reports':   if (!isManager()) { if (isAdminOnly()) loadStaffForSelects(); bindReports(); } break;
@@ -645,23 +647,54 @@ function bindView() {
 // DASHBOARD — virtual-scroll list
 // ─────────────────────────────────────────────────────────────────────────────
 function dashboardHTML() {
-  const filters = [
-    { s:'',             label:'All',          color:'#1a1a2e' },
-    { s:'under_repair', label:'Under Repair',  color:sc('under_repair') },
-    { s:'repaired',     label:'Repaired',      color:sc('repaired') },
-    { s:'returned',     label:'Returned',      color:sc('returned') },
-    { s:'partial_delivered', label:'Partial',    color:sc('partial_delivered') },
-    { s:'delivered',    label:'Delivered',     color:sc('delivered') },
-  ];
+  const activeFilterLabel = S.filter ? sl(S.filter) : (S.fromDate || S.toDate ? 'Date Range' : 'All Jobs');
+  const hasFilter = S.filter || S.fromDate || S.toDate;
   return `
   <div style="display:flex;flex-direction:column;height:100%">
     ${!isAdmin() ? `<div id="staff-notif-bar" style="display:none;padding:8px 12px 0"></div>` : ''}
     ${isAdmin() ? `<div id="owner-dash" style="padding:10px 12px 4px;display:flex;gap:6px;flex-wrap:wrap"></div>` : ''}
-    <div class="filter-bar" id="filter-chip-bar">
-      ${filters.map(f => `
-      <button class="filter-chip ${S.filter===f.s?'chip-active':''}"
-        style="--chip-color:${f.color}"
-        data-filter="${f.s}">${f.label} <span class="chip-count" id="cc-${f.s||'all'}"></span></button>`).join('')}
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px 4px;flex-shrink:0">
+      <button id="btn-open-filter" style="display:flex;align-items:center;gap:6px;background:${hasFilter?'#E3F2FD':'#f0f2f5'};border:1px solid ${hasFilter?'#1E88E5':'#ddd'};border-radius:10px;padding:8px 14px;font-size:13px;font-weight:700;color:${hasFilter?'#1565C0':'#555'};cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:all .15s">
+        <i class="fas fa-filter"></i> Filter${hasFilter ? ': '+activeFilterLabel : ''}
+      </button>
+      ${hasFilter ? `<button id="btn-clear-filter" style="background:#FFEBEE;border:1px solid #E53935;border-radius:8px;padding:6px 10px;font-size:12px;color:#E53935;font-weight:700;cursor:pointer;white-space:nowrap"><i class="fas fa-times"></i> Clear</button>` : ''}
+      <div style="flex:1"></div>
+      <span id="cc-count" style="font-size:12px;color:#888;font-weight:600"></span>
+    </div>
+    <div id="filter-panel" style="display:none;padding:8px 12px;background:#f8f9fb;border-bottom:1px solid #e0e0e0;flex-shrink:0">
+      <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Filter by Status</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        <button class="fp-chip ${S.filter===''?'fp-active':''}" data-fp-status="" style="--fp-color:#1a1a2e">All</button>
+        <button class="fp-chip ${S.filter==='under_repair'?'fp-active':''}" data-fp-status="under_repair" style="--fp-color:${sc('under_repair')}">Under Repair</button>
+        <button class="fp-chip ${S.filter==='repaired'?'fp-active':''}" data-fp-status="repaired" style="--fp-color:${sc('repaired')}">Repaired</button>
+        <button class="fp-chip ${S.filter==='returned'?'fp-active':''}" data-fp-status="returned" style="--fp-color:${sc('returned')}">Returned</button>
+        <button class="fp-chip ${S.filter==='partial_delivered'?'fp-active':''}" data-fp-status="partial_delivered" style="--fp-color:${sc('partial_delivered')}">Partial</button>
+        <button class="fp-chip ${S.filter==='delivered'?'fp-active':''}" data-fp-status="delivered" style="--fp-color:${sc('delivered')}">Delivered</button>
+      </div>
+      <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Date Range</div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <input id="fp-from" type="date" class="form-input" style="flex:1;min-height:36px;padding:4px 8px;font-size:13px;border-radius:8px" value="${esc(S.fromDate)}">
+        <input id="fp-to" type="date" class="form-input" style="flex:1;min-height:36px;padding:4px 8px;font-size:13px;border-radius:8px" value="${esc(S.toDate)}">
+      </div>
+      <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Quick Filters</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+        <button class="fp-quick" onclick="filterToday()">📅 Today</button>
+        <button class="fp-quick" onclick="filterMonth()">📊 This Month</button>
+        ${isAdmin() ? `<button class="fp-quick" onclick="filterByStatus('under_repair')">🔧 Pending</button>` : ''}
+      </div>
+      ${S.filter === 'delivered' && isAdmin() ? `
+      <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Delivery Type</div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <select id="del-type" class="form-input" style="min-height:36px;padding:4px 8px;font-size:13px;border-radius:8px;flex:1">
+          <option value="">All Types</option>
+          <option value="in_person">In Person</option>
+          <option value="courier">Courier</option>
+        </select>
+      </div>` : ''}
+      <div style="display:flex;gap:8px">
+        <button id="fp-apply" style="flex:1;background:#1565C0;color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:700;cursor:pointer"><i class="fas fa-check"></i> Apply</button>
+        <button id="fp-reset" style="flex:1;background:#f0f2f5;color:#555;border:1px solid #ddd;border-radius:8px;padding:10px;font-size:14px;font-weight:700;cursor:pointer"><i class="fas fa-undo"></i> Reset</button>
+      </div>
     </div>
     ${!isAdmin() ? `
     <div class="my-jobs-bar">
@@ -677,17 +710,6 @@ function dashboardHTML() {
              placeholder="Search name, mobile, job ID…" value="${esc(S.search)}"
              autocomplete="off" autocorrect="off" spellcheck="false">
     </div>
-    ${S.filter === 'delivered' && isAdmin() ? `
-    <div style="display:flex;gap:6px;padding:4px 12px;background:#E3F2FD;border-bottom:1px solid #BBDEFB;flex-shrink:0;flex-wrap:wrap;align-items:center">
-      <input id="del-from" type="date" class="form-input" style="min-height:34px;padding:0 6px;font-size:12px;flex:1;min-width:100px;border-radius:8px" placeholder="From" value="${esc(S.fromDate)}">
-      <input id="del-to" type="date" class="form-input" style="min-height:34px;padding:0 6px;font-size:12px;flex:1;min-width:100px;border-radius:8px" placeholder="To" value="${esc(S.toDate)}">
-      <select id="del-type" class="form-input" style="min-height:34px;padding:0 6px;font-size:12px;flex:1;min-width:80px;border-radius:8px">
-        <option value="">All Types</option>
-        <option value="in_person">In Person</option>
-        <option value="courier">Courier</option>
-      </select>
-      <button id="del-filter-btn" class="btn-sm btn-blue" style="min-height:34px;padding:0 12px;font-size:12px;border-radius:8px"><i class="fas fa-filter"></i></button>
-    </div>` : ''}
     <div id="vlist-wrap" class="vlist-wrap" style="flex:1"></div>
   </div>`;
 }
@@ -708,18 +730,9 @@ function loadAnalytics(force) {
   }).catch(() => {});
 }
 function _applyChipCounts(d) {
-  // Update counts inside filter chip buttons
-  const map = {
-    'cc-all':         d.total      || 0,
-    'cc-under_repair': d.underRepair || 0,
-    'cc-repaired':    d.repaired    || 0,
-    'cc-returned':    d.returned    || 0,
-    'cc-delivered':   d.completed  || 0,
-  };
-  Object.entries(map).forEach(([id, val]) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = `(${val})`;
-  });
+  // Update the job count label in header
+  const ccCount = document.getElementById('cc-count');
+  if (ccCount) ccCount.textContent = `${d.total || 0} total`;
 
   // Owner dashboard tiles (admin/manager only)
   const ownerDash = document.getElementById('owner-dash');
@@ -818,26 +831,38 @@ async function loadJobs(append = false) {
     S.myJobsOnly = false; render();
   }, { passive: true });
 
-  document.querySelectorAll('[data-filter]').forEach(btn => {
+  // Filter panel toggle
+  document.getElementById('btn-open-filter')?.addEventListener('click', () => {
+    const panel = document.getElementById('filter-panel');
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  }, { passive: true });
+
+  document.getElementById('btn-clear-filter')?.addEventListener('click', () => {
+    setFilter(''); S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0;
+    render();
+  }, { passive: true });
+
+  // Filter panel status chips
+  document.querySelectorAll('.fp-chip').forEach(btn => {
     btn.addEventListener('click', () => {
-      setFilter(btn.dataset.filter);
-      render();
+      document.querySelectorAll('.fp-chip').forEach(b => b.classList.remove('fp-active'));
+      btn.classList.add('fp-active');
     }, { passive: true });
   });
 
-  const dSearch = debounce(() => {
-    S.search = document.getElementById('dash-search')?.value.trim() || '';
-    loadJobs();
-  }, 300);
-  document.getElementById('dash-search')?.addEventListener('input', dSearch);
+  // Filter panel apply
+  document.getElementById('fp-apply')?.addEventListener('click', () => {
+    const activeChip = document.querySelector('.fp-chip.fp-active');
+    const newStatus = activeChip?.dataset.fpStatus || '';
+    setFilter(newStatus);
+    S.fromDate = document.getElementById('fp-from')?.value || '';
+    S.toDate = document.getElementById('fp-to')?.value || '';
+    const panel = document.getElementById('filter-panel');
+    if (panel) panel.style.display = 'none';
 
-  // Delivery date/type filter (only shown when delivered filter active)
-  document.getElementById('del-filter-btn')?.addEventListener('click', () => {
-    S.fromDate = document.getElementById('del-from')?.value || '';
-    S.toDate   = document.getElementById('del-to')?.value || '';
+    // Check for delivered filter with delivery type
     const delType = document.getElementById('del-type')?.value || '';
-    // Use delivered endpoint with method filter
-    if (S.filter === 'delivered' && (S.fromDate || S.toDate || delType)) {
+    if (newStatus === 'delivered' && (S.fromDate || S.toDate || delType)) {
       _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
       const wrap = document.getElementById('vlist-wrap');
       if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
@@ -848,10 +873,26 @@ async function loadJobs(append = false) {
           renderVList(false);
         })
         .catch(() => { if (wrap) wrap.innerHTML = '<div class="empty-state"><p>Filter failed</p></div>'; });
-    } else {
-      loadJobs();
+      return;
     }
+
+    loadJobs();
   });
+
+  // Filter panel reset
+  document.getElementById('fp-reset')?.addEventListener('click', () => {
+    setFilter(''); S.fromDate = ''; S.toDate = '';
+    const panel = document.getElementById('filter-panel');
+    if (panel) panel.style.display = 'none';
+    _analyticsCacheTs = 0;
+    render();
+  });
+
+  const dSearch = debounce(() => {
+    S.search = document.getElementById('dash-search')?.value.trim() || '';
+    loadJobs();
+  }, 300);
+  document.getElementById('dash-search')?.addEventListener('input', dSearch);
 }
 
 function renderVList(append = false) {
@@ -1524,6 +1565,9 @@ function renderDetail() {
       </button>
       <button id="btn-share" class="action-btn" style="background:#25D366">
         <i class="fab fa-whatsapp"></i><span>Share</span>
+      </button>
+      <button id="btn-print-addr" class="action-btn" style="background:#FB8C00">
+        <i class="fas fa-print"></i><span>Address</span>
       </button>` : ''}
       ${isAdminOnly() ? `
       <button id="btn-del-job" class="action-btn" style="background:#E53935">
@@ -1881,6 +1925,9 @@ function bindDetail(j) {
   // Job History (all roles)
   document.getElementById('btn-job-history')?.addEventListener('click', () => showJobHistory(j));
 
+  // Print Address Label (admin only)
+  document.getElementById('btn-print-addr')?.addEventListener('click', () => printAddressLabel(j));
+
   // Customer History (admin only)
   document.getElementById('btn-cust-history')?.addEventListener('click', () => showCustomerHistory(j.snap_mobile, j.snap_name));
 
@@ -1908,6 +1955,7 @@ ${balance > 0 ? `\n*Due: ₹${balance}*\nPlease pay to proceed.\n` : ''}
 Collect within *25 days* to avoid liability.
 
 📞 7801990001
+📢 Join Updates: https://chat.whatsapp.com/ILjfPXXuyiBKuL2VdpMhg4
 — *ADITION ELECTRIC* ✨`;
     const text    = encodeURIComponent(reminderMsg);
     const url     = waPhone ? `https://wa.me/${waPhone}?text=${text}` : `https://wa.me/?text=${text}`;
@@ -2768,21 +2816,15 @@ function jobCardPrintHTML(j) {
       <span style="font-weight:800;color:#F57F17">📝 Note:</span> ${esc(j.note)}
     </div>` : '';
 
-  // ── 6. SIDE-BY-SIDE: Left = Payment QR + Bank details | Right = Notice text + Tracking QR ──
+  // ── 6. SIDE-BY-SIDE: Left = Payment QR | Right = Account details + Notice + Tracking ──
   const leftBox = showPayment ? `
-    <div style="flex:1;background:linear-gradient(135deg,#E8F5E9,#C8E6C9);border:2px solid #43A047;border-radius:12px;padding:14px;position:relative;overflow:hidden">
+    <div style="flex:1;background:linear-gradient(135deg,#E8F5E9,#C8E6C9);border:2px solid #43A047;border-radius:12px;padding:14px;position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center">
       <div style="font-size:14px;font-weight:900;color:#2E7D32;margin-bottom:8px;text-align:center">💳 Pay to Proceed</div>
       <div style="text-align:center;margin-bottom:8px">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:120px;height:120px;border-radius:8px;border:2px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
-        <div style="font-size:13px;color:#2E7D32;margin-top:4px;font-weight:700">Scan to Pay ${fmtRs(balance)}</div>
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:140px;height:140px;border-radius:8px;border:2px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
+        <div style="font-size:14px;color:#2E7D32;margin-top:4px;font-weight:800">Scan to Pay ${fmtRs(balance)}</div>
       </div>
-      <table style="border-collapse:collapse;font-size:12px;width:100%">
-        <tr><td style="color:#555;padding:3px 0;width:50px;font-weight:600">UPI</td><td style="font-weight:800;color:#2E7D32;font-size:11px">9375940444@okbizaxis</td></tr>
-        <tr><td style="color:#555;padding:3px 0;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-        <tr><td style="color:#555;padding:3px 0;font-weight:600">Bank</td><td style="font-weight:700;font-size:11px">SBI</td></tr>
-        <tr><td style="color:#555;padding:3px 0;font-weight:600">A/C</td><td style="font-weight:700;font-size:11px">37321811864</td></tr>
-        <tr><td style="color:#555;padding:3px 0;font-weight:600">IFSC</td><td style="font-weight:700;font-size:11px">SBIN0001353</td></tr>
-      </table>
+      <div style="font-size:11px;color:#555;text-align:center;margin-top:4px">UPI: 9375940444@okbizaxis</div>
     </div>` : `
     <div style="flex:1;background:linear-gradient(135deg,#E3F2FD,#BBDEFB);border:2px solid #1E88E5;border-radius:12px;padding:14px">
       <div style="font-size:14px;font-weight:900;color:#1565C0;margin-bottom:8px;display:flex;align-items:center;gap:6px">
@@ -2797,7 +2839,31 @@ function jobCardPrintHTML(j) {
         <div style="font-size:14px;color:#1565C0;font-weight:600">Payment complete. Thank you!</div>`}
     </div>`;
 
-  const rightNotice = isDelivered ? `
+  const rightBox = showPayment ? `
+    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+      <div style="background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:12px">
+        <div style="font-size:12px;font-weight:800;color:#2E7D32;margin-bottom:6px">🏦 Bank Details</div>
+        <table style="border-collapse:collapse;font-size:12px;width:100%">
+          <tr><td style="color:#555;padding:3px 0;width:50px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+          <tr><td style="color:#555;padding:3px 0;font-weight:600">Bank</td><td style="font-weight:700;font-size:11px">State Bank of India</td></tr>
+          <tr><td style="color:#555;padding:3px 0;font-weight:600">A/C</td><td style="font-weight:700;font-size:11px">37321811864</td></tr>
+          <tr><td style="color:#555;padding:3px 0;font-weight:600">IFSC</td><td style="font-weight:700;font-size:11px">SBIN0001353</td></tr>
+        </table>
+      </div>
+      <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:10px">
+        <div style="font-size:12px;font-weight:900;color:#E65100;margin-bottom:3px">⚠️ Collection Notice</div>
+        <div style="font-size:12px;color:#5D4037;line-height:1.3">
+          Collect within <strong>25 days</strong>. After this, we shall <strong>not be liable</strong> for any claims.
+        </div>
+      </div>
+      <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:8px 10px">
+        <div style="font-size:11px;font-weight:800;color:#1565C0;margin-bottom:3px">🔗 Track Online</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:56px;height:56px;border-radius:6px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:10px;color:#555;word-break:break-all;line-height:1.2">${printTrackUrl}</div>
+        </div>
+      </div>
+    </div>` : `
     <div style="flex:1;display:flex;flex-direction:column;gap:8px">
       <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px;flex:1">
         <div style="font-size:14px;font-weight:900;color:#1565C0;margin-bottom:6px">🔗 Track Online</div>
@@ -2806,27 +2872,12 @@ function jobCardPrintHTML(j) {
           <div style="font-size:11px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
         </div>
       </div>
-    </div>` : `
-    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
-      <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:12px">
-        <div style="font-size:14px;font-weight:900;color:#E65100;margin-bottom:4px">⚠️ Collection Notice</div>
-        <div style="font-size:13px;color:#5D4037;line-height:1.4">
-          Collect within <strong>25 days</strong>. After this, we shall <strong>not be liable</strong> for any claims or damage.
-        </div>
-      </div>
-      <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:10px">
-        <div style="font-size:12px;font-weight:800;color:#1565C0;margin-bottom:4px">🔗 Track Online</div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:64px;height:64px;border-radius:6px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:10px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
-        </div>
-      </div>
     </div>`;
 
   const sideBlock = `
     <div style="margin:0 30px 10px;display:flex;gap:10px;align-items:stretch">
       ${leftBox}
-      ${rightNotice}
+      ${rightBox}
     </div>`;
 
   // ── 7. FOOTER ─────────────────────────────────────────────────────────────
@@ -3077,6 +3128,8 @@ function shareText(j, multiPage) {
   // Tracking link
   const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(phone)}`;
 
+  const communityLink = 'https://chat.whatsapp.com/ILjfPXXuyiBKuL2VdpMhg4';
+
   // Compact format: ADITION header, job #, product count, amount
   if (isRepaired && balance > 0) {
     return `⚡ *ADITION™ ELECTRIC*
@@ -3088,7 +3141,8 @@ Dear *${custName}*, your items are *ready!* 🎉
 ✅ By collecting, you approve charges.
 📞 7801990001
 
-🔗 Track: ${trackLink}`;
+🔗 Track: ${trackLink}
+📢 Join Updates: ${communityLink}`;
   }
 
   if (isDelivered) {
@@ -3097,7 +3151,8 @@ Job *#${j.id}* | 📦 ${prodCount} Products | ✅ *Delivered*
 
 Dear *${custName}*, your job is complete! 🙏
 ${balance > 0 ? `⚠️ Due: ₹${balance.toLocaleString('en-IN')}\n` : ''}
-🔗 Track: ${trackLink}`;
+🔗 Track: ${trackLink}
+📢 Join Updates: ${communityLink}`;
   }
 
   // Default: job creation / approval
@@ -3111,7 +3166,8 @@ ${received > 0 ? `Advance: ₹${received.toLocaleString('en-IN')} | ` : ''}${bal
 ⚠️ Collect within *25 days*.
 📞 7801990001
 
-🔗 Track: ${trackLink}`;
+🔗 Track: ${trackLink}
+📢 Join Updates: ${communityLink}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3720,7 +3776,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v24.0<br>
+      ✨ adition™ since 1984 · v25.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -3892,6 +3948,179 @@ function bindTrack() {
 
   // Auto-track if URL has both params
   if (autoJob && autoMobile) setTimeout(doTrack, 200);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRINT ADDRESS LABEL — 101mm × 152mm single page
+// ─────────────────────────────────────────────────────────────────────────────
+function printAddressLabel(j) {
+  const w = window.open('', '_blank', 'width=500,height=700');
+  if (!w) { toast('Please allow popups to print', 'error'); return; }
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Address Label — ${esc(j.id)}</title>
+<style>
+@page { size: 101mm 152mm; margin: 6mm; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: 'Segoe UI', Arial, sans-serif; width:89mm; height:140mm; padding:4mm; display:flex; flex-direction:column; justify-content:space-between; }
+.section { margin-bottom: 3mm; }
+.label { font-size:10pt; color:#888; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:1mm; }
+.name { font-size:16pt; font-weight:900; color:#1a1a2e; line-height:1.2; margin-bottom:1mm; }
+.addr { font-size:11pt; color:#333; line-height:1.4; white-space:pre-line; }
+.phone { font-size:11pt; color:#1565C0; font-weight:700; }
+.divider { border:none; border-top:1px dashed #999; margin:3mm 0; }
+.from-name { font-size:12pt; font-weight:900; color:#E53935; letter-spacing:1px; }
+.from-addr { font-size:10pt; color:#555; line-height:1.4; }
+</style></head><body>
+<div>
+  <div class="section">
+    <div class="label">To,</div>
+    <div class="name">${esc(j.snap_name)}</div>
+    ${j.snap_address ? `<div class="addr">${esc(j.snap_address)}</div>` : ''}
+    <div class="phone">${j.snap_mobile || ''}${j.snap_mobile2 ? '  /  '+j.snap_mobile2 : ''}</div>
+  </div>
+  <hr class="divider">
+  <div class="section">
+    <div class="label">From,</div>
+    <div class="from-name">ADITION ELECTRIC WORKS</div>
+    <div class="from-addr">Gheekanta, Ahmedabad\nPin: 380001\nM: 7801990001</div>
+  </div>
+</div>
+<script>window.onload=function(){window.print();setTimeout(function(){window.close()},1000)}<\/script>
+</body></html>`;
+  w.document.write(html);
+  w.document.close();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN DASHBOARD — Summary tiles, revenue charts, staff performance
+// ─────────────────────────────────────────────────────────────────────────────
+function adminDashHTML() {
+  return `
+  <div class="view-pad" id="admin-dash-root">
+    <div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>
+  </div>`;
+}
+
+async function loadAdminDash() {
+  const root = document.getElementById('admin-dash-root');
+  if (!root) return;
+  try {
+    const r = await API.get('/api/analytics');
+    const d = r.data;
+    const pending = (d.underRepair||0) + (d.repaired||0) + (d.returned||0);
+
+    root.innerHTML = `
+    <!-- Summary Tiles -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+      <div onclick="navigate('dashboard');setFilter('');filterToday()" style="background:linear-gradient(135deg,#E3F2FD,#BBDEFB);border-radius:14px;padding:16px;cursor:pointer;text-align:center">
+        <div style="font-size:28px">📅</div>
+        <div style="font-size:28px;font-weight:900;color:#1565C0;line-height:1">${d.today || 0}</div>
+        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Today's Jobs</div>
+      </div>
+      <div onclick="navigate('dashboard');filterActive()" style="background:linear-gradient(135deg,#FFF3E0,#FFE0B2);border-radius:14px;padding:16px;cursor:pointer;text-align:center">
+        <div style="font-size:28px">🔧</div>
+        <div style="font-size:28px;font-weight:900;color:#E65100;line-height:1">${pending}</div>
+        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Pending Jobs</div>
+      </div>
+      <div onclick="navigate('dashboard');filterDone()" style="background:linear-gradient(135deg,#E8F5E9,#C8E6C9);border-radius:14px;padding:16px;cursor:pointer;text-align:center">
+        <div style="font-size:28px">✅</div>
+        <div style="font-size:28px;font-weight:900;color:#2E7D32;line-height:1">${d.completed || 0}</div>
+        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Completed</div>
+      </div>
+      <div style="background:linear-gradient(135deg,#F3E5F5,#E1BEE7);border-radius:14px;padding:16px;text-align:center">
+        <div style="font-size:28px">📊</div>
+        <div style="font-size:28px;font-weight:900;color:#7B1FA2;line-height:1">${d.total || 0}</div>
+        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Total Jobs</div>
+      </div>
+    </div>
+
+    <!-- Revenue Cards -->
+    <div class="card" style="margin-bottom:12px;background:linear-gradient(135deg,#1b2838,#0f3460);color:#fff;border:none">
+      <div style="font-size:13px;font-weight:800;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">💰 Revenue Overview</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:rgba(255,255,255,.5);font-weight:700;text-transform:uppercase">Today</div>
+          <div style="font-size:20px;font-weight:900;color:#43A047">${fmtRs(d.todayRevenue || 0)}</div>
+        </div>
+        <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:rgba(255,255,255,.5);font-weight:700;text-transform:uppercase">This Month</div>
+          <div style="font-size:20px;font-weight:900;color:#43A047">${fmtRs(d.monthRevenue || 0)}</div>
+        </div>
+        <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:rgba(255,255,255,.5);font-weight:700;text-transform:uppercase">Total Earnings</div>
+          <div style="font-size:20px;font-weight:900;color:#43A047">${fmtRs(d.totalRevenue || 0)}</div>
+        </div>
+        <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:12px;text-align:center">
+          <div style="font-size:11px;color:rgba(255,255,255,.5);font-weight:700;text-transform:uppercase">Pending Dues</div>
+          <div style="font-size:20px;font-weight:900;color:#FF8A65">${fmtRs(d.pendingDues || 0)}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Monthly Revenue Chart (text-based bar chart) -->
+    ${(d.monthlyRevenue||[]).length ? `
+    <div class="card" style="margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px">📈 Monthly Revenue (Last 6 Months)</div>
+      ${(d.monthlyRevenue||[]).reverse().map(m => {
+        const maxR = Math.max(...(d.monthlyRevenue||[]).map(x => x.charges||1));
+        const pct = maxR > 0 ? Math.max(5, Math.round(((m.charges||0)/maxR)*100)) : 5;
+        const monthLabel = m.month ? new Date(m.month + '-01').toLocaleDateString('en-IN', { month:'short', year:'2-digit' }) : m.month;
+        return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div style="width:55px;font-size:12px;font-weight:700;color:#555;text-align:right;flex-shrink:0">${monthLabel}</div>
+          <div style="flex:1;background:#f0f2f5;border-radius:6px;height:24px;overflow:hidden;position:relative">
+            <div style="background:linear-gradient(90deg,#43A047,#66BB6A);height:100%;width:${pct}%;border-radius:6px;transition:width .3s"></div>
+          </div>
+          <div style="font-size:12px;font-weight:800;color:#2E7D32;width:80px;text-align:right;flex-shrink:0">${fmtRs(m.charges||0)}</div>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+
+    <!-- Status Breakdown -->
+    ${(d.byStatus||[]).length ? `
+    <div class="card" style="margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">📊 Status Breakdown</div>
+      ${(d.byStatus||[]).map(s => {
+        const pct = d.total > 0 ? Math.max(5, Math.round((s.cnt/d.total)*100)) : 0;
+        return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div style="width:90px;font-size:12px;font-weight:700;color:${sc(s.status)};text-align:right;flex-shrink:0">${sl(s.status)}</div>
+          <div style="flex:1;background:#f0f2f5;border-radius:6px;height:20px;overflow:hidden">
+            <div style="background:${sc(s.status)};height:100%;width:${pct}%;border-radius:6px;opacity:.7"></div>
+          </div>
+          <div style="font-size:13px;font-weight:800;color:#1a1a2e;width:40px;text-align:right">${s.cnt}</div>
+        </div>`;
+      }).join('')}
+    </div>` : ''}
+
+    <!-- Staff Performance -->
+    ${(d.byStaff||[]).length ? `
+    <div class="card" style="margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">👥 Staff Performance</div>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="background:#f8f9fa">
+              <th style="padding:8px 12px;text-align:left;color:#888;font-weight:700">Staff</th>
+              <th style="padding:8px 12px;text-align:center;color:#888;font-weight:700">Machines</th>
+              <th style="padding:8px 12px;text-align:right;color:#888;font-weight:700">Revenue</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(d.byStaff||[]).map((s, i) => `
+            <tr style="border-bottom:1px solid #f0f0f0">
+              <td style="padding:8px 12px;font-weight:700;color:#1a1a2e">
+                <span style="background:#E3F2FD;color:#1565C0;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;margin-right:6px">${i+1}</span>
+                ${esc(s.name)}
+              </td>
+              <td style="padding:8px 12px;text-align:center;font-weight:600">${s.cnt}</td>
+              <td style="padding:8px 12px;text-align:right;font-weight:700;color:#2E7D32">${fmtRs(s.total_charges||0)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}`;
+  } catch (e) {
+    root.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Failed to load dashboard</p></div>`;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

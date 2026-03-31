@@ -1069,3 +1069,35 @@ button, a, label, select, input[type="file"] + label, [role="button"] {
 .app-header {
   box-shadow: 0 1px 8px rgba(0,0,0,.18);
 }
+
+/* ── Filter Panel Chips ───────────────────────────────────────────────── */
+.fp-chip {
+  background: #f0f2f5;
+  color: var(--fp-color, #555);
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+  transition: all .15s;
+}
+.fp-chip.fp-active {
+  background: var(--fp-color, #1a1a2e);
+  color: #fff;
+  border-color: var(--fp-color, #1a1a2e);
+}
+.fp-quick {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #555;
+  -webkit-tap-highlight-color: transparent;
+}
+.fp-quick:active { background: #f0f0f0; transform: scale(0.96); }
