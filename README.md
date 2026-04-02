@@ -1,11 +1,11 @@
-# ADITION ELECTRIC SOLUTION — PWA v16
+# ADITION ELECTRIC SOLUTION — PWA v26
 
 **Mobile-first PWA** for electric appliance repair shop management.  
-Admin & Staff roles · Job tracking · R2 image storage · D1 SQLite DB
+Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite DB
 
 ---
 
-## 🔗 URLs
+## URLs
 | Environment | URL |
 |---|---|
 | **Sandbox (Dev)** | https://3000-itsteu7gob2nb2g5pp83m-dfc00ec5.sandbox.novita.ai |
@@ -13,257 +13,154 @@ Admin & Staff roles · Job tracking · R2 image storage · D1 SQLite DB
 
 ---
 
-## ✅ Completed Features (v16)
+## Completed Features (v26)
 
-### Authentication & RBAC
+### Authentication & Role-Based Access Control
 - Email/password login with JWT (30-day expiry)
-- **Admin** (bilalkhan1108@gmail.com / `0010`) — full CRUD, financials, delivery, reports
-- **Staff** — no prices/financials visible, Balance Due only, assignment requests
+- **Admin** (bilalkhan1108@gmail.com / `0010`) — full CRUD, financials, delivery, reports, staff management
+- **Supervisor** — replaces old "Manager" role; admin assigns granular rights from dashboard
+  - Available rights: `view_jobs`, `edit_jobs`, `create_jobs`, `view_financials`, `deliver`, `download`, `share`, `manage_machines`, `view_reports`
+- **Staff** — no prices/financials visible, assignment requests only
 
-### Dashboard
-- Filter chips with live counts: All(n) · Under Repair(n) · Repaired(n) · Returned(n) · Delivered(n)
+### Dashboard (6 Summary Tiles)
+- Tiles below menu bar: **No. of Jobs**, **Under Repair**, **Repaired**, **Returned**, **Partial**, **Delivered**
+- Each tile is tappable to filter jobs by that status
 - Virtual list rendering — handles 500+ jobs lag-free
-- 10ms debounce search, persistent URL filter
-- Staff notification bar: Assignment Approved ✅ / Denied ❌ with timestamps
+- 300ms debounce search, persistent URL filter
+
+### Filter Panel
+- Status filters: All, Under Repair, Repaired, Returned, Partial Delivered, Delivered
+- **Pending Payment** filter — shows jobs with outstanding balance
+- Date range filter (From/To)
+- Quick filters: Today, This Month, Pending
+- Delivery type filter (In Person / Courier) for delivered jobs
+
+### Financial Management
+- **Discount/Deduction field** — editable above Received Amount on job detail
+- **Payment Method dropdown** — Online / Cash (default: Cash) beside Received Amount
+- Balance calculation: `Total - Discount - Received = Balance Due`
+- Itemized product charges with per-line breakdown
+- Revenue cards: Today, This Month, Total Earnings, Pending Dues
+
+### Job Card (Print/Share)
+- **1.5× font sizes** for customer details (name: 30px, mobile: 27px, address: 21px)
+- **1.5× font sizes** for product details (name: 26px, complaint: 20px, price: 26px)
+- **Payment section layout**: QR code → Payment Details → Notice Text → Tracking QR+Link
+- **Two notices** on every job card:
+  1. Damaged/replacement parts will NOT be returned to the customer
+  2. Any damage or loss during repair is the customer's responsibility
+- **Centered footer**: "Subjected to Ahmedabad Jurisdiction only" in readable format
+- Discount and payment method shown in financial summary
+
+### Print Address Label
+- Generates JPG at **101×152mm** resolution (2× quality canvas rendering)
+- **To section** (14pt): Variable-size customer Name, Address, Mobile, Alt Mobile
+- **From section** (10pt name / 8pt address): Fixed ADITION ELECTRIC WORKS details
+- Opens **Web Share API dialog** on mobile (for admin app selection)
+- Falls back to direct download on desktop
+
+### Auto-Download Delivered Job Card
+- When a job status becomes **Delivered** (after Repair/Return), auto-generates and downloads `Job [Job No.] Delivered.jpg`
+- Uses `sessionStorage` to prevent duplicate downloads within the same session
+- Non-blocking: runs 800ms after delivery confirmation
 
 ### Job Management
 - Auto-generated job IDs (configurable prefix + digit format)
-- Customer auto-fill from history
+- Customer auto-fill from history + returning customer insights
 - Per-machine repair amounts, itemized total
-- Admin can edit received amount even after delivery
+- Work done notes, return reasons
+- Product photo + voice note per machine
+- Smart suggestion tiles (products, complaints, amounts)
 
-### Job History Timeline ✨ NEW
-- **History button** on every job detail page (all roles)
-- Full audit log: Job Created, Machine Added, Status changes, Payment updates, Delivery
-- Shows timestamp, action description, user name, and role badge
+### Staff Management
+- Add/edit/delete staff with role selection: Staff, Supervisor, Admin
+- Supervisor rights configuration via checkboxes
+- Active/Inactive toggle
+- Assignment request system: staff request, admin approve/deny
 
-### Staff Notifications ✨ IMPROVED
-- `GET /api/my-notifications` — returns assignment approvals/denials from last 7 days
-- Shows exact resolved timestamp (not just date)
-- Color-coded per status
+### Reports & Exports
+- Full backup export/import (.xlsx)
+- Staff work report with date range filter
+- Job summary with revenue data
+- Customer data export
+- Customer ledger (summary or detailed with machines)
+- Staff: own jobs export
 
-### WhatsApp Messages ✨ IMPROVED
-- Itemized product list with individual prices (₹ per item, quantity multiplier)
-- Estimated repair amount for new jobs
-- Payment due amount with UPI details for repaired jobs
-- 25-day collection notice
-- Shop phone number included
+### WhatsApp Integration
+- Job creation confirmation with product list, amounts, tracking link
+- Repair completion notification with payment details
+- Delivery confirmation
+- Customer reminder with 25-day notice
+- WhatsApp community link in all messages
 
-### Job Card Export
-- 3× resolution (high DPI canvas) for sharp WhatsApp images
-- 2-column customer layout (Name|Mobile, Address|Date)
-- All product images + individual charges shown
-- QR code shown when balance > 0; hidden when fully paid
+### Public Customer Tracking
+- `/track?job=ID&mobile=NUMBER` — public page, no auth required
+- Shows job status, machine list, work done details
+- QR code on job card links directly to tracking page
 
-### Image Upload ✨ IMPROVED
-- **Instant preview** using local blob URL (no wait for upload)
-- **Async non-blocking upload** — UI remains responsive during upload
-- Auto-retry on failure with reduced quality
-- Client-side compression to 1080px before upload
-
-### Delivery Flow
-- Delivery Method at top of modal
-- All extra fields (Receiver, Courier, Tracking) always visible and optional
-- WhatsApp post-delivery message with delivered confirmation
-
-### Reports
-- Customer Ledger: search by mobile, filter by date range, export Summary/Detailed
-- Staff Work Report, Job Summary, Full Backup, My Jobs Export
-- Customer Data Export (deduplicated)
-
-### PWA
-- `manifest.json`: standalone mode, start_url "/", theme_color "#0f172a"
-- 192×192 and 512×512 icons
-- Service Worker v7 caches key assets
-- beforeinstallprompt → install button in header
-- Back button uses history.pushState + onpopstate
-
-## 🔐 Credentials
-- **Admin**: bilalkhan1108@gmail.com / `0010`
-
-### Authentication & RBAC
-- Email/password login with JWT (30-day expiry)
-- **Admin** (bilalkhan1108@gmail.com / `0010`) — full CRUD, backup/restore, view delivered jobs
-- **Staff** — view-only, no prices/charges/mobiles/export, sees Balance Due only
-
-### Dashboard (Virtual List)
-- **Virtual list rendering** — only renders visible job cards, handles 500+ jobs lag-free
-- Persistent URL filter (`?status=under_repair` default)
-- Live search with 350ms debounce
-- 4-colour status badges: 🟠 Under Repair · 🟢 Repaired · 🔵 Returned · ✅ Delivered
-
-### Job Management
-- Sequential job IDs: C-001 → C-999 (resets only on full cleanup)
-- Customer upsert by mobile number (auto-update on re-registration)
-- **Received Amount** input on create/edit forms (admin only)
-- **Financial Panel**: Total Charges · Received Amount · Balance Due
-- Staff sees Balance Due only (no breakdown)
-- Multi-machine per job with per-machine: product name, complaint, charges, quantity, status, images
-
-### Machine & Image Management
-- **Client-side canvas image compression** — max 1280px, 0.82 JPEG quality before R2 upload (prevents app hang on high-res photos)
-- Up to 3 images per machine displayed on job card
-- Per-machine status updates auto-propagate to job status
-
-### 9:16 Job Card (1080×1920 HD JPG)
-- `html2canvas` with `scale:2` for HD output
-- Includes: Job ID, Customer info, Machine list with complaints, Financial summary
-- **Conditional footer block**:
-  - `status ≠ delivered` → ⚠️ 25-day collection notice
-  - `status = delivered` → 📦 Delivery Info (Receiver Name/Mobile/Method/Courier/Tracking)
-- Web Share API → allows WhatsApp Business selection
-- Download fallback if share not supported
-
-### Registration Messages (WhatsApp)
-- **Undelivered**: Registration confirmation + 25-day liability notice
-- **Delivered**: "Successful Delivery" message with financial summary
-
-### Database Integrity
-- `PRAGMA foreign_keys = ON`
-- `ON DELETE CASCADE` on all foreign key relations
-- Admin seeded in migration (hard-coded, never lost on reset)
-
-### Excel Reports (Admin Only)
-- Full backup export (.xlsx) — image URLs only, no blobs
-- Full backup import — transactional, rolls back on error
-- Staff work report (per staff, machines handled)
-- Job summary report
-
-### Cleanup (Admin Only)
-- Date-range delete — removes old jobs/machines/images
-- Full reset — deletes all data, resets sequence to C-001
-
-### PWA
-- Service worker v6: cache-first for UI, stale-while-revalidate for CDN, network-first for API
-- Background sync support
-- Offline UI (serves from cache)
+### PWA Features
 - Installable on Android/iOS home screen
-
-### Mobile UX
-- All touch targets **minimum 44px** (WCAG AA mobile standard)
-- Safe area insets (notch/home-bar aware)
-- Viewport locked (no user-scale)
+- Push notification permission on login
+- Service worker for offline shell caching
+- Compressed image upload (1080px, WebP preferred)
 
 ---
 
-## 📐 Data Architecture
+## API Endpoints Summary
 
-### D1 Tables
-| Table | Key Fields |
-|---|---|
-| `users` | id, name, email, password_hash, role, active |
-| `customers` | id, name, mobile (UNIQUE), mobile2, address |
-| `job_counter` | id=1, last_seq (auto-incremented) |
-| `jobs` | id (C-001…), customer_id, snap_*, note, status, received_amount, delivery_* |
-| `machines` | id, job_id FK→CASCADE, product_name, product_complaint, charges, quantity, assigned_staff_id, status |
-| `machine_images` | id, machine_id FK→CASCADE, r2_object_key, url |
-
-### R2 Bucket
-- **PRODUCT_IMAGES** — stores compressed JPEG images (key: `images/{jobId}/{machineId}/{timestamp}.jpg`)
-
-### Status Flow
-```
-under_repair → repaired → returned → delivered
-```
-Job status auto-updates based on machine statuses.
-
----
-
-## 🚀 Deployment to Cloudflare Pages
-
-```bash
-# 1. Create D1 database
-npx wrangler d1 create adition-production
-# → Copy database_id to wrangler.jsonc
-
-# 2. Run migrations
-npx wrangler d1 migrations apply adition-production
-
-# 3. Create R2 bucket
-npx wrangler r2 bucket create adition-images
-
-# 4. Create Pages project
-npx wrangler pages project create adition-electric --production-branch main
-
-# 5. Set JWT secret
-npx wrangler pages secret put JWT_SECRET --project-name adition-electric
-# → Enter a strong random secret
-
-# 6. Deploy
-npm run build
-npx wrangler pages deploy dist --project-name adition-electric
-```
-
-### Cloudflare Bindings Required
-| Binding | Type | Name |
-|---|---|---|
-| `DB` | D1 Database | adition-production |
-| `PRODUCT_IMAGES` | R2 Bucket | adition-images |
-| `JWT_SECRET` | Secret variable | (strong random string) |
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/api/auth/login` | — | Login |
+| GET | `/api/auth/me` | Auth | Current user info (includes supervisor_rights) |
+| GET | `/api/analytics` | Auth | Dashboard stats (includes partial count) |
+| GET | `/api/jobs` | Auth | List jobs (status, search, date, staff_id filters) |
+| GET | `/api/jobs/pending-payment` | Admin | Jobs with outstanding balance |
+| GET | `/api/jobs/delivered` | Admin | Delivered jobs with filters |
+| POST | `/api/jobs` | Auth | Create job |
+| GET | `/api/jobs/:id` | Auth | Job details with machines, images |
+| PUT | `/api/jobs/:id` | Admin | Update (includes discount, payment_method) |
+| DELETE | `/api/jobs/:id` | Admin | Delete job |
+| POST | `/api/jobs/:id/machines` | Auth | Add machine |
+| PUT | `/api/machines/:id` | Auth | Update machine status |
+| DELETE | `/api/machines/:id` | Admin | Delete machine |
+| POST | `/api/machines/:id/images` | Auth | Upload image |
+| POST | `/api/machines/:id/audio` | Auth | Upload voice note |
+| GET | `/api/staff` | Admin | List staff (includes supervisor_rights) |
+| POST | `/api/staff` | Admin | Create staff (supports supervisor_rights) |
+| PUT | `/api/staff/:id` | Admin | Update staff (supports supervisor_rights) |
+| DELETE | `/api/staff/:id` | Admin | Delete staff |
+| GET | `/api/requests` | Admin | Assignment requests |
+| POST | `/api/requests` | Staff | Request assignment |
+| PUT | `/api/requests/:id` | Admin | Approve/deny request |
+| GET | `/api/settings` | Admin | App settings |
+| PUT | `/api/settings` | Admin | Update settings |
+| GET | `/api/track` | Public | Customer job tracking |
+| GET | `/api/customers/search` | Auth | Customer autocomplete |
+| GET | `/api/customers/history` | Auth | Customer job history |
+| GET | `/api/reports/*` | Admin | Various Excel exports |
+| GET | `/api/backup/export` | Admin | Full data backup |
+| POST | `/api/backup/import` | Admin | Restore data backup |
 
 ---
 
-## 🛠️ Local Development
-
-```bash
-# Install dependencies
-npm install
-
-# Apply migrations locally
-npx wrangler d1 migrations apply adition-production --local
-
-# Build and start dev server
-npm run build
-pm2 start ecosystem.config.cjs
-
-# Test
-curl http://localhost:3000/api/auth/login \
-  -d '{"email":"bilalkhan1108@gmail.com","password":"0010"}' \
-  -H "Content-Type: application/json"
-```
-
----
-
-## 📱 User Guide
-
-### Login
-- Open the app → enter email & password
-- Admin: `bilalkhan1108@gmail.com` / `0010`
-
-### Create a Job
-1. Dashboard → **New Job**
-2. Enter customer name + mobile (required)
-3. Add optional address, note, received amount (admin)
-4. Enter first machine details: product name, complaint, charges (admin), quantity
-5. Tap **Create Job** → job card opens
-
-### Add More Machines / Images
-- On Job Detail → tap **+ Add Machine**
-- On each machine card → tap the 📷 icon to upload image (auto-compressed)
-
-### Mark Delivered
-- Job Detail → tap **Mark Delivered** (admin only)
-- Fill receiver name, mobile, delivery method
-- Status changes to Delivered; job card shows delivery block
-
-### Share Job Card
-- Job Detail → tap **Share**
-- App generates 1080×1920 JPG + WhatsApp message
-- Select WhatsApp Business from share sheet
-
-### Export Reports (Admin)
-- Dashboard menu → **Reports**
-- Choose: Full Backup, Staff Report, or Job Summary
-
----
+## Data Architecture
+- **D1 Database**: users, customers, jobs, machines, machine_images, job_counter, app_settings, job_history, assignment_requests
+- **R2 Storage**: Product images and voice notes
+- **New columns (v26)**:
+  - `users.supervisor_rights` — JSON array of granted rights
+  - `jobs.discount` — Discount/deduction amount
+  - `jobs.payment_method` — 'cash' (default) or 'online'
 
 ## Tech Stack
-- **Backend**: Hono 4 · Cloudflare Workers · D1 (SQLite) · R2
-- **Auth**: jose JWT (HS256) · bcryptjs
-- **Frontend**: Vanilla JS SPA · Tailwind CSS CDN · html2canvas · Axios · FontAwesome
-- **Build**: Vite 6 · @hono/vite-cloudflare-pages · TypeScript
-- **PWA**: Service Worker v6 · Web Share API · Web App Manifest
+- **Backend**: Hono + TypeScript + Cloudflare Workers
+- **Frontend**: Vanilla JS + Tailwind CSS (CDN)
+- **Database**: Cloudflare D1 (SQLite)
+- **Storage**: Cloudflare R2
+- **Auth**: JWT (jose) + bcryptjs
+- **Export**: SheetJS (xlsx)
+- **Capture**: html2canvas
 
----
-
-*adition™ since 1984 · Gheekanta, Ahmedabad 380001 · Subjected to Ahmedabad Jurisdiction only*
+## Deployment
+- **Platform**: Cloudflare Pages
+- **Status**: Active
+- **Last Updated**: 2026-04-02
