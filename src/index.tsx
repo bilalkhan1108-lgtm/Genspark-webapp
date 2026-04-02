@@ -68,6 +68,7 @@ const authMiddleware = async (c: any, next: any) => {
     c.set('userRole', payload.role as string)
     c.set('userEmail',payload.email as string)
     c.set('userName', payload.name  as string)
+    c.set('userRights', payload.rights as string || '[]')
     // Ensure app_settings table exists (runs once per Worker instance)
     await ensureDbSchema(c.env.DB)
     await next()
@@ -77,6 +78,23 @@ const authMiddleware = async (c: any, next: any) => {
 }
 const adminOnly = async (c: any, next: any) => {
   if (c.get('userRole') !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  await next()
+}
+// Supervisor with specific right check
+function hasSupervisorRight(c: any, right: string): boolean {
+  const role = c.get('userRole')
+  if (role === 'admin') return true
+  if (role === 'supervisor') {
+    try {
+      const rights = JSON.parse(c.get('userRights') || '[]')
+      return rights.includes(right)
+    } catch { return false }
+  }
+  return false
+}
+const adminOrSupervisor = async (c: any, next: any) => {
+  const role = c.get('userRole')
+  if (role !== 'admin' && role !== 'supervisor') return c.json({ error: 'Forbidden' }, 403)
   await next()
 }
 
@@ -91,6 +109,12 @@ async function ensureDbSchema(db: D1Database) {
     // Add work_done / return_reason columns if not exist (idempotent)
     await db.prepare(`ALTER TABLE machines ADD COLUMN work_done TEXT`).run().catch(() => {})
     await db.prepare(`ALTER TABLE machines ADD COLUMN return_reason TEXT`).run().catch(() => {})
+    // v26: supervisor role + discount/payment fields
+    await db.prepare(`ALTER TABLE users ADD COLUMN supervisor_rights TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE jobs ADD COLUMN discount REAL NOT NULL DEFAULT 0`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE jobs ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'`).run().catch(() => {})
+    // Convert any remaining manager users to supervisor
+    await db.prepare(`UPDATE users SET role='supervisor' WHERE role='manager'`).run().catch(() => {})
     // Ensure job_history audit table exists with index
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS job_history (
@@ -160,15 +184,15 @@ app.post('/api/auth/login', async (c) => {
   const ok = await bcrypt.compare(password, user.password_hash)
   if (!ok) return c.json({ error: 'Invalid credentials' }, 401)
   const token = await signToken(
-    { sub: user.id, role: user.role, email: user.email, name: user.name },
+    { sub: user.id, role: user.role, email: user.email, name: user.name, rights: user.supervisor_rights || '[]' },
     c.env.JWT_SECRET || 'aes-default-secret'
   )
-  return c.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } })
+  return c.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role, supervisor_rights: user.supervisor_rights || '[]' } })
 })
 
 app.get('/api/auth/me', authMiddleware, async (c) => {
   const user = await c.env.DB.prepare(
-    'SELECT id,name,email,role,active FROM users WHERE id=?'
+    'SELECT id,name,email,role,active,supervisor_rights FROM users WHERE id=?'
   ).bind(c.get('userId')).first<any>()
   return c.json(user)
 })
@@ -185,7 +209,7 @@ app.get('/api/customers/by-mobile', authMiddleware, async (c) => {
 // ── API: Dashboard Analytics ──────────────────────────────────────────────────
 app.get('/api/analytics', authMiddleware, async (c) => {
   const role = c.get('userRole')
-  const isAdmin = role === 'admin' || role === 'manager'
+  const isAdmin = role === 'admin' || role === 'supervisor'
   const userId  = c.get('userId')
 
   // Staff see all jobs in analytics (no filter needed)
@@ -195,7 +219,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   const monthStart = today.substring(0, 8) + '01'
 
   const [total, pending, completed, todayCount, monthCount, byStatus, byStaff,
-         urCount, repCount, retCount] = await Promise.all([
+         urCount, repCount, retCount, partialCount] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin}`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status IN ('under_repair','repaired','returned')`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='delivered'`).first<any>(),
@@ -212,6 +236,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='under_repair'`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='repaired'`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='returned'`).first<any>(),
+    c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='partial_delivered'`).first<any>(),
   ])
 
   // Revenue data for admin dashboard
@@ -252,6 +277,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     underRepair: urCount?.cnt || 0,
     repaired: repCount?.cnt || 0,
     returned: retCount?.cnt || 0,
+    partial: partialCount?.cnt || 0,
     byStatus: isAdmin ? byStatus.results : [],
     byStaff: isAdmin ? byStaff.results : [],
     ...revenueData,
@@ -269,13 +295,13 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const limit    = Math.min(parseInt(c.req.query('limit') || '100'), 500)
   const offset   = parseInt(c.req.query('offset') || '0') || 0
   const role     = c.get('userRole')
-  const isAdmin  = role === 'admin' || role === 'manager'
+  const isAdmin  = role === 'admin' || role === 'supervisor'
   const userId   = c.get('userId')
   const conds: string[] = []
   const params: any[] = []
 
   if (status) { conds.push('j.status=?'); params.push(status) }
-  // Staff: hide delivered jobs only (managers and admin can see all)
+  // Staff: hide delivered jobs only (supervisors and admin can see all)
   if (!isAdmin) {
     conds.push("j.status != 'delivered'")
   }
@@ -295,7 +321,7 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
   const { results } = await c.env.DB.prepare(`
     SELECT j.id, j.snap_name, j.snap_mobile, j.status,
-           j.received_amount, j.created_at, j.updated_at,
+           j.received_amount, j.discount, j.payment_method, j.created_at, j.updated_at,
            (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
            (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges,
            (SELECT url FROM machine_images mi
@@ -307,7 +333,39 @@ app.get('/api/jobs', authMiddleware, async (c) => {
 
   return c.json(results.map((r: any) => ({
     ...r,
-    balance_due: Math.max(0, (r.total_charges || 0) - (r.received_amount || 0))
+    balance_due: Math.max(0, (r.total_charges || 0) - (r.discount || 0) - (r.received_amount || 0))
+  })))
+})
+
+// ── API: Jobs — pending payment filter
+app.get('/api/jobs/pending-payment', authMiddleware, async (c) => {
+  const role = c.get('userRole')
+  const isAdminRole = role === 'admin' || role === 'supervisor'
+  if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
+  const search = c.req.query('q') || ''
+  const conds: string[] = ["j.status != 'delivered'"]
+  const params: any[] = []
+  if (search) {
+    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.id LIKE ?)')
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+  }
+  const where = `WHERE ${conds.join(' AND ')}`
+  const { results } = await c.env.DB.prepare(`
+    SELECT * FROM (
+      SELECT j.id, j.snap_name, j.snap_mobile, j.status,
+             j.received_amount, j.discount, j.created_at, j.updated_at,
+             (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
+             COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'),0) AS total_charges,
+             (SELECT url FROM machine_images mi
+              JOIN machines m2 ON mi.machine_id=m2.id
+              WHERE m2.job_id=j.id ORDER BY mi.id LIMIT 1) AS thumb
+      FROM jobs j ${where}
+    ) sub WHERE sub.total_charges > 0 AND (sub.total_charges - COALESCE(sub.discount,0) - COALESCE(sub.received_amount,0)) > 0
+    ORDER BY sub.created_at DESC LIMIT 500
+  `).bind(...params).all<any>()
+  return c.json(results.map((r: any) => ({
+    ...r,
+    balance_due: Math.max(0, (r.total_charges || 0) - (r.discount || 0) - (r.received_amount || 0))
   })))
 })
 
@@ -360,7 +418,7 @@ app.post('/api/jobs', authMiddleware, async (c) => {
 // MUST be registered BEFORE /api/jobs/:id to avoid route conflict
 app.get('/api/jobs/delivered', authMiddleware, async (c) => {
   const role = c.get('userRole')
-  const isAdminRole = role === 'admin' || role === 'manager'
+  const isAdminRole = role === 'admin' || role === 'supervisor'
   if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
   const from     = c.req.query('from') || ''
   const to       = c.req.query('to')   || ''
@@ -389,7 +447,7 @@ app.get('/api/jobs/delivered', authMiddleware, async (c) => {
   `).bind(...params).all<any>()
   return c.json(results.map((r: any) => ({
     ...r,
-    balance_due: Math.max(0, (r.total_charges || 0) - (r.received_amount || 0))
+    balance_due: Math.max(0, (r.total_charges || 0) - (r.discount || 0) - (r.received_amount || 0))
   })))
 })
 
@@ -399,7 +457,7 @@ app.get('/api/jobs/:id', authMiddleware, async (c) => {
   if (!job) return c.json({ error: 'Not found' }, 404)
 
   const role2 = c.get('userRole')
-  const isAdmin = role2 === 'admin' || role2 === 'manager'
+  const isAdmin = role2 === 'admin' || role2 === 'supervisor'
   const userId  = c.get('userId')
 
   // Staff can't fetch delivered job details
@@ -432,7 +490,7 @@ app.get('/api/jobs/:id', authMiddleware, async (c) => {
     ...job,
     machines: enriched,
     total_charges: totalCharges,
-    balance_due: Math.max(0, totalCharges - (job.received_amount || 0))
+    balance_due: Math.max(0, totalCharges - (job.discount || 0) - (job.received_amount || 0))
   })
 })
 
@@ -442,7 +500,7 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
   const role = c.get('userRole')
-  const isAdmin = role === 'admin' || role === 'manager'
+  const isAdmin = role === 'admin' || role === 'supervisor'
   if (!isAdmin) return c.json({ error: 'Forbidden' }, 403)
 
   const fields: string[] = []
@@ -452,7 +510,7 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
     'delivery_method', 'delivery_receiver_name', 'delivery_receiver_mobile',
     'delivery_courier_name', 'delivery_tracking', 'delivery_address',
     'snap_name', 'snap_mobile', 'snap_mobile2', 'snap_address',
-    'received_amount'
+    'received_amount', 'discount', 'payment_method'
   ]
   // Also update customer table when snap fields change
   if (body.snap_name || body.snap_mobile || body.snap_address) {
@@ -489,7 +547,10 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
     logHistory(c.env.DB, id, `Status: ${body.status}`, detail, uName, uRole)
   }
   if ('received_amount' in body) {
-    logHistory(c.env.DB, id, 'Payment Updated', `Received amount: ₹${body.received_amount}`, uName, uRole)
+    logHistory(c.env.DB, id, 'Payment Updated', `Received amount: ₹${body.received_amount}${body.payment_method ? ' ('+body.payment_method+')' : ''}`, uName, uRole)
+  }
+  if ('discount' in body) {
+    logHistory(c.env.DB, id, 'Discount Updated', `Discount: ₹${body.discount}`, uName, uRole)
   }
   if (body.snap_name || body.snap_mobile || body.snap_address) {
     logHistory(c.env.DB, id, 'Customer Info Updated', `Name: ${body.snap_name || '—'}, Mobile: ${body.snap_mobile || '—'}`, uName, uRole)
@@ -531,7 +592,7 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
   if (!body.product_name) return c.json({ error: 'product_name required' }, 400)
-  const isAdminOrMgr = c.get('userRole') === 'admin' || c.get('userRole') === 'manager'
+  const isAdminOrMgr = c.get('userRole') === 'admin' || c.get('userRole') === 'supervisor'
   const charges = isAdminOrMgr ? (parseFloat(body.charges) || 0) : 0
   const qty = parseInt(body.quantity) || 1
   const result = await c.env.DB.prepare(
@@ -558,7 +619,7 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
   const role    = c.get('userRole')
-  const isAdmin = role === 'admin' || role === 'manager'
+  const isAdmin = role === 'admin' || role === 'supervisor'
   const userId  = c.get('userId')
   const machine = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(id).first<any>()
   if (!machine) return c.json({ error: 'Not found' }, 404)
@@ -641,7 +702,7 @@ app.post('/api/machines/:id/images', authMiddleware, async (c) => {
 
   // Staff can only upload to their assigned machines
   const role = c.get('userRole')
-  const isAdmin = role === 'admin' || role === 'manager'
+  const isAdmin = role === 'admin' || role === 'supervisor'
   if (!isAdmin && machine.assigned_staff_id !== c.get('userId'))
     return c.json({ error: 'Not assigned to this machine' }, 403)
 
@@ -693,7 +754,7 @@ app.post('/api/machines/:id/audio', authMiddleware, async (c) => {
   if (!machine) return c.json({ error: 'Machine not found' }, 404)
 
   const role = c.get('userRole')
-  const isAdmin = role === 'admin' || role === 'manager'
+  const isAdmin = role === 'admin' || role === 'supervisor'
   if (!isAdmin && machine.assigned_staff_id !== c.get('userId'))
     return c.json({ error: 'Not assigned to this machine' }, 403)
 
@@ -909,7 +970,7 @@ app.post('/api/jobs/:id/history', authMiddleware, async (c) => {
 // ── API: Staff management ─────────────────────────────────────────────────────
 app.get('/api/staff', authMiddleware, adminOnly, async (c) => {
   const { results } = await c.env.DB.prepare(
-    'SELECT id,name,email,role,active,created_at FROM users ORDER BY name'
+    'SELECT id,name,email,role,active,supervisor_rights,created_at FROM users ORDER BY name'
   ).all<any>()
   return c.json(results)
 })
@@ -917,15 +978,16 @@ app.get('/api/staff', authMiddleware, adminOnly, async (c) => {
 app.post('/api/staff', authMiddleware, adminOnly, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
-  const { name, email, password, role, active } = body
+  const { name, email, password, role, active, supervisor_rights } = body
   if (!name || !email || !password) return c.json({ error: 'name, email, password required' }, 400)
-  const validRoles = ['admin', 'manager', 'staff']
+  const validRoles = ['admin', 'supervisor', 'staff']
   const userRole = validRoles.includes(role) ? role : 'staff'
   const hash = await bcrypt.hash(password, 10)
+  const rights = userRole === 'supervisor' && supervisor_rights ? JSON.stringify(supervisor_rights) : null
   try {
     await c.env.DB.prepare(
-      'INSERT INTO users(name,email,password_hash,role,active) VALUES(?,?,?,?,?)'
-    ).bind(name, email, hash, userRole, active !== undefined ? active : 1).run()
+      'INSERT INTO users(name,email,password_hash,role,active,supervisor_rights) VALUES(?,?,?,?,?,?)'
+    ).bind(name, email, hash, userRole, active !== undefined ? active : 1, rights).run()
     return c.json({ ok: true }, 201)
   } catch (e: any) {
     if (e.message?.includes('UNIQUE')) return c.json({ error: 'Email already exists' }, 409)
@@ -945,8 +1007,9 @@ app.put('/api/staff/:id', authMiddleware, adminOnly, async (c) => {
     const hash = await bcrypt.hash(body.password, 10)
     fields.push('password_hash=?'); vals.push(hash)
   }
-  if (body.role && ['admin','manager','staff'].includes(body.role)) { fields.push('role=?');   vals.push(body.role) }
+  if (body.role && ['admin','supervisor','staff'].includes(body.role)) { fields.push('role=?');   vals.push(body.role) }
   if (body.active !== undefined) { fields.push('active=?'); vals.push(body.active) }
+  if (body.supervisor_rights !== undefined) { fields.push('supervisor_rights=?'); vals.push(body.supervisor_rights ? JSON.stringify(body.supervisor_rights) : null) }
   if (!fields.length) return c.json({ error: 'Nothing to update' }, 400)
   vals.push(id)
   await c.env.DB.prepare(`UPDATE users SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
@@ -1228,7 +1291,7 @@ app.get('/api/customers/search', authMiddleware, async (c) => {
 // ── API: Customer update (edit name, mobile, address) ────────────────────────
 app.put('/api/customers/:id', authMiddleware, async (c) => {
   const role = c.get('userRole')
-  const isAdminRole = role === 'admin' || role === 'manager'
+  const isAdminRole = role === 'admin' || role === 'supervisor'
   if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
   const id = c.req.param('id')
   let body: any
@@ -1270,7 +1333,7 @@ app.put('/api/customers/:id', authMiddleware, async (c) => {
 // ── API: Customer list (all customers with stats) ─────────────────────────────
 app.get('/api/customers', authMiddleware, async (c) => {
   const role = c.get('userRole')
-  const isAdminRole = role === 'admin' || role === 'manager'
+  const isAdminRole = role === 'admin' || role === 'supervisor'
   if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
   const { results } = await c.env.DB.prepare(`
     SELECT c.id, c.name, c.mobile, c.mobile2, c.address,

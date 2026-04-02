@@ -157,9 +157,19 @@ API.interceptors.response.use(r => r, err => {
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-const isAdmin   = () => S.user?.role === 'admin' || S.user?.role === 'manager';
+const isAdmin   = () => S.user?.role === 'admin' || S.user?.role === 'supervisor';
 const isAdminOnly = () => S.user?.role === 'admin';
-const isManager = () => S.user?.role === 'manager';
+const isSupervisor = () => S.user?.role === 'supervisor';
+function hasSuperRight(right) {
+  if (S.user?.role === 'admin') return true;
+  if (S.user?.role === 'supervisor') {
+    try {
+      const rights = typeof S.user.supervisor_rights === 'string' ? JSON.parse(S.user.supervisor_rights) : (S.user.supervisor_rights || []);
+      return rights.includes(right);
+    } catch { return false; }
+  }
+  return false;
+}
 const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -526,7 +536,7 @@ function headerHTML() {
     </div>
     <div class="hdr-right">
       ${window._pwaInstallPrompt ? `<button class="icon-btn pwa-install-btn" id="hdr-install-btn" title="Install App" style="color:#43A047"><i class="fas fa-download"></i></button>` : ''}
-      <span class="role-badge ${S.user?.role==='admin'?'role-admin':S.user?.role==='manager'?'role-manager':'role-staff'}">${esc((S.user?.name||'').split(' ')[0])}</span>
+      <span class="role-badge ${S.user?.role==='admin'?'role-admin':S.user?.role==='supervisor'?'role-manager':'role-staff'}">${esc((S.user?.name||'').split(' ')[0])}</span>
       <button class="icon-btn" id="hdr-logout-btn" title="Sign out"><i class="fas fa-sign-out-alt"></i></button>
     </div>
   </header>`;
@@ -542,8 +552,8 @@ function bottomNavHTML() {
     ...(isAdmin() ? [{ id:'admindash', icon:'fa-chart-line', label:'Dashboard' }] : []),
     ...(isAdminOnly() ? [{ id:'requests', icon:'fa-bell', label:'Requests', badge: true }] : []),
     ...(isAdminOnly() ? [{ id:'staff',    icon:'fa-users',     label:'Staff'   }] : []),
-    ...(!isManager() ? [{ id:'reports',  icon:'fa-chart-bar', label:'Reports' }] : []),
-    ...(!isManager() ? [{ id:'settings',  icon:'fa-cog',         label:'More'    }] : []),
+    { id:'reports',  icon:'fa-chart-bar', label:'Reports' },
+    { id:'settings',  icon:'fa-cog',         label:'More'    },
   ];
   return `
   <nav class="bottom-nav">
@@ -567,9 +577,9 @@ function viewHTML() {
     case 'admindash': return isAdmin() ? adminDashHTML() : deniedHTML();
     case 'detail':    return `<div id="detail-root" class="view-pad"><div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div></div>`;
     case 'staff':     return isAdminOnly() ? staffHTML()    : deniedHTML();
-    case 'reports':   return isManager() ? deniedHTML() : reportsHTML();
+    case 'reports':   return reportsHTML();
     case 'requests':  return isAdminOnly() ? requestsHTML() : deniedHTML();
-    case 'settings':  return isManager() ? deniedHTML() : settingsHTML();
+    case 'settings':  return settingsHTML();
     case 'track':     return trackHTML();
     default:          return dashboardHTML();
   }
@@ -636,9 +646,9 @@ function bindView() {
     case 'admindash': if (isAdmin()) loadAdminDash();                           break;
     case 'detail':    loadDetail();                                             break;
     case 'staff':     if (isAdminOnly()) loadStaff();                           break;
-    case 'reports':   if (!isManager()) { if (isAdminOnly()) loadStaffForSelects(); bindReports(); } break;
+    case 'reports':   if (isAdminOnly()) loadStaffForSelects(); bindReports(); break;
     case 'requests':  if (isAdminOnly()) loadRequests();                       break;
-    case 'settings':  if (!isManager()) bindSettings();                        break;
+    case 'settings':  bindSettings();                                          break;
     case 'track':     bindTrack();                                             break;
   }
 }
@@ -670,6 +680,7 @@ function dashboardHTML() {
         <button class="fp-chip ${S.filter==='returned'?'fp-active':''}" data-fp-status="returned" style="--fp-color:${sc('returned')}">Returned</button>
         <button class="fp-chip ${S.filter==='partial_delivered'?'fp-active':''}" data-fp-status="partial_delivered" style="--fp-color:${sc('partial_delivered')}">Partial</button>
         <button class="fp-chip ${S.filter==='delivered'?'fp-active':''}" data-fp-status="delivered" style="--fp-color:${sc('delivered')}">Delivered</button>
+        ${isAdmin() ? `<button class="fp-chip ${S.filter==='pending_payment'?'fp-active':''}" data-fp-status="pending_payment" style="--fp-color:#FB8C00">Pending Payment</button>` : ''}
       </div>
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Date Range</div>
       <div style="display:flex;gap:8px;margin-bottom:10px">
@@ -737,18 +748,19 @@ function _applyChipCounts(d) {
   // Owner dashboard tiles (admin/manager only)
   const ownerDash = document.getElementById('owner-dash');
   if (ownerDash && isAdmin()) {
-    const pending = (d.underRepair || 0) + (d.repaired || 0) + (d.returned || 0);
     const tiles = [
-      { label: 'Today', value: d.today || 0, icon: '📅', bg: '#E3F2FD', color: '#1565C0', click: 'filterToday()' },
-      { label: 'Pending', value: pending, icon: '🔧', bg: '#FFF3E0', color: '#E65100', click: 'filterActive()' },
-      { label: 'Completed', value: d.completed || 0, icon: '✅', bg: '#E8F5E9', color: '#2E7D32', click: 'filterDone()' },
-      { label: 'This Month', value: d.thisMonth || 0, icon: '📊', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterMonth()' },
+      { label: 'No. of Jobs', value: d.total || 0, icon: '📋', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterAll()' },
+      { label: 'Under Repair', value: d.underRepair || 0, icon: '🔧', bg: '#FFF3E0', color: '#E65100', click: "filterByStatus('under_repair')" },
+      { label: 'Repaired', value: d.repaired || 0, icon: '✅', bg: '#E8F5E9', color: '#2E7D32', click: "filterByStatus('repaired')" },
+      { label: 'Returned', value: d.returned || 0, icon: '↩️', bg: '#FFF8E1', color: '#B8860B', click: "filterByStatus('returned')" },
+      { label: 'Partial', value: d.partial || 0, icon: '📦', bg: '#FFF3E0', color: '#FF6F00', click: "filterByStatus('partial_delivered')" },
+      { label: 'Delivered', value: d.completed || 0, icon: '🚚', bg: '#E3F2FD', color: '#1565C0', click: 'filterDone()' },
     ];
     ownerDash.innerHTML = tiles.map(t => `
-      <div onclick="${t.click}" style="flex:1;min-width:70px;background:${t.bg};border-radius:10px;padding:8px 10px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
-        <div style="font-size:16px">${t.icon}</div>
-        <div style="font-size:18px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
-        <div style="font-size:10px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.5px">${t.label}</div>
+      <div onclick="${t.click}" style="flex:1;min-width:48px;background:${t.bg};border-radius:10px;padding:6px 4px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
+        <div style="font-size:14px">${t.icon}</div>
+        <div style="font-size:17px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
+        <div style="font-size:9px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.3px">${t.label}</div>
       </div>`).join('');
   }
 }
@@ -860,6 +872,24 @@ async function loadJobs(append = false) {
     const panel = document.getElementById('filter-panel');
     if (panel) panel.style.display = 'none';
 
+    // Pending payment filter — special API
+    if (newStatus === 'pending_payment') {
+      _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
+      setFilter('pending_payment');
+      const wrap = document.getElementById('vlist-wrap');
+      if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+      API.get('/api/jobs/pending-payment', { params: { q: S.search } })
+        .then(r => {
+          S.jobs = r.data || [];
+          _jobsHasMore = false;
+          renderVList(false);
+          const panel = document.getElementById('filter-panel');
+          if (panel) panel.style.display = 'none';
+        })
+        .catch(() => { if (wrap) wrap.innerHTML = '<div class="empty-state"><p>Filter failed</p></div>'; });
+      return;
+    }
+
     // Check for delivered filter with delivery type
     const delType = document.getElementById('del-type')?.value || '';
     if (newStatus === 'delivered' && (S.fromDate || S.toDate || delType)) {
@@ -947,7 +977,7 @@ function renderVList(append = false) {
 function jobRowHTML(j) {
   const color   = sc(j.status);
   const bg      = sb(j.status);
-  const balance = Math.max(0, (j.total_charges || 0) - (j.received_amount || 0));
+  const balance = Math.max(0, (j.total_charges || 0) - (j.discount || 0) - (j.received_amount || 0));
   return `
   <div class="job-row" data-id="${j.id}" style="border-left-color:${color};will-change:transform,opacity">
     <div class="job-row-thumb">
@@ -1436,8 +1466,9 @@ function renderDetail() {
 
   const color    = sc(j.status);
   const total    = j.total_charges   || 0;
+  const discount = j.discount        || 0;
   const received = j.received_amount || 0;
-  const balance  = Math.max(0, total - received);
+  const balance  = Math.max(0, total - discount - received);
   const userId   = S.user?.id;
 
   root.innerHTML = `
@@ -1506,23 +1537,35 @@ function renderDetail() {
           <span class="fin-label fw-bold">= Total Amount</span>
           <span class="fin-amount fw-bold">${fmtRs(total)}</span>
         </div>
+        ${discount > 0 ? `<div class="fin-row">
+          <span class="fin-label" style="color:#FB8C00">Discount/Deduction</span>
+          <span class="fin-amount" style="color:#FB8C00">- ${fmtRs(discount)}</span>
+        </div>` : ''}
         <div class="fin-row">
-          <span class="fin-label">Received Amount</span>
+          <span class="fin-label">Received Amount${j.payment_method === 'online' ? ' (Online)' : ' (Cash)'}</span>
           <span class="fin-amount" style="color:#43A047">${fmtRs(received)}</span>
         </div>
       <div class="fin-row fin-balance">
         <span class="fin-label fw-bold">Balance Due</span>
         <span class="fin-amount fw-bold" style="color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
       </div>
-      ${true ? `
       <div class="fin-edit-row">
-        <label class="form-label" style="margin:0">Update Received Amount (₹)</label>
-        <div style="display:flex;gap:8px;margin-top:6px">
+        <label class="form-label" style="margin:0;font-weight:700">Discount/Deduction (₹)</label>
+        <div style="display:flex;gap:8px;margin-top:4px;margin-bottom:8px">
+          <input id="discount-input" type="number" class="form-input" style="flex:1"
+                 value="${discount}" min="0" placeholder="0" inputmode="decimal">
+        </div>
+        <label class="form-label" style="margin:0;font-weight:700">Received Amount (₹)</label>
+        <div style="display:flex;gap:8px;margin-top:4px">
           <input id="recv-input" type="number" class="form-input" style="flex:1"
                  value="${received}" min="0" placeholder="0" inputmode="decimal">
+          <select id="pay-method" class="form-input" style="width:100px;flex-shrink:0">
+            <option value="cash" ${(j.payment_method||'cash')==='cash'?'selected':''}>Cash</option>
+            <option value="online" ${j.payment_method==='online'?'selected':''}>Online</option>
+          </select>
           <button id="recv-save" class="btn-sm btn-green">Save</button>
         </div>
-      </div>` : ''}
+      </div>
     </div>` : ''}
 
     ${j.status === 'delivered' && j.delivery_receiver_name ? `
@@ -1904,11 +1947,13 @@ function bindDetail(j) {
     } catch (_) { toast('Delete failed', 'error'); }
   });
 
-  // Update received amount (admin only)
+  // Update received amount, discount, and payment method (admin only)
   document.getElementById('recv-save')?.addEventListener('click', async () => {
     const val = parseFloat(document.getElementById('recv-input')?.value) || 0;
+    const discVal = parseFloat(document.getElementById('discount-input')?.value) || 0;
+    const payMethod = document.getElementById('pay-method')?.value || 'cash';
     try {
-      await API.put(`/api/jobs/${j.id}`, { received_amount: val });
+      await API.put(`/api/jobs/${j.id}`, { received_amount: val, discount: discVal, payment_method: payMethod });
       toast('Saved', 'success'); await loadDetail();
     } catch (_) { toast('Save failed', 'error'); }
   });
@@ -1938,7 +1983,7 @@ function bindDetail(j) {
   document.getElementById('btn-wa-reminder')?.addEventListener('click', () => {
     const phone   = (j.snap_mobile || '').replace(/\D/g, '');
     const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
-    const balance = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
+    const balance = Math.max(0, (j.total_charges||0) - (j.discount||0) - (j.received_amount||0));
     const products = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
     const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(waPhone.replace(/^91/, ''))}`;
     const reminderMsg = `⚡ *ADITION ELECTRIC*
@@ -2642,9 +2687,20 @@ function showDeliveryModal(j) {
     </div>
     ${isAdmin() ? `
     <div class="form-group">
-      <label class="form-label">Final Received Amount (₹)</label>
-      <input id="dm-recv" type="number" class="form-input" value="${j.received_amount||0}"
+      <label class="form-label">Discount/Deduction (₹)</label>
+      <input id="dm-disc" type="number" class="form-input" value="${j.discount||0}"
              min="0" inputmode="decimal">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Final Received Amount (₹)</label>
+      <div style="display:flex;gap:8px">
+        <input id="dm-recv" type="number" class="form-input" value="${j.received_amount||0}"
+               min="0" inputmode="decimal" style="flex:1">
+        <select id="dm-paymethod" class="form-input" style="width:100px">
+          <option value="cash" ${(j.payment_method||'cash')==='cash'?'selected':''}>Cash</option>
+          <option value="online" ${j.payment_method==='online'?'selected':''}>Online</option>
+        </select>
+      </div>
     </div>` : ''}
     <div class="modal-footer">
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
@@ -2675,7 +2731,11 @@ function showDeliveryModal(j) {
         delivery_courier_name:    document.getElementById('dm-courier')?.value || null,
         delivery_tracking:        document.getElementById('dm-track')?.value   || null,
         delivery_address:         document.getElementById('dm-addr')?.value    || null,
-        ...(isAdmin() ? { received_amount: parseFloat(document.getElementById('dm-recv')?.value) || 0 } : {}),
+        ...(isAdmin() ? {
+          received_amount: parseFloat(document.getElementById('dm-recv')?.value) || 0,
+          discount: parseFloat(document.getElementById('dm-disc')?.value) || 0,
+          payment_method: document.getElementById('dm-paymethod')?.value || 'cash',
+        } : {}),
       });
       closeModal(); toast('Job marked as delivered ✅', 'success');
       // Log delivery to history
@@ -2684,6 +2744,14 @@ function showDeliveryModal(j) {
         detail: `Delivered to: ${rname || 'Customer'}${document.getElementById('dm-method')?.value === 'courier' ? ' via courier' : ' in person'}`
       }).catch(() => {});
       await loadDetail();
+      // Auto-download delivered job card (once, no duplicate prompt)
+      if (S.job && S.job.status === 'delivered') {
+        const dlKey = 'AES_DELIVERED_DL_' + j.id;
+        if (!sessionStorage.getItem(dlKey)) {
+          sessionStorage.setItem(dlKey, '1');
+          setTimeout(() => autoDownloadDeliveredCard(S.job), 800);
+        }
+      }
     } catch (_) { toast('Failed to update', 'error'); }
   });
 }
@@ -2697,8 +2765,9 @@ function showDeliveryModal(j) {
 // ─────────────────────────────────────────────────────────────────────────────
 function jobCardPrintHTML(j) {
   const total      = j.total_charges   || 0;
+  const discount   = j.discount        || 0;
   const received   = j.received_amount || 0;
-  const balance    = Math.max(0, total - received);
+  const balance    = Math.max(0, total - discount - received);
   const color      = sc(j.status);
   const isDelivered = j.status === 'delivered';
   const showPayment = balance > 0 && !isDelivered;
@@ -2724,7 +2793,7 @@ function jobCardPrintHTML(j) {
       </div>
     </div>`;
 
-  // ── 2. CUSTOMER DETAILS — 2-column grid (Name|Mobile, Address|Date, NO call button) ──
+  // ── 2. CUSTOMER DETAILS — 2-column grid, 1.5× font sizes ──
   const custBlock = `
     <div style="padding:16px 30px 10px">
       <div style="font-size:11px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:3px;margin-bottom:10px;display:flex;align-items:center;gap:8px">
@@ -2734,28 +2803,28 @@ function jobCardPrintHTML(j) {
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 24px">
         <div>
-          <div style="font-size:10px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Name</div>
-          <div style="font-size:20px;font-weight:900;color:#1a1a2e;line-height:1.2">${esc(j.snap_name)}</div>
+          <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Name</div>
+          <div style="font-size:30px;font-weight:900;color:#1a1a2e;line-height:1.2">${esc(j.snap_name)}</div>
         </div>
         <div>
-          <div style="font-size:10px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Mobile</div>
-          <div style="font-size:18px;font-weight:800;color:#1565C0">${j.snap_mobile || '—'}</div>
-          ${j.snap_mobile2 ? `<div style="font-size:13px;color:#1976D2;font-weight:600;margin-top:1px">${j.snap_mobile2}</div>` : ''}
+          <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Mobile</div>
+          <div style="font-size:27px;font-weight:800;color:#1565C0">${j.snap_mobile || '—'}</div>
+          ${j.snap_mobile2 ? `<div style="font-size:20px;color:#1976D2;font-weight:600;margin-top:1px">${j.snap_mobile2}</div>` : ''}
         </div>
         ${j.snap_address ? `
         <div>
-          <div style="font-size:10px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Address</div>
-          <div style="font-size:14px;color:#444;line-height:1.3;font-weight:500">${esc(j.snap_address)}</div>
+          <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Address</div>
+          <div style="font-size:21px;color:#444;line-height:1.3;font-weight:500">${esc(j.snap_address)}</div>
         </div>` : ''}
         <div>
-          <div style="font-size:10px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Date</div>
-          <div style="font-size:14px;color:#444;font-weight:600">${fmtDate(j.created_at)}</div>
+          <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Date</div>
+          <div style="font-size:21px;color:#444;font-weight:600">${fmtDate(j.created_at)}</div>
         </div>
       </div>
     </div>
     <div style="border-top:2px solid #f0f0f0;margin:0 30px 4px"></div>`;
 
-  // ── 3. PRODUCTS — horizontal rows with image, name, complaint, status badge, price ─
+  // ── 3. PRODUCTS — horizontal rows with image, name, complaint, status badge, price (1.5× fonts) ─
   const machinesBlock = `
     <div style="padding:8px 30px 4px">
       <div style="font-size:11px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:3px;margin-bottom:8px;display:flex;align-items:center;gap:8px">
@@ -2769,30 +2838,30 @@ function jobCardPrintHTML(j) {
         const lineAmt = (parseFloat(m.charges)||0) * (parseInt(m.quantity)||1);
         const mColor = sc(m.status);
         return `
-      <div style="background:${isReturned?'#fafafa':'#f8f9fb'};border-radius:10px;padding:10px;margin-bottom:6px;border-left:4px solid ${mColor};display:flex;align-items:center;gap:10px${isReturned?';opacity:0.65':''}">
+      <div style="background:${isReturned?'#fafafa':'#f8f9fb'};border-radius:10px;padding:12px;margin-bottom:8px;border-left:4px solid ${mColor};display:flex;align-items:center;gap:12px${isReturned?';opacity:0.65':''}">
         ${firstImg
-          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:60px;height:60px;border-radius:8px;object-fit:cover;flex-shrink:0;border:2px solid #e8eaed" crossorigin="anonymous" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:72px;height:72px;border-radius:8px;object-fit:cover;flex-shrink:0;border:2px solid #e8eaed" crossorigin="anonymous" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
           : ''}
         ${firstImg
-          ? `<div style="width:60px;height:60px;border-radius:8px;background:#e8eaed;display:none;align-items:center;justify-content:center;flex-shrink:0;font-size:22px;color:#bbb">⚡</div>`
-          : `<div style="width:60px;height:60px;border-radius:8px;background:linear-gradient(135deg,#e8eaed,#f0f2f5);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:22px;color:#bbb;border:2px solid #e0e0e0">⚡</div>`}
+          ? `<div style="width:72px;height:72px;border-radius:8px;background:#e8eaed;display:none;align-items:center;justify-content:center;flex-shrink:0;font-size:28px;color:#bbb">⚡</div>`
+          : `<div style="width:72px;height:72px;border-radius:8px;background:linear-gradient(135deg,#e8eaed,#f0f2f5);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:28px;color:#bbb;border:2px solid #e0e0e0">⚡</div>`}
         <div style="flex:1;min-width:0">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:2px">
-            <div style="font-size:17px;font-weight:800;color:#1a1a2e;line-height:1.2">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-size:13px;font-weight:600">x${m.quantity}</span>`:''}</div>
-            <div style="background:${mColor};color:#fff;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:800;white-space:nowrap;letter-spacing:.5px;flex-shrink:0">${sl(m.status)}</div>
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:3px">
+            <div style="font-size:26px;font-weight:800;color:#1a1a2e;line-height:1.2">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-size:20px;font-weight:600">x${m.quantity}</span>`:''}</div>
+            <div style="background:${mColor};color:#fff;border-radius:5px;padding:3px 10px;font-size:14px;font-weight:800;white-space:nowrap;letter-spacing:.5px;flex-shrink:0">${sl(m.status)}</div>
           </div>
-          ${m.product_complaint ? `<div style="font-size:13px;color:#666;line-height:1.2">${esc(m.product_complaint)}</div>` : ''}
-          ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;font-weight:600">✅ ${esc(m.work_done)}</div>` : ''}
-          ${m.return_reason ? `<div style="font-size:12px;color:#E65100;font-weight:600">↩ ${esc(m.return_reason)}</div>` : ''}
-          <div style="margin-top:2px;font-size:17px;font-weight:800;color:${isReturned?'#aaa':'#1a1a2e'}${isReturned?';text-decoration:line-through':''}">
-            ${fmtRs(lineAmt)}${m.quantity>1?` <span style="color:#999;font-size:12px;font-weight:600">(${fmtRs(m.charges||0)} x ${m.quantity})</span>`:''}
+          ${m.product_complaint ? `<div style="font-size:20px;color:#666;line-height:1.2">${esc(m.product_complaint)}</div>` : ''}
+          ${m.work_done ? `<div style="font-size:18px;color:#2E7D32;font-weight:600">✅ ${esc(m.work_done)}</div>` : ''}
+          ${m.return_reason ? `<div style="font-size:18px;color:#E65100;font-weight:600">↩ ${esc(m.return_reason)}</div>` : ''}
+          <div style="margin-top:3px;font-size:26px;font-weight:800;color:${isReturned?'#aaa':'#1a1a2e'}${isReturned?';text-decoration:line-through':''}">
+            ${fmtRs(lineAmt)}${m.quantity>1?` <span style="color:#999;font-size:18px;font-weight:600">(${fmtRs(m.charges||0)} x ${m.quantity})</span>`:''}
           </div>
         </div>
       </div>`;
       }).join('')}
     </div>`;
 
-  // ── 4. FINANCIAL SUMMARY — total, received, due ────────────────────────────
+  // ── 4. FINANCIAL SUMMARY — total, discount, received, due ────────────────────────────
   const financialBlock = `
     <div style="margin:8px 30px 10px;background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border-radius:12px;padding:14px 18px;border:1px solid #e0e0e0">
       <div style="font-size:11px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px">Financial Summary</div>
@@ -2800,8 +2869,12 @@ function jobCardPrintHTML(j) {
         <span style="color:#555;font-size:15px;font-weight:600">Total Amount</span>
         <span style="font-size:17px;font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
       </div>
+      ${discount > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #e0e0e0">
+        <span style="color:#FB8C00;font-size:15px;font-weight:600">Discount/Deduction</span>
+        <span style="font-size:17px;font-weight:800;color:#FB8C00">- ${fmtRs(discount)}</span>
+      </div>` : ''}
       <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #e0e0e0">
-        <span style="color:#555;font-size:15px;font-weight:600">Amount Received</span>
+        <span style="color:#555;font-size:15px;font-weight:600">Amount Received${j.payment_method && j.payment_method !== 'cash' ? ' (Online)' : ''}</span>
         <span style="font-size:17px;font-weight:800;color:#43A047">${fmtRs(received)}</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;margin-top:2px">
@@ -2816,71 +2889,77 @@ function jobCardPrintHTML(j) {
       <span style="font-weight:800;color:#F57F17">📝 Note:</span> ${esc(j.note)}
     </div>` : '';
 
-  // ── 6. SIDE-BY-SIDE: Left = Payment QR | Right = Account details + Notice + Tracking ──
-  const leftBox = showPayment ? `
-    <div style="flex:1;background:linear-gradient(135deg,#E8F5E9,#C8E6C9);border:2px solid #43A047;border-radius:12px;padding:14px;position:relative;overflow:hidden;display:flex;flex-direction:column;align-items:center">
-      <div style="font-size:14px;font-weight:900;color:#2E7D32;margin-bottom:8px;text-align:center">💳 Pay to Proceed</div>
-      <div style="text-align:center;margin-bottom:8px">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:140px;height:140px;border-radius:8px;border:2px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
-        <div style="font-size:14px;color:#2E7D32;margin-top:4px;font-weight:800">Scan to Pay ${fmtRs(balance)}</div>
+  // ── 6. PAYMENT SECTION: QR code → Payment Details → Notices → Tracking QR+Link ──
+  const paymentBlock = showPayment ? `
+    <div style="margin:0 30px 10px">
+      <!-- QR Code centered -->
+      <div style="text-align:center;margin-bottom:10px">
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:200px;height:200px;border-radius:12px;border:3px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
+        <div style="font-size:18px;color:#2E7D32;margin-top:6px;font-weight:900">💳 Scan to Pay ${fmtRs(balance)}</div>
+        <div style="font-size:13px;color:#555;margin-top:2px">UPI: 9375940444@okbizaxis</div>
       </div>
-      <div style="font-size:11px;color:#555;text-align:center;margin-top:4px">UPI: 9375940444@okbizaxis</div>
-    </div>` : `
-    <div style="flex:1;background:linear-gradient(135deg,#E3F2FD,#BBDEFB);border:2px solid #1E88E5;border-radius:12px;padding:14px">
-      <div style="font-size:14px;font-weight:900;color:#1565C0;margin-bottom:8px;display:flex;align-items:center;gap:6px">
-        ${isDelivered ? '📦 Delivered' : '✅ Fully Paid'}
-      </div>
-      ${isDelivered && j.delivery_receiver_name ? `
-        <table style="width:100%;border-collapse:collapse;font-size:13px">
-          ${j.delivery_receiver_name ? `<tr><td style="color:#555;padding:3px 0;font-weight:600">Receiver</td><td style="font-weight:800">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
-          ${j.delivery_method ? `<tr><td style="color:#555;padding:3px 0;font-weight:600">Method</td><td style="font-weight:700">${j.delivery_method==='courier'?'📮 Courier':'🤝 In Person'}</td></tr>` : ''}
-          ${j.delivered_at ? `<tr><td style="color:#555;padding:3px 0;font-weight:600">Date</td><td style="font-weight:700">${fmtDate(j.delivered_at)}</td></tr>` : ''}
-        </table>` : `
-        <div style="font-size:14px;color:#1565C0;font-weight:600">Payment complete. Thank you!</div>`}
-    </div>`;
-
-  const rightBox = showPayment ? `
-    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
-      <div style="background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:12px">
-        <div style="font-size:12px;font-weight:800;color:#2E7D32;margin-bottom:6px">🏦 Bank Details</div>
-        <table style="border-collapse:collapse;font-size:12px;width:100%">
-          <tr><td style="color:#555;padding:3px 0;width:50px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-          <tr><td style="color:#555;padding:3px 0;font-weight:600">Bank</td><td style="font-weight:700;font-size:11px">State Bank of India</td></tr>
-          <tr><td style="color:#555;padding:3px 0;font-weight:600">A/C</td><td style="font-weight:700;font-size:11px">37321811864</td></tr>
-          <tr><td style="color:#555;padding:3px 0;font-weight:600">IFSC</td><td style="font-weight:700;font-size:11px">SBIN0001353</td></tr>
+      <!-- Payment Details -->
+      <div style="background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:14px;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:800;color:#2E7D32;margin-bottom:8px">🏦 Bank Details</div>
+        <table style="border-collapse:collapse;font-size:14px;width:100%">
+          <tr><td style="color:#555;padding:4px 0;width:60px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+          <tr><td style="color:#555;padding:4px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank of India</td></tr>
+          <tr><td style="color:#555;padding:4px 0;font-weight:600">A/C</td><td style="font-weight:700">37321811864</td></tr>
+          <tr><td style="color:#555;padding:4px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
         </table>
       </div>
-      <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:10px">
-        <div style="font-size:12px;font-weight:900;color:#E65100;margin-bottom:3px">⚠️ Collection Notice</div>
-        <div style="font-size:12px;color:#5D4037;line-height:1.3">
-          Collect within <strong>25 days</strong>. After this, we shall <strong>not be liable</strong> for any claims.
+      <!-- Notices -->
+      <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:12px;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:900;color:#E65100;margin-bottom:6px">⚠️ Important Notices</div>
+        <div style="font-size:13px;color:#5D4037;line-height:1.5">
+          1. Collect within <strong>25 days</strong>. After this, we shall <strong>not be liable</strong> for any claims.<br>
+          2. Damaged/replacement parts will <strong>NOT</strong> be returned to the customer.<br>
+          3. Any damage or loss during repair is the <strong>customer's responsibility</strong>.
         </div>
       </div>
-      <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:8px 10px">
-        <div style="font-size:11px;font-weight:800;color:#1565C0;margin-bottom:3px">🔗 Track Online</div>
-        <div style="display:flex;align-items:center;gap:6px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:56px;height:56px;border-radius:6px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:10px;color:#555;word-break:break-all;line-height:1.2">${printTrackUrl}</div>
+      <!-- Tracking QR + Link -->
+      <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px">
+        <div style="font-size:13px;font-weight:800;color:#1565C0;margin-bottom:6px">🔗 Track Your Job Online</div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:72px;height:72px;border-radius:8px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
         </div>
       </div>
     </div>` : `
-    <div style="flex:1;display:flex;flex-direction:column;gap:8px">
-      <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px;flex:1">
-        <div style="font-size:14px;font-weight:900;color:#1565C0;margin-bottom:6px">🔗 Track Online</div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:72px;height:72px;border-radius:6px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:11px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
+    <div style="margin:0 30px 10px">
+      <div style="background:linear-gradient(135deg,${isDelivered?'#E3F2FD,#BBDEFB':'#E8F5E9,#C8E6C9'};border:2px solid ${isDelivered?'#1E88E5':'#43A047'};border-radius:12px;padding:16px;margin-bottom:10px">
+        <div style="font-size:16px;font-weight:900;color:${isDelivered?'#1565C0':'#2E7D32'};margin-bottom:8px">
+          ${isDelivered ? '📦 Delivered' : '✅ Fully Paid'}
+        </div>
+        ${isDelivered && j.delivery_receiver_name ? `
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            ${j.delivery_receiver_name ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Receiver</td><td style="font-weight:800">${esc(j.delivery_receiver_name)}</td></tr>` : ''}
+            ${j.delivery_method ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Method</td><td style="font-weight:700">${j.delivery_method==='courier'?'📮 Courier':'🤝 In Person'}</td></tr>` : ''}
+            ${j.delivered_at ? `<tr><td style="color:#555;padding:4px 0;font-weight:600">Date</td><td style="font-weight:700">${fmtDate(j.delivered_at)}</td></tr>` : ''}
+          </table>` : `
+          <div style="font-size:15px;color:#1565C0;font-weight:600">Payment complete. Thank you!</div>`}
+      </div>
+      <!-- Notices always shown -->
+      <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:12px;margin-bottom:10px">
+        <div style="font-size:14px;font-weight:900;color:#E65100;margin-bottom:6px">⚠️ Important Notices</div>
+        <div style="font-size:13px;color:#5D4037;line-height:1.5">
+          1. Damaged/replacement parts will <strong>NOT</strong> be returned to the customer.<br>
+          2. Any damage or loss during repair is the <strong>customer's responsibility</strong>.
+        </div>
+      </div>
+      <!-- Tracking -->
+      <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px">
+        <div style="font-size:13px;font-weight:800;color:#1565C0;margin-bottom:6px">🔗 Track Your Job Online</div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:72px;height:72px;border-radius:8px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
         </div>
       </div>
     </div>`;
 
-  const sideBlock = `
-    <div style="margin:0 30px 10px;display:flex;gap:10px;align-items:stretch">
-      ${leftBox}
-      ${rightBox}
-    </div>`;
+  const sideBlock = paymentBlock;
 
-  // ── 7. FOOTER ─────────────────────────────────────────────────────────────
+  // ── 7. FOOTER — centered jurisdiction text ─────────────────────────────────────
   const footerBlock = `
     <div style="background:linear-gradient(135deg,#0d1b2a,#1b2838,#0f3460);padding:18px 30px 14px;margin-top:auto;position:relative;overflow:hidden">
       <div style="display:flex;justify-content:space-between;align-items:center;position:relative;z-index:1">
@@ -2890,8 +2969,10 @@ function jobCardPrintHTML(j) {
         </div>
         <div style="text-align:right">
           <div style="color:rgba(255,255,255,.7);font-size:13px;font-weight:700">📞 7801990001</div>
-          <div style="color:rgba(255,255,255,.3);font-size:10px;margin-top:4px;font-style:italic">Subject to Ahmedabad Jurisdiction</div>
         </div>
+      </div>
+      <div style="text-align:center;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.15);position:relative;z-index:1">
+        <div style="color:rgba(255,255,255,.6);font-size:14px;font-weight:700;letter-spacing:1px">Subjected to Ahmedabad Jurisdiction only</div>
       </div>
     </div>`;
 
@@ -3117,7 +3198,7 @@ async function generateAndShareJobCard(j, shareMode) {
 
 function shareText(j, multiPage) {
   const custName    = j.snap_name || 'Valued Customer';
-  const balance     = Math.max(0, (j.total_charges||0) - (j.received_amount||0));
+  const balance     = Math.max(0, (j.total_charges||0) - (j.discount||0) - (j.received_amount||0));
   const isRepaired  = j.status === 'repaired';
   const isDelivered = j.status === 'delivered';
   const total       = j.total_charges || 0;
@@ -3293,7 +3374,7 @@ function renderStaffList() {
   el.innerHTML = S.staff.map(s => `
   <div class="staff-card">
     <div>
-      <div class="staff-name">${esc(s.name)} <span class="role-badge ${s.role==='admin'?'role-admin':s.role==='manager'?'role-manager':'role-staff'}">${s.role}</span></div>
+      <div class="staff-name">${esc(s.name)} <span class="role-badge ${s.role==='admin'?'role-admin':s.role==='supervisor'?'role-manager':'role-staff'}">${s.role}</span></div>
       <div class="staff-email">${esc(s.email)}</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
@@ -3341,21 +3422,36 @@ function showAddStaffModal() {
     <div class="form-group"><label class="form-label">Role</label>
       <select id="as-role" class="form-input">
         <option value="staff">Staff</option>
-        <option value="manager">Manager</option>
+        <option value="supervisor">Supervisor</option>
         <option value="admin">Admin</option>
       </select>
+    </div>
+    <div id="as-rights-wrap" style="display:none">
+      <label class="form-label">Supervisor Rights</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        ${['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports'].map(r =>
+          `<label style="display:flex;align-items:center;gap:4px;background:#f0f4ff;border:1px solid #d0d8f0;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;user-select:none">
+            <input type="checkbox" class="as-right-cb" value="${r}"> ${r.replace(/_/g,' ')}
+          </label>`).join('')}
+      </div>
     </div>
     <div class="modal-footer">
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
       <button id="as-save" class="btn-primary">Add</button>
     </div>`);
+  // Show/hide rights panel
+  document.getElementById('as-role')?.addEventListener('change', e => {
+    document.getElementById('as-rights-wrap').style.display = e.target.value === 'supervisor' ? 'block' : 'none';
+  });
   document.getElementById('as-save')?.addEventListener('click', async () => {
     const name  = document.getElementById('as-name')?.value.trim();
     const email = document.getElementById('as-email')?.value.trim();
     const pass  = document.getElementById('as-pass')?.value;
     if (!name || !email || !pass) { toast('All fields required', 'error'); return; }
+    const role = document.getElementById('as-role')?.value || 'staff';
+    const rights = role === 'supervisor' ? Array.from(document.querySelectorAll('.as-right-cb:checked')).map(cb => cb.value) : null;
     try {
-      await API.post('/api/staff', { name, email, password: pass, role: document.getElementById('as-role')?.value || 'staff' });
+      await API.post('/api/staff', { name, email, password: pass, role, supervisor_rights: rights });
       closeModal(); toast('Staff added', 'success'); await loadStaff();
     } catch (e) { toast(e.response?.data?.error || 'Failed', 'error'); }
   });
@@ -3373,7 +3469,7 @@ function showEditStaffModal(s) {
       <div class="form-group"><label class="form-label">Role</label>
         <select id="es-role" class="form-input">
           <option value="staff" ${s.role==='staff'?'selected':''}>Staff</option>
-          <option value="manager" ${s.role==='manager'?'selected':''}>Manager</option>
+          <option value="supervisor" ${s.role==='supervisor'?'selected':''}>Supervisor</option>
           <option value="admin" ${s.role==='admin'?'selected':''}>Admin</option>
         </select>
       </div>
@@ -3384,16 +3480,31 @@ function showEditStaffModal(s) {
         </select>
       </div>
     </div>
+    <div id="es-rights-wrap" style="display:${s.role==='supervisor'?'block':'none'}">
+      <label class="form-label">Supervisor Rights</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        ${(() => { let existingRights = []; try { existingRights = typeof s.supervisor_rights === 'string' ? JSON.parse(s.supervisor_rights||'[]') : (s.supervisor_rights||[]); } catch{} return ['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports'].map(r =>
+          `<label style="display:flex;align-items:center;gap:4px;background:#f0f4ff;border:1px solid #d0d8f0;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;user-select:none">
+            <input type="checkbox" class="es-right-cb" value="${r}" ${existingRights.includes(r)?'checked':''}> ${r.replace(/_/g,' ')}
+          </label>`).join(''); })()}
+      </div>
+    </div>
     <div class="modal-footer">
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
       <button id="es-save" class="btn-primary">Save Changes</button>
     </div>`);
+  document.getElementById('es-role')?.addEventListener('change', e => {
+    document.getElementById('es-rights-wrap').style.display = e.target.value === 'supervisor' ? 'block' : 'none';
+  });
   document.getElementById('es-save')?.addEventListener('click', async () => {
+    const selectedRole = document.getElementById('es-role')?.value;
+    const rights = selectedRole === 'supervisor' ? Array.from(document.querySelectorAll('.es-right-cb:checked')).map(cb => cb.value) : null;
     const body = {
       name:   document.getElementById('es-name')?.value.trim(),
       email:  document.getElementById('es-email')?.value.trim(),
-      role:   document.getElementById('es-role')?.value,
+      role:   selectedRole,
       active: parseInt(document.getElementById('es-active')?.value),
+      supervisor_rights: rights,
     };
     const p = document.getElementById('es-pass')?.value;
     if (p) body.password = p;
@@ -3953,42 +4064,119 @@ function bindTrack() {
 // ─────────────────────────────────────────────────────────────────────────────
 // PRINT ADDRESS LABEL — 101mm × 152mm single page
 // ─────────────────────────────────────────────────────────────────────────────
-function printAddressLabel(j) {
-  const w = window.open('', '_blank', 'width=500,height=700');
-  if (!w) { toast('Please allow popups to print', 'error'); return; }
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Address Label — ${esc(j.id)}</title>
-<style>
-@page { size: 101mm 152mm; margin: 6mm; }
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family: 'Segoe UI', Arial, sans-serif; width:89mm; height:140mm; padding:4mm; display:flex; flex-direction:column; justify-content:space-between; }
-.section { margin-bottom: 3mm; }
-.label { font-size:10pt; color:#888; font-weight:700; text-transform:uppercase; letter-spacing:1px; margin-bottom:1mm; }
-.name { font-size:16pt; font-weight:900; color:#1a1a2e; line-height:1.2; margin-bottom:1mm; }
-.addr { font-size:11pt; color:#333; line-height:1.4; white-space:pre-line; }
-.phone { font-size:11pt; color:#1565C0; font-weight:700; }
-.divider { border:none; border-top:1px dashed #999; margin:3mm 0; }
-.from-name { font-size:12pt; font-weight:900; color:#E53935; letter-spacing:1px; }
-.from-addr { font-size:10pt; color:#555; line-height:1.4; }
-</style></head><body>
-<div>
-  <div class="section">
-    <div class="label">To,</div>
-    <div class="name">${esc(j.snap_name)}</div>
-    ${j.snap_address ? `<div class="addr">${esc(j.snap_address)}</div>` : ''}
-    <div class="phone">${j.snap_mobile || ''}${j.snap_mobile2 ? '  /  '+j.snap_mobile2 : ''}</div>
-  </div>
-  <hr class="divider">
-  <div class="section">
-    <div class="label">From,</div>
-    <div class="from-name">ADITION ELECTRIC WORKS</div>
-    <div class="from-addr">Gheekanta, Ahmedabad\nPin: 380001\nM: 7801990001</div>
-  </div>
-</div>
-<script>window.onload=function(){window.print();setTimeout(function(){window.close()},1000)}<\/script>
-</body></html>`;
-  w.document.write(html);
-  w.document.close();
+async function printAddressLabel(j) {
+  toast('Generating address label…', 'info');
+  try {
+    // Create off-screen canvas at 101mm × 152mm (approximately 382×574 px at 96dpi, we use 2x for quality)
+    const W = 764; // 101mm * 2x at ~96dpi ≈ 382*2
+    const H = 1148; // 152mm * 2x at ~96dpi ≈ 574*2
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+
+    let y = 40;
+    const padX = 40;
+
+    // --- TO section ---
+    ctx.fillStyle = '#888888';
+    ctx.font = 'bold 26px "Segoe UI", Arial, sans-serif'; // ~14pt at 2x
+    ctx.fillText('To,', padX, y); y += 36;
+
+    // Variable-size customer name (14pt scaled)
+    ctx.fillStyle = '#1a1a2e';
+    const nameSize = Math.min(52, Math.max(32, 680 / Math.max(1, (j.snap_name||'').length) * 2.5));
+    ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
+    const nameLines = wrapText(ctx, j.snap_name || '', W - padX * 2);
+    nameLines.forEach(line => { ctx.fillText(line, padX, y); y += nameSize + 6; });
+
+    // Address
+    if (j.snap_address) {
+      ctx.fillStyle = '#333333';
+      ctx.font = '500 28px "Segoe UI", Arial, sans-serif';
+      const addrLines = wrapText(ctx, j.snap_address, W - padX * 2);
+      addrLines.forEach(line => { ctx.fillText(line, padX, y); y += 34; });
+    }
+    y += 8;
+
+    // Mobile
+    ctx.fillStyle = '#1565C0';
+    ctx.font = 'bold 28px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('M: ' + (j.snap_mobile || ''), padX, y); y += 34;
+    if (j.snap_mobile2) {
+      ctx.fillText('Alt: ' + j.snap_mobile2, padX, y); y += 34;
+    }
+
+    // Divider
+    y += 16;
+    ctx.strokeStyle = '#999999';
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(W - padX, y); ctx.stroke();
+    ctx.setLineDash([]);
+    y += 24;
+
+    // --- FROM section (10pt label, 8pt address) ---
+    ctx.fillStyle = '#888888';
+    ctx.font = 'bold 20px "Segoe UI", Arial, sans-serif'; // ~10pt
+    ctx.fillText('From,', padX, y); y += 28;
+
+    ctx.fillStyle = '#E53935';
+    ctx.font = '900 20px "Segoe UI", Arial, sans-serif'; // ~10pt
+    ctx.fillText('ADITION ELECTRIC WORKS', padX, y); y += 26;
+
+    ctx.fillStyle = '#555555';
+    ctx.font = '500 16px "Segoe UI", Arial, sans-serif'; // ~8pt
+    const fromLines = ['Opp. Metropolitan Court Gate 2,', 'Gheekanta, Ahmedabad', 'Pin: 380001', 'M: 7801990001'];
+    fromLines.forEach(line => { ctx.fillText(line, padX, y); y += 20; });
+
+    // Convert to blob
+    const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', 0.95));
+    if (!blob) { toast('Failed to generate address label', 'error'); return; }
+
+    const fileName = `Address_${j.id}.jpg`;
+    const file = new File([blob], fileName, { type: 'image/jpeg' });
+
+    // Try Web Share API first (opens native share dialog on mobile)
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: `Address Label - ${j.id}`, text: `To: ${j.snap_name}` });
+        toast('Address label shared', 'success');
+        return;
+      } catch (e) {
+        if (e.name === 'AbortError') return; // User cancelled
+      }
+    }
+
+    // Fallback: download
+    const bUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = bUrl; a.download = fileName; a.style.display = 'none';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(bUrl); }, 3000);
+    toast(`Address label saved: ${fileName}`, 'success');
+  } catch (e) {
+    console.error('[AES] Print address error:', e);
+    toast('Failed to generate address label', 'error');
+  }
+}
+
+// Canvas text wrap helper
+function wrapText(ctx, text, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const test = line ? line + ' ' + word : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4120,6 +4308,55 @@ async function loadAdminDash() {
     </div>` : ''}`;
   } catch (e) {
     root.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Failed to load dashboard</p></div>`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTO-DOWNLOAD DELIVERED JOB CARD
+// Generate and save "Job [Job No.] Delivered.jpg" without user prompt
+// ─────────────────────────────────────────────────────────────────────────────
+async function autoDownloadDeliveredCard(j) {
+  if (!j || j.status !== 'delivered') return;
+  try {
+    toast('Auto-generating delivered job card…', 'info');
+    const el = document.getElementById('job-card-print');
+    if (!el) return;
+
+    el.style.left = '-99999px'; el.style.top = '0';
+    const imgEls = Array.from(el.querySelectorAll('img'));
+    const base64Results = await Promise.all(imgEls.map(async (img) => {
+      const src = img.getAttribute('data-auth-src') || img.getAttribute('src') || '';
+      if (!src) return { img, base64: null };
+      try { return { img, base64: await imageUrlToBase64(src, S.token, 1) }; } catch { return { img, base64: null }; }
+    }));
+    base64Results.forEach(({ img, base64 }) => { if (base64) { img.src = base64; img.removeAttribute('data-auth-src'); } });
+
+    await Promise.all(imgEls.map(img => {
+      if (img.complete && img.naturalWidth > 0) return Promise.resolve(true);
+      return new Promise(resolve => { img.onload = () => resolve(true); img.onerror = () => resolve(false); setTimeout(() => resolve(false), 5000); });
+    }));
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 500)));
+
+    const CARD_WIDTH = 1080;
+    const actualH = Math.max(el.scrollHeight || el.offsetHeight || 1440, 1365);
+    const fullCanvas = await html2canvas(el, {
+      scale: 3, useCORS: true, allowTaint: true,
+      width: CARD_WIDTH, height: actualH,
+      backgroundColor: '#ffffff', logging: false, imageTimeout: 15000,
+    });
+
+    const blob = await new Promise(resolve => fullCanvas.toBlob(b => resolve(b), 'image/jpeg', 0.92));
+    if (!blob || blob.size < 1000) return;
+
+    const fileName = `Job ${j.id} Delivered.jpg`;
+    const bUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = bUrl; a.download = fileName; a.style.display = 'none';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(bUrl); }, 3000);
+    toast(`Downloaded: ${fileName}`, 'success');
+  } catch (e) {
+    console.error('[AES] Auto-download delivered card error:', e);
   }
 }
 
