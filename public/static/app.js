@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v25                       ║
-// ║  v25: Filter panel, admin dashboard, print address, QR+bank split, ║
-// ║  WhatsApp community link, machine count=SUM(qty), manager fixes    ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v27                       ║
+// ║  v27: Split search (job# / name+mobile), centered status badges,  ║
+// ║  QR left+details right layout, compact filters, enhanced tiles     ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -25,6 +25,8 @@ const S = {
   requests: [],
   filter : new URLSearchParams(window.location.search).get('status') || 'under_repair',
   search : '',
+  searchJob : '',
+  searchName: '',
   fromDate: '',
   toDate  : '',
   myJobsOnly: false,
@@ -663,13 +665,13 @@ function dashboardHTML() {
   <div style="display:flex;flex-direction:column;height:100%">
     ${!isAdmin() ? `<div id="staff-notif-bar" style="display:none;padding:8px 12px 0"></div>` : ''}
     ${isAdmin() ? `<div id="owner-dash" style="padding:10px 12px 4px;display:flex;gap:6px;flex-wrap:wrap"></div>` : ''}
-    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px 4px;flex-shrink:0">
-      <button id="btn-open-filter" style="display:flex;align-items:center;gap:6px;background:${hasFilter?'#E3F2FD':'#f0f2f5'};border:1px solid ${hasFilter?'#1E88E5':'#ddd'};border-radius:10px;padding:8px 14px;font-size:13px;font-weight:700;color:${hasFilter?'#1565C0':'#555'};cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:all .15s">
-        <i class="fas fa-filter"></i> Filter${hasFilter ? ': '+activeFilterLabel : ''}
+    <div style="display:flex;align-items:center;gap:6px;padding:6px 12px 2px;flex-shrink:0">
+      <button id="btn-open-filter" style="display:inline-flex;align-items:center;gap:4px;background:${hasFilter?'#E3F2FD':'#f5f5f5'};border:1px solid ${hasFilter?'#1E88E5':'#ddd'};border-radius:8px;padding:5px 10px;font-size:12px;font-weight:700;color:${hasFilter?'#1565C0':'#666'};cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:all .15s;line-height:1">
+        <i class="fas fa-filter" style="font-size:10px"></i> ${hasFilter ? activeFilterLabel : 'Filter'}
       </button>
-      ${hasFilter ? `<button id="btn-clear-filter" style="background:#FFEBEE;border:1px solid #E53935;border-radius:8px;padding:6px 10px;font-size:12px;color:#E53935;font-weight:700;cursor:pointer;white-space:nowrap"><i class="fas fa-times"></i> Clear</button>` : ''}
+      ${hasFilter ? `<button id="btn-clear-filter" style="display:inline-flex;align-items:center;gap:3px;background:#FFEBEE;border:1px solid #E53935;border-radius:6px;padding:4px 8px;font-size:11px;color:#E53935;font-weight:700;cursor:pointer;white-space:nowrap;line-height:1"><i class="fas fa-times" style="font-size:9px"></i></button>` : ''}
       <div style="flex:1"></div>
-      <span id="cc-count" style="font-size:12px;color:#888;font-weight:600"></span>
+      <span id="cc-count" style="font-size:11px;color:#999;font-weight:600"></span>
     </div>
     <div id="filter-panel" style="display:none;padding:8px 12px;background:#f8f9fb;border-bottom:1px solid #e0e0e0;flex-shrink:0">
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Filter by Status</div>
@@ -715,11 +717,21 @@ function dashboardHTML() {
       </button>
       ${S.myJobsOnly ? `<button id="btn-clear-my" class="btn-my-clear"><i class="fas fa-times"></i> All Jobs</button>` : ''}
     </div>` : ''}
-    <div class="search-wrap">
-      <i class="fas fa-search search-icon"></i>
-      <input id="dash-search" type="search" class="search-input"
-             placeholder="Search name, mobile, job ID…" value="${esc(S.search)}"
-             autocomplete="off" autocorrect="off" spellcheck="false">
+    <div style="display:flex;gap:8px;padding:6px 12px;flex-shrink:0">
+      <div style="flex:1;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;overflow:hidden;transition:border-color .15s">
+        <i class="fas fa-hashtag" style="position:absolute;left:12px;color:#1565C0;font-size:14px;pointer-events:none"></i>
+        <input id="dash-search-job" type="search" class="search-input"
+               placeholder="Job No." value="${esc(S.searchJob || '')}"
+               autocomplete="off" autocorrect="off" spellcheck="false"
+               style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none">
+      </div>
+      <div style="flex:1.5;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;overflow:hidden;transition:border-color .15s">
+        <i class="fas fa-search" style="position:absolute;left:12px;color:#888;font-size:14px;pointer-events:none"></i>
+        <input id="dash-search-name" type="search" class="search-input"
+               placeholder="Name or Mobile…" value="${esc(S.searchName || '')}"
+               autocomplete="off" autocorrect="off" spellcheck="false"
+               style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none">
+      </div>
     </div>
     <div id="vlist-wrap" class="vlist-wrap" style="flex:1"></div>
   </div>`;
@@ -794,7 +806,7 @@ async function loadJobs(append = false) {
     _jobsOffset = 0;
     _jobsHasMore = true;
     // Show cached data instantly while fetching (lazy-load pattern)
-    const cached = !S.search && !S.fromDate && !S.toDate && !S.myJobsOnly ? _jobCache.load(S.filter) : null;
+    const cached = !S.search && !S.searchJob && !S.searchName && !S.fromDate && !S.toDate && !S.myJobsOnly ? _jobCache.load(S.filter) : null;
     if (cached && cached.length) {
       S.jobs = cached;
       renderVList(false);
@@ -810,7 +822,9 @@ async function loadJobs(append = false) {
   try {
     const params = { limit: JOBS_PER_PAGE, offset: _jobsOffset };
     if (S.filter)     params.status   = S.filter;
-    if (S.search)     params.q        = S.search;
+    if (S.searchJob)  params.q_job    = S.searchJob;
+    if (S.searchName) params.q_name   = S.searchName;
+    if (S.search && !S.searchJob && !S.searchName)     params.q = S.search;
     if (S.fromDate)   params.from     = S.fromDate;
     if (S.toDate)     params.to       = S.toDate;
     if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
@@ -823,7 +837,7 @@ async function loadJobs(append = false) {
     } else {
       S.jobs = newJobs;
       // Save to localStorage cache for instant load next time
-      if (!S.search && !S.fromDate && !S.toDate && !S.myJobsOnly) {
+      if (!S.search && !S.searchJob && !S.searchName && !S.fromDate && !S.toDate && !S.myJobsOnly) {
         _jobCache.save(S.filter, S.jobs);
       }
     }
@@ -878,7 +892,7 @@ async function loadJobs(append = false) {
       setFilter('pending_payment');
       const wrap = document.getElementById('vlist-wrap');
       if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
-      API.get('/api/jobs/pending-payment', { params: { q: S.search } })
+      API.get('/api/jobs/pending-payment', { params: { q: S.searchJob || S.searchName || S.search } })
         .then(r => {
           S.jobs = r.data || [];
           _jobsHasMore = false;
@@ -896,7 +910,7 @@ async function loadJobs(append = false) {
       _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
       const wrap = document.getElementById('vlist-wrap');
       if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
-      API.get('/api/jobs/delivered', { params: { from: S.fromDate, to: S.toDate, method: delType, q: S.search } })
+      API.get('/api/jobs/delivered', { params: { from: S.fromDate, to: S.toDate, method: delType, q: S.searchJob || S.searchName || S.search } })
         .then(r => {
           S.jobs = r.data || [];
           _jobsHasMore = false;
@@ -918,11 +932,18 @@ async function loadJobs(append = false) {
     render();
   });
 
-  const dSearch = debounce(() => {
-    S.search = document.getElementById('dash-search')?.value.trim() || '';
+  const dSearchJob = debounce(() => {
+    S.searchJob = document.getElementById('dash-search-job')?.value.trim() || '';
+    S.search = S.searchJob || S.searchName || '';
     loadJobs();
   }, 300);
-  document.getElementById('dash-search')?.addEventListener('input', dSearch);
+  const dSearchName = debounce(() => {
+    S.searchName = document.getElementById('dash-search-name')?.value.trim() || '';
+    S.search = S.searchJob || S.searchName || '';
+    loadJobs();
+  }, 300);
+  document.getElementById('dash-search-job')?.addEventListener('input', dSearchJob);
+  document.getElementById('dash-search-name')?.addEventListener('input', dSearchName);
 }
 
 function renderVList(append = false) {
@@ -1473,9 +1494,9 @@ function renderDetail() {
 
   root.innerHTML = `
     <!-- Status Banner -->
-    <div class="detail-banner" style="background:${color}">
-      <span class="detail-job-id">${j.id}</span>
-      <span class="detail-status-label">${sl(j.status)}</span>
+    <div class="detail-banner" style="background:${color};display:flex;align-items:center;justify-content:space-between;padding:14px 18px">
+      <span class="detail-job-id" style="font-size:22px;font-weight:900;color:#fff;letter-spacing:1px">${j.id}</span>
+      <span class="detail-status-label" style="background:rgba(255,255,255,.2);padding:6px 18px;border-radius:10px;font-weight:800;color:#fff;font-size:15px;letter-spacing:.5px;text-align:center">${sl(j.status)}</span>
     </div>
 
     <!-- Customer Card -->
@@ -1683,23 +1704,23 @@ function machineCardHTML(m, currentUserId) {
 
   return `
   <div class="machine-card" style="border-left-color:${color};will-change:transform,opacity">
-    <div class="machine-top">
-      <div style="flex:1;min-width:0">
-        <div class="machine-name">${esc(m.product_name)}${m.quantity>1?` <span class="machine-qty">×${m.quantity}</span>`:''}</div>
-        ${m.product_complaint ? `<div class="machine-complaint">${esc(m.product_complaint)}</div>` : ''}
-        ${m.work_done ? `<div class="machine-complaint" style="color:#2E7D32">✅ Work done: ${esc(m.work_done)}</div>` : ''}
-        ${m.return_reason ? `<div class="machine-complaint" style="color:#E65100">↩ Returned: ${esc(m.return_reason)}</div>` : ''}
-        ${m.staff_name ? `<div class="machine-staff"><i class="fas fa-user-cog"></i> ${esc(m.staff_name)}</div>` : ''}
+    <div class="machine-top" style="display:flex;gap:10px;align-items:flex-start">
+      <div style="flex:1;min-width:0;overflow:hidden">
+        <div class="machine-name" style="font-size:15px;font-weight:800;color:#1a1a2e;line-height:1.3;word-break:break-word">${esc(m.product_name)}${m.quantity>1?` <span class="machine-qty" style="color:#888;font-size:13px;font-weight:600">×${m.quantity}</span>`:''}</div>
+        ${m.product_complaint ? `<div class="machine-complaint" style="font-size:13px;color:#666;margin-top:3px;line-height:1.3;word-break:break-word">${esc(m.product_complaint)}</div>` : ''}
+        ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:2px;line-height:1.3">✅ Work: ${esc(m.work_done)}</div>` : ''}
+        ${m.return_reason ? `<div style="font-size:12px;color:#E65100;margin-top:2px;line-height:1.3">↩ ${esc(m.return_reason)}</div>` : ''}
+        ${m.staff_name ? `<div class="machine-staff" style="font-size:12px;color:#888;margin-top:2px"><i class="fas fa-user-cog"></i> ${esc(m.staff_name)}</div>` : ''}
       </div>
-      <div class="machine-right">
-        ${isAdmin() ? `<div class="machine-charges" ${m.status==='returned'?'style="text-decoration:line-through;color:#999"':''}>${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:11px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
+      <div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:90px">
         ${isAssigned ? `
-        <select data-mid="${m.id}" class="status-sel" style="border-color:${color};color:${color}">
+        <select data-mid="${m.id}" class="status-sel" style="border:2px solid ${color};color:${color};border-radius:8px;padding:4px 6px;font-size:12px;font-weight:700;text-align:center;background:#fff;min-width:100px;cursor:pointer">
           <option value="under_repair" ${m.status==='under_repair'?'selected':''}>Under Repair</option>
           <option value="repaired"     ${m.status==='repaired'    ?'selected':''}>Repaired</option>
           <option value="returned"     ${m.status==='returned'    ?'selected':''}>Returned</option>
         </select>` : `
-        <span class="status-chip" style="background:${sb(m.status)};color:${color};border:1px solid ${color}">${sl(m.status)}</span>`}
+        <span class="status-chip" style="background:${sb(m.status)};color:${color};border:1.5px solid ${color};display:inline-flex;align-items:center;justify-content:center;padding:4px 12px;border-radius:8px;font-size:12px;font-weight:700;white-space:nowrap;text-align:center">${sl(m.status)}</span>`}
+        ${isAdmin() ? `<div style="font-size:14px;font-weight:800;color:${m.status==='returned'?'#999':'#1a1a2e'};text-align:center;white-space:nowrap${m.status==='returned'?';text-decoration:line-through':''}">${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:10px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
       </div>
     </div>
 
@@ -2122,7 +2143,8 @@ async function showJobHistory(j) {
     <div id="jh-list" style="max-height:65vh;overflow-y:auto;padding:4px 0">
       <div class="loader-wrap"><i class="fas fa-spinner fa-spin"></i></div>
     </div>
-    <div class="modal-footer">
+    <div class="modal-footer" style="gap:8px">
+      <button id="jh-share-btn" class="btn-sm" style="background:#25D366;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px;font-weight:700"><i class="fab fa-whatsapp"></i> Share</button>
       <button onclick="closeModal()" class="btn-ghost" style="margin-left:auto">Close</button>
     </div>`);
 
@@ -2181,6 +2203,26 @@ async function showJobHistory(j) {
     const el = document.getElementById('jh-list');
     if (el) el.innerHTML = `<p style="text-align:center;padding:16px;color:#888">Failed to load history</p>`;
   }
+
+  // Share history via WhatsApp
+  document.getElementById('jh-share-btn')?.addEventListener('click', () => {
+    const phone = (j.snap_mobile || '').replace(/\D/g, '');
+    const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+    let histText = `⚡ *ADITION ELECTRIC*\n*Job #${j.id} History*\n\n`;
+    const el = document.getElementById('jh-list');
+    if (el) {
+      const items = el.querySelectorAll('[style*="border-left:3px"]');
+      items.forEach((item, i) => {
+        const action = item.querySelector('[style*="font-weight:700"]')?.textContent || '';
+        const date = item.querySelectorAll('[style*="font-size:11px"]')[0]?.textContent || '';
+        const detail = item.querySelector('[style*="font-size:13px;color:#555"]')?.textContent || '';
+        histText += `${i+1}. *${action}*${date ? ' — '+date : ''}${detail ? '\n   '+detail : ''}\n`;
+      });
+    }
+    histText += '\n📞 7801990001\n✨ adition™ since 1984';
+    const url = waPhone ? `https://wa.me/${waPhone}?text=${encodeURIComponent(histText)}` : `https://wa.me/?text=${encodeURIComponent(histText)}`;
+    window.location.href = url;
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2787,9 +2829,9 @@ function jobCardPrintHTML(j) {
         <div style="color:rgba(255,255,255,.7);font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Job Number</div>
         <div style="color:#fff;font-size:32px;font-weight:900;letter-spacing:3px;line-height:1.1">${j.id}</div>
       </div>
-      <div style="text-align:right">
-        <div style="color:#fff;font-size:18px;font-weight:800;background:rgba(0,0,0,.2);padding:5px 16px;border-radius:8px;letter-spacing:1px">${sl(j.status)}</div>
-        <div style="color:rgba(255,255,255,.7);font-size:12px;margin-top:3px;font-weight:600">${fmtDate(j.created_at)}</div>
+      <div style="text-align:center">
+        <div style="color:#fff;font-size:18px;font-weight:800;background:rgba(0,0,0,.2);padding:6px 20px;border-radius:10px;letter-spacing:1px;display:inline-flex;align-items:center;justify-content:center;min-width:120px">${sl(j.status)}</div>
+        <div style="color:rgba(255,255,255,.7);font-size:12px;margin-top:4px;font-weight:600">${fmtDate(j.created_at)}</div>
       </div>
     </div>`;
 
@@ -2846,9 +2888,9 @@ function jobCardPrintHTML(j) {
           ? `<div style="width:72px;height:72px;border-radius:8px;background:#e8eaed;display:none;align-items:center;justify-content:center;flex-shrink:0;font-size:28px;color:#bbb">⚡</div>`
           : `<div style="width:72px;height:72px;border-radius:8px;background:linear-gradient(135deg,#e8eaed,#f0f2f5);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:28px;color:#bbb;border:2px solid #e0e0e0">⚡</div>`}
         <div style="flex:1;min-width:0">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:3px">
-            <div style="font-size:26px;font-weight:800;color:#1a1a2e;line-height:1.2">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-size:20px;font-weight:600">x${m.quantity}</span>`:''}</div>
-            <div style="background:${mColor};color:#fff;border-radius:5px;padding:3px 10px;font-size:14px;font-weight:800;white-space:nowrap;letter-spacing:.5px;flex-shrink:0">${sl(m.status)}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:3px">
+            <div style="font-size:26px;font-weight:800;color:#1a1a2e;line-height:1.2;flex:1;min-width:0;word-break:break-word">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-size:20px;font-weight:600">x${m.quantity}</span>`:''}</div>
+            <div style="background:${mColor};color:#fff;border-radius:8px;padding:5px 16px;font-size:14px;font-weight:800;white-space:nowrap;letter-spacing:.5px;flex-shrink:0;text-align:center;display:inline-flex;align-items:center;justify-content:center;min-width:100px">${sl(m.status)}</div>
           </div>
           ${m.product_complaint ? `<div style="font-size:20px;color:#666;line-height:1.2">${esc(m.product_complaint)}</div>` : ''}
           ${m.work_done ? `<div style="font-size:18px;color:#2E7D32;font-weight:600">✅ ${esc(m.work_done)}</div>` : ''}
@@ -2892,23 +2934,25 @@ function jobCardPrintHTML(j) {
   // ── 6. PAYMENT SECTION: QR code → Payment Details → Notices → Tracking QR+Link ──
   const paymentBlock = showPayment ? `
     <div style="margin:0 30px 10px">
-      <!-- QR Code centered -->
-      <div style="text-align:center;margin-bottom:10px">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:200px;height:200px;border-radius:12px;border:3px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
-        <div style="font-size:18px;color:#2E7D32;margin-top:6px;font-weight:900">💳 Scan to Pay ${fmtRs(balance)}</div>
-        <div style="font-size:13px;color:#555;margin-top:2px">UPI: 9375940444@okbizaxis</div>
+      <!-- Row 1: QR left + Payment Details right -->
+      <div style="display:flex;gap:14px;margin-bottom:10px;align-items:stretch">
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;background:#f8fff8;border:2px solid #43A047;border-radius:12px;padding:14px;flex-shrink:0;min-width:220px">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:180px;height:180px;border-radius:10px;border:2px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:16px;color:#2E7D32;margin-top:8px;font-weight:900;text-align:center">💳 Scan to Pay</div>
+          <div style="font-size:20px;color:#2E7D32;font-weight:900">${fmtRs(balance)}</div>
+          <div style="font-size:12px;color:#555;margin-top:2px">UPI: 9375940444@okbizaxis</div>
+        </div>
+        <div style="flex:1;background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:14px;display:flex;flex-direction:column;justify-content:center">
+          <div style="font-size:15px;font-weight:800;color:#2E7D32;margin-bottom:10px">🏦 Bank Details</div>
+          <table style="border-collapse:collapse;font-size:15px;width:100%">
+            <tr><td style="color:#555;padding:5px 0;width:65px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+            <tr><td style="color:#555;padding:5px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank of India</td></tr>
+            <tr><td style="color:#555;padding:5px 0;font-weight:600">A/C</td><td style="font-weight:700">37321811864</td></tr>
+            <tr><td style="color:#555;padding:5px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
+          </table>
+        </div>
       </div>
-      <!-- Payment Details -->
-      <div style="background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:14px;margin-bottom:10px">
-        <div style="font-size:14px;font-weight:800;color:#2E7D32;margin-bottom:8px">🏦 Bank Details</div>
-        <table style="border-collapse:collapse;font-size:14px;width:100%">
-          <tr><td style="color:#555;padding:4px 0;width:60px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-          <tr><td style="color:#555;padding:4px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank of India</td></tr>
-          <tr><td style="color:#555;padding:4px 0;font-weight:600">A/C</td><td style="font-weight:700">37321811864</td></tr>
-          <tr><td style="color:#555;padding:4px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
-        </table>
-      </div>
-      <!-- Notices -->
+      <!-- Row 2: Notices -->
       <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:12px;margin-bottom:10px">
         <div style="font-size:14px;font-weight:900;color:#E65100;margin-bottom:6px">⚠️ Important Notices</div>
         <div style="font-size:13px;color:#5D4037;line-height:1.5">
@@ -2917,7 +2961,7 @@ function jobCardPrintHTML(j) {
           3. Any damage or loss during repair is the <strong>customer's responsibility</strong>.
         </div>
       </div>
-      <!-- Tracking QR + Link -->
+      <!-- Row 3: Tracking QR + Link -->
       <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px">
         <div style="font-size:13px;font-weight:800;color:#1565C0;margin-bottom:6px">🔗 Track Your Job Online</div>
         <div style="display:flex;align-items:center;gap:10px">
@@ -3887,7 +3931,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v25.0<br>
+      ✨ adition™ since 1984 · v27.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -4079,55 +4123,64 @@ async function printAddressLabel(j) {
     let y = 40;
     const padX = 40;
 
-    // --- TO section ---
+    // --- TO section --- (18pt equivalent at 2x = 36px)
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 26px "Segoe UI", Arial, sans-serif'; // ~14pt at 2x
-    ctx.fillText('To,', padX, y); y += 36;
+    ctx.font = 'bold 30px "Segoe UI", Arial, sans-serif'; // ~15pt at 2x
+    ctx.fillText('To,', padX, y); y += 40;
 
-    // Variable-size customer name (14pt scaled)
+    // Variable-size customer name (18pt target → 36px at 2x, adaptive down if long)
     ctx.fillStyle = '#1a1a2e';
-    const nameSize = Math.min(52, Math.max(32, 680 / Math.max(1, (j.snap_name||'').length) * 2.5));
+    const nameLen = (j.snap_name||'').length;
+    const nameSize = nameLen > 25 ? 34 : nameLen > 18 ? 40 : nameLen > 12 ? 48 : 56; // adaptive: 18pt→56px, shrinks for long names
     ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
     const nameLines = wrapText(ctx, j.snap_name || '', W - padX * 2);
-    nameLines.forEach(line => { ctx.fillText(line, padX, y); y += nameSize + 6; });
+    nameLines.forEach(line => { ctx.fillText(line, padX, y); y += nameSize + 8; });
+    y += 6;
 
-    // Address
+    // Address (10pt → 20px at 2x, slightly larger for readability)
     if (j.snap_address) {
       ctx.fillStyle = '#333333';
-      ctx.font = '500 28px "Segoe UI", Arial, sans-serif';
+      ctx.font = '500 24px "Segoe UI", Arial, sans-serif'; // ~12pt
       const addrLines = wrapText(ctx, j.snap_address, W - padX * 2);
-      addrLines.forEach(line => { ctx.fillText(line, padX, y); y += 34; });
+      addrLines.forEach(line => { ctx.fillText(line, padX, y); y += 30; });
     }
-    y += 8;
+    y += 10;
 
-    // Mobile
+    // Mobile numbers
     ctx.fillStyle = '#1565C0';
-    ctx.font = 'bold 28px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('M: ' + (j.snap_mobile || ''), padX, y); y += 34;
+    ctx.font = 'bold 30px "Segoe UI", Arial, sans-serif'; // ~15pt
+    ctx.fillText('M: ' + (j.snap_mobile || ''), padX, y); y += 38;
     if (j.snap_mobile2) {
-      ctx.fillText('Alt: ' + j.snap_mobile2, padX, y); y += 34;
+      ctx.font = 'bold 24px "Segoe UI", Arial, sans-serif';
+      ctx.fillText('Alt: ' + j.snap_mobile2, padX, y); y += 32;
     }
+
+    // ---- FROM section fixed at bottom ----
+    // Calculate remaining space and place FROM section at the bottom
+    const fromStartY = Math.max(y + 30, H - 200); // At least 200px from bottom
+    y = fromStartY;
 
     // Divider
-    y += 16;
     ctx.strokeStyle = '#999999';
     ctx.setLineDash([6, 4]);
     ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(W - padX, y); ctx.stroke();
     ctx.setLineDash([]);
     y += 24;
 
-    // --- FROM section (10pt label, 8pt address) ---
+    // From label (10pt → 20px at 2x)
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 20px "Segoe UI", Arial, sans-serif'; // ~10pt
+    ctx.font = 'bold 20px "Segoe UI", Arial, sans-serif';
     ctx.fillText('From,', padX, y); y += 28;
 
+    // Shop name (10pt bold)
     ctx.fillStyle = '#E53935';
-    ctx.font = '900 20px "Segoe UI", Arial, sans-serif'; // ~10pt
-    ctx.fillText('ADITION ELECTRIC WORKS', padX, y); y += 26;
+    ctx.font = '900 22px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('ADITION ELECTRIC SOLUTION', padX, y); y += 28;
 
+    // Address (8pt → 16px at 2x)
     ctx.fillStyle = '#555555';
-    ctx.font = '500 16px "Segoe UI", Arial, sans-serif'; // ~8pt
-    const fromLines = ['Opp. Metropolitan Court Gate 2,', 'Gheekanta, Ahmedabad', 'Pin: 380001', 'M: 7801990001'];
+    ctx.font = '500 16px "Segoe UI", Arial, sans-serif';
+    const fromLines = ['Opp. Metropolitan Court Gate 2,', 'Gheekanta, Ahmedabad 380001', 'M: 7801990001'];
     fromLines.forEach(line => { ctx.fillText(line, padX, y); y += 20; });
 
     // Convert to blob
@@ -4198,27 +4251,46 @@ async function loadAdminDash() {
     const pending = (d.underRepair||0) + (d.repaired||0) + (d.returned||0);
 
     root.innerHTML = `
-    <!-- Summary Tiles -->
+    <!-- AI-Enhanced Summary Tiles -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
-      <div onclick="navigate('dashboard');setFilter('');filterToday()" style="background:linear-gradient(135deg,#E3F2FD,#BBDEFB);border-radius:14px;padding:16px;cursor:pointer;text-align:center">
-        <div style="font-size:28px">📅</div>
-        <div style="font-size:28px;font-weight:900;color:#1565C0;line-height:1">${d.today || 0}</div>
-        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Today's Jobs</div>
+      <div onclick="navigate('dashboard');setFilter('');filterToday()" style="background:linear-gradient(135deg,#1565C0,#1976D2);border-radius:16px;padding:18px 16px;cursor:pointer;text-align:center;box-shadow:0 4px 16px rgba(21,101,192,.25);transition:transform .15s;position:relative;overflow:hidden" ontouchstart="this.style.transform='scale(0.96)'" ontouchend="this.style.transform=''">
+        <div style="position:absolute;top:-15px;right:-15px;width:60px;height:60px;border-radius:50%;background:rgba(255,255,255,.1)"></div>
+        <div style="font-size:28px;margin-bottom:4px">📅</div>
+        <div style="font-size:32px;font-weight:900;color:#fff;line-height:1">${d.today || 0}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);font-weight:700;text-transform:uppercase;margin-top:6px;letter-spacing:1px">Today's Jobs</div>
       </div>
-      <div onclick="navigate('dashboard');filterActive()" style="background:linear-gradient(135deg,#FFF3E0,#FFE0B2);border-radius:14px;padding:16px;cursor:pointer;text-align:center">
-        <div style="font-size:28px">🔧</div>
-        <div style="font-size:28px;font-weight:900;color:#E65100;line-height:1">${pending}</div>
-        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Pending Jobs</div>
+      <div onclick="navigate('dashboard');filterActive()" style="background:linear-gradient(135deg,#E65100,#F57C00);border-radius:16px;padding:18px 16px;cursor:pointer;text-align:center;box-shadow:0 4px 16px rgba(230,81,0,.25);transition:transform .15s;position:relative;overflow:hidden" ontouchstart="this.style.transform='scale(0.96)'" ontouchend="this.style.transform=''">
+        <div style="position:absolute;top:-15px;right:-15px;width:60px;height:60px;border-radius:50%;background:rgba(255,255,255,.1)"></div>
+        <div style="font-size:28px;margin-bottom:4px">🔧</div>
+        <div style="font-size:32px;font-weight:900;color:#fff;line-height:1">${pending}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);font-weight:700;text-transform:uppercase;margin-top:6px;letter-spacing:1px">Pending Jobs</div>
       </div>
-      <div onclick="navigate('dashboard');filterDone()" style="background:linear-gradient(135deg,#E8F5E9,#C8E6C9);border-radius:14px;padding:16px;cursor:pointer;text-align:center">
-        <div style="font-size:28px">✅</div>
-        <div style="font-size:28px;font-weight:900;color:#2E7D32;line-height:1">${d.completed || 0}</div>
-        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Completed</div>
+      <div onclick="navigate('dashboard');filterDone()" style="background:linear-gradient(135deg,#2E7D32,#43A047);border-radius:16px;padding:18px 16px;cursor:pointer;text-align:center;box-shadow:0 4px 16px rgba(46,125,50,.25);transition:transform .15s;position:relative;overflow:hidden" ontouchstart="this.style.transform='scale(0.96)'" ontouchend="this.style.transform=''">
+        <div style="position:absolute;top:-15px;right:-15px;width:60px;height:60px;border-radius:50%;background:rgba(255,255,255,.1)"></div>
+        <div style="font-size:28px;margin-bottom:4px">✅</div>
+        <div style="font-size:32px;font-weight:900;color:#fff;line-height:1">${d.completed || 0}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);font-weight:700;text-transform:uppercase;margin-top:6px;letter-spacing:1px">Completed</div>
       </div>
-      <div style="background:linear-gradient(135deg,#F3E5F5,#E1BEE7);border-radius:14px;padding:16px;text-align:center">
-        <div style="font-size:28px">📊</div>
-        <div style="font-size:28px;font-weight:900;color:#7B1FA2;line-height:1">${d.total || 0}</div>
-        <div style="font-size:12px;color:#555;font-weight:700;text-transform:uppercase;margin-top:4px">Total Jobs</div>
+      <div onclick="navigate('dashboard');filterAll()" style="background:linear-gradient(135deg,#7B1FA2,#9C27B0);border-radius:16px;padding:18px 16px;cursor:pointer;text-align:center;box-shadow:0 4px 16px rgba(123,31,162,.25);transition:transform .15s;position:relative;overflow:hidden" ontouchstart="this.style.transform='scale(0.96)'" ontouchend="this.style.transform=''">
+        <div style="position:absolute;top:-15px;right:-15px;width:60px;height:60px;border-radius:50%;background:rgba(255,255,255,.1)"></div>
+        <div style="font-size:28px;margin-bottom:4px">📊</div>
+        <div style="font-size:32px;font-weight:900;color:#fff;line-height:1">${d.total || 0}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);font-weight:700;text-transform:uppercase;margin-top:6px;letter-spacing:1px">Total Jobs</div>
+      </div>
+    </div>
+    <!-- Quick Action Tiles -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
+      <div onclick="navigate('dashboard');filterByStatus('under_repair')" style="background:#fff;border:2px solid #E5393520;border-radius:12px;padding:10px;cursor:pointer;text-align:center;transition:transform .15s" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
+        <div style="font-size:20px;font-weight:900;color:#E53935">${d.underRepair || 0}</div>
+        <div style="font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Under Repair</div>
+      </div>
+      <div onclick="navigate('dashboard');filterByStatus('repaired')" style="background:#fff;border:2px solid #43A04720;border-radius:12px;padding:10px;cursor:pointer;text-align:center;transition:transform .15s" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
+        <div style="font-size:20px;font-weight:900;color:#43A047">${d.repaired || 0}</div>
+        <div style="font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Repaired</div>
+      </div>
+      <div onclick="navigate('dashboard');filterByStatus('returned')" style="background:#fff;border:2px solid #B8860B20;border-radius:12px;padding:10px;cursor:pointer;text-align:center;transition:transform .15s" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
+        <div style="font-size:20px;font-weight:900;color:#B8860B">${d.returned || 0}</div>
+        <div style="font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Returned</div>
       </div>
     </div>
 

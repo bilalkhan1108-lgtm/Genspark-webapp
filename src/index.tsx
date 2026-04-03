@@ -289,6 +289,8 @@ app.get('/api/analytics', authMiddleware, async (c) => {
 app.get('/api/jobs', authMiddleware, async (c) => {
   const status   = c.req.query('status') || ''
   const search   = c.req.query('q')      || ''
+  const searchJob  = c.req.query('q_job')  || ''
+  const searchName = c.req.query('q_name') || ''
   const staffId  = c.req.query('staff_id') || ''
   const from     = c.req.query('from')   || ''
   const to       = c.req.query('to')     || ''
@@ -311,7 +313,17 @@ app.get('/api/jobs', authMiddleware, async (c) => {
     conds.push(`EXISTS (SELECT 1 FROM machines ms2 WHERE ms2.job_id=j.id AND ms2.assigned_staff_id=?)`)
     params.push(filterStaff)
   }
-  if (search) {
+  // Split search: q_job searches only job ID, q_name searches name/mobile
+  if (searchJob) {
+    conds.push('j.id LIKE ?')
+    params.push(`%${searchJob}%`)
+  }
+  if (searchName) {
+    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ?)')
+    params.push(`%${searchName}%`, `%${searchName}%`)
+  }
+  // Legacy combined search (fallback)
+  if (search && !searchJob && !searchName) {
     conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.id LIKE ?)')
     params.push(`%${search}%`, `%${search}%`, `%${search}%`)
   }
@@ -1547,7 +1559,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ADITION ELECTRIC SOLUTION v25</title>
+<title>ADITION ELECTRIC SOLUTION v27</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">
