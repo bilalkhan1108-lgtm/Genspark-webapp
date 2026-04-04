@@ -103,7 +103,7 @@ html, body {
   touch-action: pan-y;
   overscroll-behavior-y: contain;
   will-change: scroll-position;
-  padding-bottom: 64px; /* bottom nav height - reduced */
+  padding-bottom: 0; /* bottom nav is outside flex, no extra padding needed */
 }
 
 /* ── Bottom navigation ─────────────────────────────────────────────────────── */
@@ -113,10 +113,9 @@ html, body {
   background: #1a1a2e;
   border-top: 1px solid rgba(255,255,255,.08);
   flex-shrink: 0;
-  height: 64px;
-  position: sticky;
-  bottom: 0;
-  bottom: env(safe-area-inset-bottom);
+  height: 56px;
+  min-height: 56px;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   z-index: 100;
 }
 .nav-btn {
@@ -827,7 +826,7 @@ select.form-input { padding-right: 32px; cursor: pointer; }
 /* ── PWA standalone optimizations ─────────────────────────────────────────── */
 @media (display-mode: standalone) {
   .app-header { padding-top: env(safe-area-inset-top); height: calc(56px + env(safe-area-inset-top)); }
-  .bottom-nav { padding-bottom: env(safe-area-inset-bottom); height: calc(64px + env(safe-area-inset-bottom)); }
+  .bottom-nav { padding-bottom: env(safe-area-inset-bottom); }
 }
 
 /* ── Touch target enforcement ──────────────────────────────────────────────── */

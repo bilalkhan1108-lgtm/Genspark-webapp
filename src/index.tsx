@@ -240,14 +240,16 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   ])
 
   // Revenue data for admin dashboard
-  let revenueData: any = { todayRevenue: 0, monthRevenue: 0, totalRevenue: 0, pendingDues: 0 }
+  let revenueData: any = { todayRevenue: 0, monthRevenue: 0, totalRevenue: 0, pendingDues: 0, onlineTotal: 0, cashTotal: 0 }
   let monthlyRevenue: any[] = []
   if (isAdmin) {
-    const [todayRev, monthRev, totalRev, pendDues, monthlyRev] = await Promise.all([
+    const [todayRev, monthRev, totalRev, pendDues, onlineRev, cashRev, monthlyRev] = await Promise.all([
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE DATE(j.created_at)=?`).bind(today).first<any>(),
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE j.created_at>=?`).bind(monthStart).first<any>(),
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j`).first<any>(),
       c.env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN m.status != 'returned' THEN m.charges * m.quantity ELSE 0 END),0) - COALESCE(SUM(DISTINCT j.received_amount),0) AS amt FROM jobs j LEFT JOIN machines m ON m.job_id=j.id WHERE j.status != 'delivered'`).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE j.payment_method='online'`).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE j.payment_method='cash' OR j.payment_method IS NULL`).first<any>(),
       c.env.DB.prepare(`
         SELECT strftime('%Y-%m', j.created_at) AS month,
                COUNT(DISTINCT j.id) AS jobs,
@@ -264,6 +266,8 @@ app.get('/api/analytics', authMiddleware, async (c) => {
       monthRevenue: monthRev?.amt || 0,
       totalRevenue: totalRev?.amt || 0,
       pendingDues: Math.max(0, pendDues?.amt || 0),
+      onlineTotal: onlineRev?.amt || 0,
+      cashTotal: cashRev?.amt || 0,
     }
     monthlyRevenue = monthlyRev.results || []
   }
@@ -1559,7 +1563,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ADITION ELECTRIC SOLUTION v27</title>
+<title>ADITION ELECTRIC SOLUTION v28</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">

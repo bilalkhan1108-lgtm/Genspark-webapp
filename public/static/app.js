@@ -1,7 +1,8 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v27                       ║
-// ║  v27: Split search (job# / name+mobile), centered status badges,  ║
-// ║  QR left+details right layout, compact filters, enhanced tiles     ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v28                       ║
+// ║  v28: Centered status text, full-HD QR layout, 101x152mm address, ║
+// ║  job history timestamps, pending payment filter, search reset,    ║
+// ║  online/cash totals, no blank space above menu, mobile fixes      ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -425,6 +426,8 @@ function navigate(view, params = {}) {
   if (params.jobId) S.jobId = params.jobId;
   // Push history state so Android back button goes to jobs list, not app exit
   if (view === 'dashboard') {
+    // Reset search fields when navigating to dashboard
+    S.searchJob = ''; S.searchName = ''; S.search = '';
     history.pushState({ view: 'dashboard' }, '', '/?status=' + (S.filter || ''));
   } else if (view === 'detail') {
     history.pushState({ view: 'detail', jobId: S.jobId }, '', '/?job=' + S.jobId);
@@ -435,11 +438,15 @@ function navigate(view, params = {}) {
 }
 
 // Back button: instead of exiting app, go to jobs list
+// RESET search fields on back navigation so dashboard shows all jobs
 window.addEventListener('popstate', e => {
   const state = e.state;
   if (!S.token || !S.user) { render(); return; }
   if (!state || state.view === 'dashboard') {
-    S.view = 'dashboard'; render();
+    S.view = 'dashboard';
+    // Reset search on back to dashboard
+    S.searchJob = ''; S.searchName = ''; S.search = '';
+    render();
   } else if (state.view === 'detail' && state.jobId) {
     S.view = 'detail'; S.jobId = state.jobId; render();
   } else {
@@ -664,14 +671,14 @@ function dashboardHTML() {
   return `
   <div style="display:flex;flex-direction:column;height:100%">
     ${!isAdmin() ? `<div id="staff-notif-bar" style="display:none;padding:8px 12px 0"></div>` : ''}
-    ${isAdmin() ? `<div id="owner-dash" style="padding:10px 12px 4px;display:flex;gap:6px;flex-wrap:wrap"></div>` : ''}
-    <div style="display:flex;align-items:center;gap:6px;padding:6px 12px 2px;flex-shrink:0">
-      <button id="btn-open-filter" style="display:inline-flex;align-items:center;gap:4px;background:${hasFilter?'#E3F2FD':'#f5f5f5'};border:1px solid ${hasFilter?'#1E88E5':'#ddd'};border-radius:8px;padding:5px 10px;font-size:12px;font-weight:700;color:${hasFilter?'#1565C0':'#666'};cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:all .15s;line-height:1">
-        <i class="fas fa-filter" style="font-size:10px"></i> ${hasFilter ? activeFilterLabel : 'Filter'}
+    ${isAdmin() ? `<div id="owner-dash" style="padding:6px 10px 2px;display:flex;gap:5px;flex-wrap:wrap"></div>` : ''}
+    <div style="display:flex;align-items:center;justify-content:center;gap:4px;padding:3px 12px 1px;flex-shrink:0">
+      <button id="btn-open-filter" style="display:inline-flex;align-items:center;gap:3px;background:${hasFilter?'#E3F2FD':'transparent'};border:${hasFilter?'1px solid #1E88E5':'none'};border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700;color:${hasFilter?'#1565C0':'#888'};cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:all .15s;line-height:1;min-height:28px">
+        <i class="fas fa-filter" style="font-size:10px"></i>${hasFilter ? ' '+activeFilterLabel : ''}
       </button>
-      ${hasFilter ? `<button id="btn-clear-filter" style="display:inline-flex;align-items:center;gap:3px;background:#FFEBEE;border:1px solid #E53935;border-radius:6px;padding:4px 8px;font-size:11px;color:#E53935;font-weight:700;cursor:pointer;white-space:nowrap;line-height:1"><i class="fas fa-times" style="font-size:9px"></i></button>` : ''}
+      ${hasFilter ? `<button id="btn-clear-filter" style="display:inline-flex;align-items:center;background:#FFEBEE;border:1px solid #E53935;border-radius:5px;padding:2px 6px;font-size:10px;color:#E53935;font-weight:700;cursor:pointer;line-height:1;min-height:24px"><i class="fas fa-times" style="font-size:8px"></i></button>` : ''}
       <div style="flex:1"></div>
-      <span id="cc-count" style="font-size:11px;color:#999;font-weight:600"></span>
+      <span id="cc-count" style="font-size:10px;color:#aaa;font-weight:600"></span>
     </div>
     <div id="filter-panel" style="display:none;padding:8px 12px;background:#f8f9fb;border-bottom:1px solid #e0e0e0;flex-shrink:0">
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Filter by Status</div>
@@ -717,7 +724,7 @@ function dashboardHTML() {
       </button>
       ${S.myJobsOnly ? `<button id="btn-clear-my" class="btn-my-clear"><i class="fas fa-times"></i> All Jobs</button>` : ''}
     </div>` : ''}
-    <div style="display:flex;gap:8px;padding:6px 12px;flex-shrink:0">
+    <div style="display:flex;gap:6px;padding:4px 10px;flex-shrink:0">
       <div style="flex:1;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;overflow:hidden;transition:border-color .15s">
         <i class="fas fa-hashtag" style="position:absolute;left:12px;color:#1565C0;font-size:14px;pointer-events:none"></i>
         <input id="dash-search-job" type="search" class="search-input"
@@ -769,10 +776,10 @@ function _applyChipCounts(d) {
       { label: 'Delivered', value: d.completed || 0, icon: '🚚', bg: '#E3F2FD', color: '#1565C0', click: 'filterDone()' },
     ];
     ownerDash.innerHTML = tiles.map(t => `
-      <div onclick="${t.click}" style="flex:1;min-width:48px;background:${t.bg};border-radius:10px;padding:6px 4px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
-        <div style="font-size:14px">${t.icon}</div>
-        <div style="font-size:17px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
-        <div style="font-size:9px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.3px">${t.label}</div>
+      <div onclick="${t.click}" style="flex:1;min-width:44px;background:${t.bg};border-radius:8px;padding:4px 2px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
+        <div style="font-size:13px">${t.icon}</div>
+        <div style="font-size:16px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
+        <div style="font-size:8px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
       </div>`).join('');
   }
 }
@@ -1496,7 +1503,7 @@ function renderDetail() {
     <!-- Status Banner -->
     <div class="detail-banner" style="background:${color};display:flex;align-items:center;justify-content:space-between;padding:14px 18px">
       <span class="detail-job-id" style="font-size:22px;font-weight:900;color:#fff;letter-spacing:1px">${j.id}</span>
-      <span class="detail-status-label" style="background:rgba(255,255,255,.2);padding:6px 18px;border-radius:10px;font-weight:800;color:#fff;font-size:15px;letter-spacing:.5px;text-align:center">${sl(j.status)}</span>
+      <span class="detail-status-label" style="background:rgba(255,255,255,.2);padding:6px 18px;border-radius:10px;font-weight:800;color:#fff;font-size:15px;letter-spacing:.5px;text-align:center;display:inline-flex;align-items:center;justify-content:center;min-width:120px;min-height:34px">${sl(j.status)}</span>
     </div>
 
     <!-- Customer Card -->
@@ -1714,12 +1721,12 @@ function machineCardHTML(m, currentUserId) {
       </div>
       <div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:90px">
         ${isAssigned ? `
-        <select data-mid="${m.id}" class="status-sel" style="border:2px solid ${color};color:${color};border-radius:8px;padding:4px 6px;font-size:12px;font-weight:700;text-align:center;background:#fff;min-width:100px;cursor:pointer">
+        <select data-mid="${m.id}" class="status-sel" style="border:2px solid ${color};color:${color};border-radius:8px;padding:4px 6px;font-size:12px;font-weight:700;text-align:center;text-align-last:center;background:#fff;min-width:110px;cursor:pointer;min-height:36px">
           <option value="under_repair" ${m.status==='under_repair'?'selected':''}>Under Repair</option>
           <option value="repaired"     ${m.status==='repaired'    ?'selected':''}>Repaired</option>
           <option value="returned"     ${m.status==='returned'    ?'selected':''}>Returned</option>
         </select>` : `
-        <span class="status-chip" style="background:${sb(m.status)};color:${color};border:1.5px solid ${color};display:inline-flex;align-items:center;justify-content:center;padding:4px 12px;border-radius:8px;font-size:12px;font-weight:700;white-space:nowrap;text-align:center">${sl(m.status)}</span>`}
+        <span class="status-chip" style="background:${sb(m.status)};color:${color};border:1.5px solid ${color};display:inline-flex;align-items:center;justify-content:center;padding:5px 14px;border-radius:8px;font-size:12px;font-weight:700;white-space:nowrap;text-align:center;min-width:90px;min-height:30px;box-sizing:border-box">${sl(m.status)}</span>`}
         ${isAdmin() ? `<div style="font-size:14px;font-weight:800;color:${m.status==='returned'?'#999':'#1a1a2e'};text-align:center;white-space:nowrap${m.status==='returned'?';text-decoration:line-through':''}">${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:10px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
       </div>
     </div>
@@ -2188,7 +2195,7 @@ async function showJobHistory(j) {
           <div style="background:#f8f9fa;border-radius:10px;padding:10px 14px;border-left:3px solid ${color}">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">
               <span style="font-weight:700;color:#1a1a2e;font-size:14px">${esc(ev.action)}</span>
-              <span style="font-size:11px;color:#999">${fmtDate(ev.created_at)}</span>
+              <span style="font-size:11px;color:#999">${ev.created_at ? new Date(ev.created_at).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''}</span>
             </div>
             ${ev.detail ? `<div style="font-size:13px;color:#555;margin-top:4px">${esc(ev.detail)}</div>` : ''}
             <div style="font-size:12px;color:#aaa;margin-top:3px">
@@ -2829,8 +2836,8 @@ function jobCardPrintHTML(j) {
         <div style="color:rgba(255,255,255,.7);font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Job Number</div>
         <div style="color:#fff;font-size:32px;font-weight:900;letter-spacing:3px;line-height:1.1">${j.id}</div>
       </div>
-      <div style="text-align:center">
-        <div style="color:#fff;font-size:18px;font-weight:800;background:rgba(0,0,0,.2);padding:6px 20px;border-radius:10px;letter-spacing:1px;display:inline-flex;align-items:center;justify-content:center;min-width:120px">${sl(j.status)}</div>
+      <div style="text-align:center;display:flex;flex-direction:column;align-items:center">
+        <div style="color:#fff;font-size:18px;font-weight:800;background:rgba(0,0,0,.2);padding:8px 24px;border-radius:10px;letter-spacing:1px;display:inline-flex;align-items:center;justify-content:center;min-width:140px;min-height:40px;text-align:center;box-sizing:border-box">${sl(j.status)}</div>
         <div style="color:rgba(255,255,255,.7);font-size:12px;margin-top:4px;font-weight:600">${fmtDate(j.created_at)}</div>
       </div>
     </div>`;
@@ -2890,7 +2897,7 @@ function jobCardPrintHTML(j) {
         <div style="flex:1;min-width:0">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:3px">
             <div style="font-size:26px;font-weight:800;color:#1a1a2e;line-height:1.2;flex:1;min-width:0;word-break:break-word">${i+1}. ${esc(m.product_name)}${m.quantity>1?` <span style="color:#888;font-size:20px;font-weight:600">x${m.quantity}</span>`:''}</div>
-            <div style="background:${mColor};color:#fff;border-radius:8px;padding:5px 16px;font-size:14px;font-weight:800;white-space:nowrap;letter-spacing:.5px;flex-shrink:0;text-align:center;display:inline-flex;align-items:center;justify-content:center;min-width:100px">${sl(m.status)}</div>
+            <div style="background:${mColor};color:#fff;border-radius:8px;padding:6px 18px;font-size:14px;font-weight:800;white-space:nowrap;letter-spacing:.5px;flex-shrink:0;text-align:center;display:inline-flex;align-items:center;justify-content:center;min-width:120px;min-height:34px;box-sizing:border-box">${sl(m.status)}</div>
           </div>
           ${m.product_complaint ? `<div style="font-size:20px;color:#666;line-height:1.2">${esc(m.product_complaint)}</div>` : ''}
           ${m.work_done ? `<div style="font-size:18px;color:#2E7D32;font-weight:600">✅ ${esc(m.work_done)}</div>` : ''}
@@ -2934,25 +2941,7 @@ function jobCardPrintHTML(j) {
   // ── 6. PAYMENT SECTION: QR code → Payment Details → Notices → Tracking QR+Link ──
   const paymentBlock = showPayment ? `
     <div style="margin:0 30px 10px">
-      <!-- Row 1: QR left + Payment Details right -->
-      <div style="display:flex;gap:14px;margin-bottom:10px;align-items:stretch">
-        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;background:#f8fff8;border:2px solid #43A047;border-radius:12px;padding:14px;flex-shrink:0;min-width:220px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:180px;height:180px;border-radius:10px;border:2px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:16px;color:#2E7D32;margin-top:8px;font-weight:900;text-align:center">💳 Scan to Pay</div>
-          <div style="font-size:20px;color:#2E7D32;font-weight:900">${fmtRs(balance)}</div>
-          <div style="font-size:12px;color:#555;margin-top:2px">UPI: 9375940444@okbizaxis</div>
-        </div>
-        <div style="flex:1;background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:14px;display:flex;flex-direction:column;justify-content:center">
-          <div style="font-size:15px;font-weight:800;color:#2E7D32;margin-bottom:10px">🏦 Bank Details</div>
-          <table style="border-collapse:collapse;font-size:15px;width:100%">
-            <tr><td style="color:#555;padding:5px 0;width:65px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-            <tr><td style="color:#555;padding:5px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank of India</td></tr>
-            <tr><td style="color:#555;padding:5px 0;font-weight:600">A/C</td><td style="font-weight:700">37321811864</td></tr>
-            <tr><td style="color:#555;padding:5px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
-          </table>
-        </div>
-      </div>
-      <!-- Row 2: Notices -->
+      <!-- Row 1: Notices (top) -->
       <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:12px;margin-bottom:10px">
         <div style="font-size:14px;font-weight:900;color:#E65100;margin-bottom:6px">⚠️ Important Notices</div>
         <div style="font-size:13px;color:#5D4037;line-height:1.5">
@@ -2961,11 +2950,29 @@ function jobCardPrintHTML(j) {
           3. Any damage or loss during repair is the <strong>customer's responsibility</strong>.
         </div>
       </div>
-      <!-- Row 3: Tracking QR + Link -->
+      <!-- Row 2: Full-HD QR left + Payment Details right -->
+      <div style="display:flex;gap:14px;margin-bottom:10px;align-items:stretch">
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;background:#f8fff8;border:2px solid #43A047;border-radius:12px;padding:16px;flex-shrink:0;min-width:260px">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:220px;height:220px;border-radius:12px;border:3px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
+          <div style="font-size:18px;color:#2E7D32;margin-top:10px;font-weight:900;text-align:center">💳 Scan to Pay</div>
+          <div style="font-size:24px;color:#2E7D32;font-weight:900">${fmtRs(balance)}</div>
+          <div style="font-size:13px;color:#555;margin-top:3px">UPI: 9375940444@okbizaxis</div>
+        </div>
+        <div style="flex:1;background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:16px;display:flex;flex-direction:column;justify-content:center">
+          <div style="font-size:16px;font-weight:800;color:#2E7D32;margin-bottom:12px">🏦 Bank Details</div>
+          <table style="border-collapse:collapse;font-size:16px;width:100%">
+            <tr><td style="color:#555;padding:6px 0;width:70px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+            <tr><td style="color:#555;padding:6px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank of India</td></tr>
+            <tr><td style="color:#555;padding:6px 0;font-weight:600">A/C</td><td style="font-weight:700">37321811864</td></tr>
+            <tr><td style="color:#555;padding:6px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
+          </table>
+        </div>
+      </div>
+      <!-- Row 3: Tracking QR + Link (bottom) -->
       <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px">
         <div style="font-size:13px;font-weight:800;color:#1565C0;margin-bottom:6px">🔗 Track Your Job Online</div>
         <div style="display:flex;align-items:center;gap:10px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:72px;height:72px;border-radius:8px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(printTrackUrl)}" style="width:80px;height:80px;border-radius:8px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
           <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
         </div>
       </div>
@@ -3931,7 +3938,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v27.0<br>
+      ✨ adition™ since 1984 · v28.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -4111,77 +4118,98 @@ function bindTrack() {
 async function printAddressLabel(j) {
   toast('Generating address label…', 'info');
   try {
-    // Create off-screen canvas at 101mm × 152mm (approximately 382×574 px at 96dpi, we use 2x for quality)
-    const W = 764; // 101mm * 2x at ~96dpi ≈ 382*2
-    const H = 1148; // 152mm * 2x at ~96dpi ≈ 574*2
+    // Create off-screen canvas at 101mm × 152mm
+    // At 300 DPI: 101mm = 1193px, 152mm = 1795px
+    // Using 3x multiplier for high quality print
+    const W = 1193; // 101mm at 300dpi
+    const H = 1795; // 152mm at 300dpi
     const canvas = document.createElement('canvas');
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, W, H);
 
-    let y = 40;
-    const padX = 40;
+    let y = 60;
+    const padX = 60;
+    const maxTextW = W - padX * 2;
 
-    // --- TO section --- (18pt equivalent at 2x = 36px)
+    // --- TO section ---
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 30px "Segoe UI", Arial, sans-serif'; // ~15pt at 2x
-    ctx.fillText('To,', padX, y); y += 40;
+    ctx.font = 'bold 40px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('To,', padX, y); y += 55;
 
-    // Variable-size customer name (18pt target → 36px at 2x, adaptive down if long)
+    // Customer name — 22pt target (at 300dpi ~66px), adaptive down if very long
     ctx.fillStyle = '#1a1a2e';
     const nameLen = (j.snap_name||'').length;
-    const nameSize = nameLen > 25 ? 34 : nameLen > 18 ? 40 : nameLen > 12 ? 48 : 56; // adaptive: 18pt→56px, shrinks for long names
+    let nameSize = 66; // 22pt at 300dpi
+    if (nameLen > 30) nameSize = 48;
+    else if (nameLen > 22) nameSize = 54;
+    else if (nameLen > 16) nameSize = 60;
     ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
-    const nameLines = wrapText(ctx, j.snap_name || '', W - padX * 2);
-    nameLines.forEach(line => { ctx.fillText(line, padX, y); y += nameSize + 8; });
-    y += 6;
-
-    // Address (10pt → 20px at 2x, slightly larger for readability)
-    if (j.snap_address) {
-      ctx.fillStyle = '#333333';
-      ctx.font = '500 24px "Segoe UI", Arial, sans-serif'; // ~12pt
-      const addrLines = wrapText(ctx, j.snap_address, W - padX * 2);
-      addrLines.forEach(line => { ctx.fillText(line, padX, y); y += 30; });
-    }
+    const nameLines = wrapText(ctx, j.snap_name || '', maxTextW);
+    nameLines.forEach(line => { ctx.fillText(line, padX, y); y += nameSize + 10; });
     y += 10;
 
-    // Mobile numbers
+    // Address — variable size, auto-shrink if too long
+    if (j.snap_address) {
+      ctx.fillStyle = '#333333';
+      let addrSize = 36; // ~12pt
+      ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
+      let addrLines = wrapText(ctx, j.snap_address, maxTextW);
+      // If too many lines, shrink font
+      if (addrLines.length > 4) {
+        addrSize = 30;
+        ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
+        addrLines = wrapText(ctx, j.snap_address, maxTextW);
+      }
+      addrLines.forEach(line => { ctx.fillText(line, padX, y); y += addrSize + 8; });
+    }
+    y += 14;
+
+    // Mobile number (large, clear)
     ctx.fillStyle = '#1565C0';
-    ctx.font = 'bold 30px "Segoe UI", Arial, sans-serif'; // ~15pt
-    ctx.fillText('M: ' + (j.snap_mobile || ''), padX, y); y += 38;
+    ctx.font = 'bold 44px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('M: ' + (j.snap_mobile || ''), padX, y); y += 54;
     if (j.snap_mobile2) {
-      ctx.font = 'bold 24px "Segoe UI", Arial, sans-serif';
-      ctx.fillText('Alt: ' + j.snap_mobile2, padX, y); y += 32;
+      ctx.font = 'bold 36px "Segoe UI", Arial, sans-serif';
+      ctx.fillText('Alt: ' + j.snap_mobile2, padX, y); y += 46;
     }
 
-    // ---- FROM section fixed at bottom ----
-    // Calculate remaining space and place FROM section at the bottom
-    const fromStartY = Math.max(y + 30, H - 200); // At least 200px from bottom
+    // ---- FROM section fixed at bottom-right ----
+    // Ensure FROM never overflows the page; place it at bottom
+    const fromBlockH = 180; // fixed height for FROM section
+    const fromStartY = Math.max(y + 40, H - fromBlockH - 30);
     y = fromStartY;
 
-    // Divider
-    ctx.strokeStyle = '#999999';
-    ctx.setLineDash([6, 4]);
+    // Divider line
+    ctx.strokeStyle = '#aaaaaa';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([8, 5]);
     ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(W - padX, y); ctx.stroke();
     ctx.setLineDash([]);
-    y += 24;
+    y += 30;
 
-    // From label (10pt → 20px at 2x)
+    // From label (10pt → 30px at 300dpi), right-aligned
+    const fromX = W - padX; // right edge
+    ctx.textAlign = 'right';
+
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 20px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('From,', padX, y); y += 28;
+    ctx.font = 'bold 26px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('From,', fromX, y); y += 32;
 
     // Shop name (10pt bold)
     ctx.fillStyle = '#E53935';
-    ctx.font = '900 22px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('ADITION ELECTRIC SOLUTION', padX, y); y += 28;
+    ctx.font = '900 28px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('ADITION ELECTRIC SOLUTION', fromX, y); y += 32;
 
-    // Address (8pt → 16px at 2x)
+    // Address (8pt → 24px at 300dpi)
     ctx.fillStyle = '#555555';
-    ctx.font = '500 16px "Segoe UI", Arial, sans-serif';
-    const fromLines = ['Opp. Metropolitan Court Gate 2,', 'Gheekanta, Ahmedabad 380001', 'M: 7801990001'];
-    fromLines.forEach(line => { ctx.fillText(line, padX, y); y += 20; });
+    ctx.font = '500 22px "Segoe UI", Arial, sans-serif';
+    const fromLines = ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'];
+    fromLines.forEach(line => { ctx.fillText(line, fromX, y); y += 26; });
+
+    // Reset text alignment
+    ctx.textAlign = 'left';
 
     // Convert to blob
     const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', 0.95));
@@ -4313,6 +4341,17 @@ async function loadAdminDash() {
         <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:12px;text-align:center">
           <div style="font-size:11px;color:rgba(255,255,255,.5);font-weight:700;text-transform:uppercase">Pending Dues</div>
           <div style="font-size:20px;font-weight:900;color:#FF8A65">${fmtRs(d.pendingDues || 0)}</div>
+        </div>
+      </div>
+      <!-- Online vs Cash breakdown -->
+      <div style="display:flex;gap:10px;margin-top:10px">
+        <div style="flex:1;background:rgba(67,160,71,.15);border:1px solid rgba(67,160,71,.3);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-size:10px;color:rgba(255,255,255,.5);font-weight:700;text-transform:uppercase;letter-spacing:.5px">💳 Online</div>
+          <div style="font-size:18px;font-weight:900;color:#81C784">${fmtRs(d.onlineTotal || 0)}</div>
+        </div>
+        <div style="flex:1;background:rgba(255,183,77,.15);border:1px solid rgba(255,183,77,.3);border-radius:10px;padding:10px;text-align:center">
+          <div style="font-size:10px;color:rgba(255,255,255,.5);font-weight:700;text-transform:uppercase;letter-spacing:.5px">💵 Cash</div>
+          <div style="font-size:18px;font-weight:900;color:#FFB74D">${fmtRs(d.cashTotal || 0)}</div>
         </div>
       </div>
     </div>
