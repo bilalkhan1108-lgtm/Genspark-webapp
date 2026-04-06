@@ -1,8 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v28                       ║
-// ║  v28: Centered status text, full-HD QR layout, 101x152mm address, ║
-// ║  job history timestamps, pending payment filter, search reset,    ║
-// ║  online/cash totals, no blank space above menu, mobile fixes      ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v30                       ║
+// ║  v30: Staff RBAC (rights-based), machine qty sum, adaptive addr  ║
+// ║  label, payment QR 4-col table, filter UI, mic fix, category     ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -160,12 +159,16 @@ API.interceptors.response.use(r => r, err => {
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
-const isAdmin   = () => S.user?.role === 'admin' || S.user?.role === 'supervisor';
-const isAdminOnly = () => S.user?.role === 'admin';
-const isSupervisor = () => S.user?.role === 'supervisor';
+// Role hierarchy: admin(4) > director(3) > manager(2) > staff(1)
+const ROLE_LEVELS = { admin: 4, director: 3, manager: 2, staff: 1 };
+const roleLevel = (r) => ROLE_LEVELS[r] || 0;
+const isAdmin   = () => roleLevel(S.user?.role) >= 2; // manager and above
+const isAdminOnly = () => S.user?.role === 'admin'; // only admin
+const isDirector = () => S.user?.role === 'admin' || S.user?.role === 'director';
+const isStaff   = () => S.user?.role === 'staff';
 function hasSuperRight(right) {
-  if (S.user?.role === 'admin') return true;
-  if (S.user?.role === 'supervisor') {
+  if (roleLevel(S.user?.role) >= 2) return true; // admin/director/manager have all rights
+  if (S.user?.role === 'staff') {
     try {
       const rights = typeof S.user.supervisor_rights === 'string' ? JSON.parse(S.user.supervisor_rights) : (S.user.supervisor_rights || []);
       return rights.includes(right);
@@ -173,6 +176,9 @@ function hasSuperRight(right) {
   }
   return false;
 }
+// Role display labels
+const ROLE_LABEL = { admin: 'Admin', director: 'Director', manager: 'Manager', staff: 'Staff' };
+const roleLabel = (r) => ROLE_LABEL[r] || r;
 const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -350,11 +356,23 @@ function compressImage(file, maxW = 1080, quality = 0.82) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function startAudioRecorder(onData) {
   try {
-    S.audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    // Check if mediaDevices API is available (requires HTTPS or localhost)
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast('Microphone not available. Use HTTPS.', 'error');
+      return false;
+    }
+    // Request permission explicitly — this triggers the browser permission dialog
+    S.audioStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
     S.audioChunks = [];
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg';
+    // Detect supported MIME types across browsers (Chrome, Safari, Firefox)
+    let mimeType = 'audio/webm';
+    if (typeof MediaRecorder !== 'undefined') {
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) mimeType = 'audio/webm;codecs=opus';
+      else if (MediaRecorder.isTypeSupported('audio/webm')) mimeType = 'audio/webm';
+      else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
+      else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) mimeType = 'audio/ogg;codecs=opus';
+      else if (MediaRecorder.isTypeSupported('audio/ogg')) mimeType = 'audio/ogg';
+    }
     S.audioRecorder = new MediaRecorder(S.audioStream, { mimeType });
     S.audioRecorder.ondataavailable = e => { if (e.data.size > 0) S.audioChunks.push(e.data); };
     S.audioRecorder.onstop = () => {
@@ -366,7 +384,16 @@ async function startAudioRecorder(onData) {
     S.audioRecorder.start(250);
     return true;
   } catch (err) {
-    toast('Microphone access denied', 'error');
+    console.error('Microphone error:', err);
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      toast('Microphone permission denied. Please allow in browser settings.', 'error');
+    } else if (err.name === 'NotFoundError') {
+      toast('No microphone found on this device.', 'error');
+    } else if (err.name === 'NotReadableError') {
+      toast('Microphone is already in use by another app.', 'error');
+    } else {
+      toast('Microphone error: ' + (err.message || 'Unknown'), 'error');
+    }
     return false;
   }
 }
@@ -555,13 +582,20 @@ function headerHTML() {
 // BOTTOM NAV
 // ─────────────────────────────────────────────────────────────────────────────
 function bottomNavHTML() {
+  const role = S.user?.role;
+  const lvl = roleLevel(role);
   const tabs = [
     { id:'dashboard', icon:'fa-list-ul',    label:'Jobs'    },
-    ...(isAdmin() ? [{ id:'newjob', icon:'fa-plus-circle', label:'New Job' }] : []),
-    ...(isAdmin() ? [{ id:'admindash', icon:'fa-chart-line', label:'Dashboard' }] : []),
-    ...(isAdminOnly() ? [{ id:'requests', icon:'fa-bell', label:'Requests', badge: true }] : []),
-    ...(isAdminOnly() ? [{ id:'staff',    icon:'fa-users',     label:'Staff'   }] : []),
+    ...(lvl >= 2 ? [{ id:'newjob', icon:'fa-plus-circle', label:'New Job' }]
+       : hasSuperRight('create_jobs') ? [{ id:'newjob', icon:'fa-plus-circle', label:'New Job' }] : []),
+    // Dashboard: admin + director only
+    ...(lvl >= 3 ? [{ id:'admindash', icon:'fa-chart-line', label:'Dashboard' }] : []),
+    // Requests: admin only
+    ...(role === 'admin' ? [{ id:'requests', icon:'fa-bell', label:'Requests', badge: true }] : []),
+    // Staff menu: admin only
+    ...(role === 'admin' ? [{ id:'staff',    icon:'fa-users',     label:'Staff'   }] : []),
     { id:'reports',  icon:'fa-chart-bar', label:'Reports' },
+    // Settings: admin only; others see "More" with limited options
     { id:'settings',  icon:'fa-cog',         label:'More'    },
   ];
   return `
@@ -582,10 +616,10 @@ function bottomNavHTML() {
 function viewHTML() {
   switch (S.view) {
     case 'dashboard': return dashboardHTML();
-    case 'newjob':    return isAdmin() ? newJobHTML() : deniedHTML();
-    case 'admindash': return isAdmin() ? adminDashHTML() : deniedHTML();
+    case 'newjob':    return (isAdmin() || hasSuperRight('create_jobs')) ? newJobHTML() : deniedHTML();
+    case 'admindash': return isDirector() ? adminDashHTML() : deniedHTML();
     case 'detail':    return `<div id="detail-root" class="view-pad"><div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div></div>`;
-    case 'staff':     return isAdminOnly() ? staffHTML()    : deniedHTML();
+    case 'staff':     return (S.user?.role === 'admin') ? staffHTML() : deniedHTML();
     case 'reports':   return reportsHTML();
     case 'requests':  return isAdminOnly() ? requestsHTML() : deniedHTML();
     case 'settings':  return settingsHTML();
@@ -651,12 +685,12 @@ function bindView() {
 
   switch (S.view) {
     case 'dashboard': loadJobs();                                               break;
-    case 'newjob':    if (isAdmin()) bindNewJob();                               break;
-    case 'admindash': if (isAdmin()) loadAdminDash();                           break;
+    case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) bindNewJob(); break;
+    case 'admindash': if (isDirector()) loadAdminDash();                        break;
     case 'detail':    loadDetail();                                             break;
-    case 'staff':     if (isAdminOnly()) loadStaff();                           break;
-    case 'reports':   if (isAdminOnly()) loadStaffForSelects(); bindReports(); break;
-    case 'requests':  if (isAdminOnly()) loadRequests();                       break;
+    case 'staff':     if (S.user?.role === 'admin') loadStaff();                break;
+    case 'reports':   if (S.user?.role === 'admin') loadStaffForSelects(); bindReports(); break;
+    case 'requests':  if (S.user?.role === 'admin') loadRequests();             break;
     case 'settings':  bindSettings();                                          break;
     case 'track':     bindTrack();                                             break;
   }
@@ -1021,7 +1055,7 @@ function jobRowHTML(j) {
       <div class="job-name">${esc(j.snap_name)}</div>
       <div class="job-row-foot">
         <span class="job-meta"><i class="fas fa-tools"></i> ${j.machine_count || 0}</span>
-        ${isAdmin()
+        ${hasSuperRight('view_financials')
           ? `<span class="job-balance" style="color:${balance>0?'#E53935':'#43A047'}">Bal: ${fmtRs(balance)}</span>`
           : `<span class="job-meta" style="color:#888">${fmtDate(j.created_at)}</span>`}
       </div>
@@ -1053,6 +1087,15 @@ function newJobHTML() {
         <input id="nj-name" type="text" class="form-input" placeholder="Full name" autocomplete="off">
       </div>
       <div class="form-group">
+        <label class="form-label">Customer Category</label>
+        <select id="nj-category" class="form-input">
+          <option value="Salon" selected>Salon</option>
+          <option value="Consumer">Consumer</option>
+          <option value="Retailer">Retailer</option>
+          <option value="N/A">N/A</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label class="form-label">Address</label>
         <textarea id="nj-address" class="form-input" rows="2" placeholder="Street, area, city"></textarea>
       </div>
@@ -1060,7 +1103,7 @@ function newJobHTML() {
         <label class="form-label">Internal Note</label>
         <textarea id="nj-note" class="form-input" rows="2" placeholder="Remarks for this job…"></textarea>
       </div>
-      ${isAdmin() ? `
+      ${hasSuperRight('view_financials') ? `
       <div class="form-group">
         <label class="form-label">Received Amount (₹)</label>
         <input id="nj-received" type="number" class="form-input" placeholder="0" min="0" inputmode="decimal">
@@ -1124,7 +1167,7 @@ function newJobHTML() {
       </div>
 
       <!-- 5. Repair Amount -->
-      ${isAdmin() ? `
+      ${hasSuperRight('view_financials') ? `
       <div class="form-group">
         <label class="form-label">Repair Amount (₹)</label>
         <input id="nj-charges" type="number" class="form-input" placeholder="0" min="0" inputmode="decimal">
@@ -1178,6 +1221,8 @@ function bindNewJob() {
         document.getElementById('nj-name').value    = r.data.name    || '';
         document.getElementById('nj-mobile2').value = r.data.mobile2 || '';
         document.getElementById('nj-address').value = r.data.address || '';
+        const catSel = document.getElementById('nj-category');
+        if (catSel && r.data.category) catSel.value = r.data.category;
         toast('Customer found — auto-filled ✅', 'success');
         // Auto-focus product name after auto-fill
         setTimeout(() => document.getElementById('nj-product')?.focus(), 150);
@@ -1236,6 +1281,7 @@ function bindNewJob() {
                  document.getElementById('nj-mobile').value='${c.mobile||''}';
                  document.getElementById('nj-mobile2').value='${c.mobile2||''}';
                  document.getElementById('nj-address').value='${esc(c.address||'')}';
+                 var _cs=document.getElementById('nj-category'); if(_cs) _cs.value='${esc(c.category||'Salon')}';
                  document.getElementById('nj-suggest-box')?.remove();
                })()">
             <b>${esc(c.name)}</b> <span style="color:#888;font-size:12px">${c.mobile||''}</span>
@@ -1384,7 +1430,7 @@ function bindNewJob() {
     _sugCache.addProduct(product);
     const _njComp = document.getElementById('nj-complaint')?.value.trim();
     if (_njComp) _sugCache.addComplaint(_njComp, product);
-    const _njChg = isAdmin() ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0;
+    const _njChg = hasSuperRight('view_financials') ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0;
     if (_njChg > 0) _sugCache.addAmount(_njChg, product);
 
     const btn = document.getElementById('nj-submit');
@@ -1396,15 +1442,16 @@ function bindNewJob() {
       customer_mobile:  mobile,
       customer_mobile2: document.getElementById('nj-mobile2')?.value.trim() || null,
       customer_address: document.getElementById('nj-address')?.value.trim() || null,
+      customer_category: document.getElementById('nj-category')?.value || 'Salon',
       note:             document.getElementById('nj-note')?.value.trim()    || null,
-      received_amount:  isAdmin() ? (parseFloat(document.getElementById('nj-received')?.value) || 0) : 0,
+      received_amount:  hasSuperRight('view_financials') ? (parseFloat(document.getElementById('nj-received')?.value) || 0) : 0,
     };
     const machData = {
       product_name:      product,
       product_complaint: document.getElementById('nj-complaint')?.value.trim() || null,
-      charges:           isAdmin() ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0,
+      charges:           hasSuperRight('view_financials') ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0,
       quantity:          parseInt(document.getElementById('nj-qty')?.value) || 1,
-      assigned_staff_id: isAdmin() ? (document.getElementById('nj-staff')?.value || null) : null,
+      assigned_staff_id: hasSuperRight('manage_machines') ? (document.getElementById('nj-staff')?.value || null) : null,
     };
     const imgFile = document.getElementById('nj-img')?.files[0];
     const audioBlob = _njAudioBlob;
@@ -1510,13 +1557,14 @@ function renderDetail() {
     <div class="card mt-3">
       <div class="section-header" style="margin-bottom:6px">
         <h3 class="section-title" style="margin:0"><i class="fas fa-user-circle" style="color:${color}"></i> Customer</h3>
-        ${isAdmin() ? `<button id="btn-edit-customer" class="btn-sm btn-orange" style="padding:4px 10px;font-size:12px"><i class="fas fa-edit"></i> Edit</button>` : ''}
+        ${hasSuperRight('edit_jobs') ? `<button id="btn-edit-customer" class="btn-sm btn-orange" style="padding:4px 10px;font-size:12px"><i class="fas fa-edit"></i> Edit</button>` : ''}
       </div>
       <div class="info-row">
         <i class="fas fa-user info-icon" style="color:${color}"></i>
         <span class="info-val fw-bold">${esc(j.snap_name)}</span>
+        ${j.snap_category ? `<span style="background:#E8EAF6;color:#3949AB;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;margin-left:8px">${esc(j.snap_category)}</span>` : ''}
       </div>
-      ${isAdmin() ? `
+      ${hasSuperRight('view_jobs') ? `
       <div class="info-row">
         <i class="fas fa-phone info-icon" style="color:${color}"></i>
         <a href="tel:${j.snap_mobile}" class="info-link">${j.snap_mobile}</a>
@@ -1536,21 +1584,19 @@ function renderDetail() {
         <i class="fas fa-calendar info-icon" style="color:${color}"></i>
         <span class="info-val text-muted">${fmtDate(j.created_at)}</span>
       </div>
-      ${isAdmin() && j.snap_mobile ? `
+      ${hasSuperRight('view_jobs') && j.snap_mobile ? `
       <div class="info-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
         <button id="btn-cust-history" class="btn-sm" style="background:#7B1FA2;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer">
           <i class="fas fa-history"></i> Customer History
         </button>
-        <button id="btn-wa-reminder" class="btn-sm" style="background:#25D366;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer">
+        ${hasSuperRight('share') ? `<button id="btn-wa-reminder" class="btn-sm" style="background:#25D366;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer">
           <i class="fab fa-whatsapp"></i> Send Reminder
-        </button>
+        </button>` : ''}
       </div>` : ''}
     </div>
 
-    <!-- Financial Panel
-         Admin: Total + Received + Balance + edit received amount
-         Staff: HIDDEN — no financial data visible -->
-    ${isAdmin() ? `
+    <!-- Financial Panel — RBAC: visible with view_financials right -->
+    ${hasSuperRight('view_financials') ? `
     <div class="card mt-3 financial-panel">
       <div class="fin-title"><i class="fas fa-rupee-sign"></i> Financials</div>
         ${(j.machines||[]).filter(m => (parseFloat(m.charges)||0) > 0).map(m => {
@@ -1624,16 +1670,17 @@ function renderDetail() {
       </div>` : ''}
     </div>` : ''}
 
-    <!-- Action Buttons — RBAC: admin/manager can download/share/deliver; admin-only delete -->
+    <!-- Action Buttons — RBAC: rights-based access per staff -->
     <div class="action-row mt-3">
-      ${isAdmin() ? `
+      ${hasSuperRight('deliver') ? `
       <button id="btn-deliver" class="action-btn" style="background:#1E88E5">
         <i class="fas fa-check-double"></i><span>Deliver</span>
       </button>` : ''}
-      ${isAdmin() ? `
+      ${hasSuperRight('download') ? `
       <button id="btn-jobcard" class="action-btn" style="background:#43A047">
         <i class="fas fa-file-image"></i><span>Download</span>
-      </button>
+      </button>` : ''}
+      ${hasSuperRight('share') ? `
       <button id="btn-share" class="action-btn" style="background:#25D366">
         <i class="fab fa-whatsapp"></i><span>Share</span>
       </button>
@@ -1654,9 +1701,9 @@ function renderDetail() {
       <div class="section-header">
         <h3 class="section-title" style="margin:0">
           <i class="fas fa-tools" style="color:#E53935"></i> Machines
-          <span id="machine-counter" style="background:#E53935;color:#fff;border-radius:12px;padding:2px 10px;font-size:13px;font-weight:800;margin-left:8px">Total: ${(j.machines||[]).length}</span>
+          <span id="machine-counter" style="background:#E53935;color:#fff;border-radius:12px;padding:2px 10px;font-size:13px;font-weight:800;margin-left:8px">Total: ${(j.machines||[]).reduce((s,m) => s + (parseInt(m.quantity)||1), 0)}</span>
         </h3>
-        <button id="btn-add-machine" class="btn-sm btn-red">+ Add</button>
+        ${hasSuperRight('manage_machines') ? `<button id="btn-add-machine" class="btn-sm btn-red">+ Add</button>` : ''}
       </div>
       <div id="machines-container">
         ${(j.machines||[]).length
@@ -1727,7 +1774,7 @@ function machineCardHTML(m, currentUserId) {
           <option value="returned"     ${m.status==='returned'    ?'selected':''}>Returned</option>
         </select>` : `
         <span class="status-chip" style="background:${sb(m.status)};color:${color};border:1.5px solid ${color};display:inline-flex;align-items:center;justify-content:center;padding:5px 14px;border-radius:8px;font-size:12px;font-weight:700;white-space:nowrap;text-align:center;min-width:90px;min-height:30px;box-sizing:border-box">${sl(m.status)}</span>`}
-        ${isAdmin() ? `<div style="font-size:14px;font-weight:800;color:${m.status==='returned'?'#999':'#1a1a2e'};text-align:center;white-space:nowrap${m.status==='returned'?';text-decoration:line-through':''}">${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:10px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
+        ${hasSuperRight('view_financials') ? `<div style="font-size:14px;font-weight:800;color:${m.status==='returned'?'#999':'#1a1a2e'};text-align:center;white-space:nowrap${m.status==='returned'?';text-decoration:line-through':''}">${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:10px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
       </div>
     </div>
 
@@ -1736,7 +1783,7 @@ function machineCardHTML(m, currentUserId) {
       ${(m.images||[]).map(img => `
       <div class="img-wrap" onclick="openImageViewer('${img.url}')" style="cursor:pointer">
         <img data-auth-src="${img.url}" class="img-thumb" loading="lazy" alt="">
-        ${isAdmin() ? `<button class="img-del-btn" data-iid="${img.id}" title="Remove" onclick="event.stopPropagation()">×</button>` : ''}
+        ${hasSuperRight('edit_jobs') ? `<button class="img-del-btn" data-iid="${img.id}" title="Remove" onclick="event.stopPropagation()">×</button>` : ''}
       </div>`).join('')}
       <!-- Camera button — part of machine details, available to all -->
       <label class="img-add-btn" title="Take / pick photo">
@@ -1751,14 +1798,14 @@ function machineCardHTML(m, currentUserId) {
       ${audioUrl ? `
       <div style="flex:1;display:flex;align-items:center;gap:6px;min-width:0">
         <audio controls data-audio-src="${audioUrl}" class="audio-player" preload="none" style="flex:1;min-width:0"></audio>
-        ${isAdmin() ? `<button data-mid="${m.id}" class="btn-sm btn-red btn-del-audio" title="Delete"><i class="fas fa-trash"></i></button>` : ''}
+        ${hasSuperRight('edit_jobs') ? `<button data-mid="${m.id}" class="btn-sm btn-red btn-del-audio" title="Delete"><i class="fas fa-trash"></i></button>` : ''}
       </div>` : `
       <button data-mid="${m.id}" class="btn-sm btn-orange btn-rec-audio">
         <i class="fas fa-microphone"></i> Voice Note
       </button>`}
     </div>
 
-    ${isAdmin() ? `
+    ${hasSuperRight('edit_jobs') ? `
     <div class="machine-actions">
       <button data-mid="${m.id}" class="btn-sm btn-orange btn-edit-m">
         <i class="fas fa-edit"></i> Edit
@@ -2061,6 +2108,15 @@ function showEditCustomerModal(j) {
       <label class="form-label">Address</label>
       <textarea id="ec-address" class="form-input" rows="2">${esc(j.snap_address || '')}</textarea>
     </div>
+    <div class="form-group">
+      <label class="form-label">Customer Category</label>
+      <select id="ec-category" class="form-input">
+        <option value="Salon" ${(j.snap_category||'Salon')==='Salon'?'selected':''}>Salon</option>
+        <option value="Consumer" ${j.snap_category==='Consumer'?'selected':''}>Consumer</option>
+        <option value="Retailer" ${j.snap_category==='Retailer'?'selected':''}>Retailer</option>
+        <option value="N/A" ${j.snap_category==='N/A'?'selected':''}>N/A</option>
+      </select>
+    </div>
     <div class="modal-footer">
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
       <button id="ec-save" class="btn-primary"><i class="fas fa-save"></i> Save</button>
@@ -2071,18 +2127,20 @@ function showEditCustomerModal(j) {
     const mobile  = document.getElementById('ec-mobile')?.value.trim();
     const mobile2 = document.getElementById('ec-mobile2')?.value.trim() || null;
     const address = document.getElementById('ec-address')?.value.trim() || null;
+    const category = document.getElementById('ec-category')?.value || 'Salon';
     if (!name || !mobile) { toast('Name and mobile are required', 'error'); return; }
     try {
       // Save customer data immediately via customer API using mobile as unique key
       if (j.customer_id) {
-        await API.put(`/api/customers/${j.customer_id}`, { name, mobile, mobile2, address });
+        await API.put(`/api/customers/${j.customer_id}`, { name, mobile, mobile2, address, category });
       }
       // Also update snap fields on this job
       await API.put(`/api/jobs/${j.id}`, {
         snap_name: name,
         snap_mobile: mobile,
         snap_mobile2: mobile2,
-        snap_address: address
+        snap_address: address,
+        snap_category: category
       });
       closeModal();
       toast('Customer info saved ✅', 'success');
@@ -2663,7 +2721,7 @@ function showEditMachineModal(m) {
       <label class="form-label">Complaint / Issue</label>
       <textarea id="em-comp" class="form-input" rows="2">${esc(m.product_complaint||'')}</textarea>
     </div>
-    ${isAdmin() ? `
+    ${hasSuperRight('view_financials') ? `
     <div class="form-group">
       <label class="form-label">Repair Amount (₹)</label>
       <input id="em-chg" type="number" class="form-input" min="0"
@@ -2675,7 +2733,7 @@ function showEditMachineModal(m) {
              value="${m.quantity||1}" inputmode="numeric"
              onfocus="if(this.value==='1')this.value=''" onblur="if(!this.value)this.value='1'">
     </div>
-    ${isAdmin() ? `
+    ${hasSuperRight('manage_machines') ? `
     <div class="form-group">
       <label class="form-label">Assign Staff</label>
       <select id="em-staff" class="form-input">
@@ -2695,9 +2753,9 @@ function showEditMachineModal(m) {
       await API.put(`/api/machines/${m.id}`, {
         product_name:      prod,
         product_complaint: document.getElementById('em-comp')?.value.trim() || null,
-        ...(isAdmin() ? { charges: parseFloat(document.getElementById('em-chg')?.value) || 0 } : {}),
+        ...(hasSuperRight('view_financials') ? { charges: parseFloat(document.getElementById('em-chg')?.value) || 0 } : {}),
         quantity:          parseInt(document.getElementById('em-qty')?.value) || 1,
-        ...(isAdmin() ? { assigned_staff_id: document.getElementById('em-staff')?.value || null } : {}),
+        ...(hasSuperRight('manage_machines') ? { assigned_staff_id: document.getElementById('em-staff')?.value || null } : {}),
       });
       closeModal(); toast('Machine updated', 'success'); await loadDetail();
     } catch (_) { toast('Update failed', 'error'); }
@@ -2734,7 +2792,7 @@ function showDeliveryModal(j) {
       <label class="form-label">Delivery Address <span style="color:#999;font-size:12px">(optional)</span></label>
       <textarea id="dm-addr" class="form-input" rows="2"></textarea>
     </div>
-    ${isAdmin() ? `
+    ${hasSuperRight('view_financials') ? `
     <div class="form-group">
       <label class="form-label">Discount/Deduction (₹)</label>
       <input id="dm-disc" type="number" class="form-input" value="${j.discount||0}"
@@ -2780,7 +2838,7 @@ function showDeliveryModal(j) {
         delivery_courier_name:    document.getElementById('dm-courier')?.value || null,
         delivery_tracking:        document.getElementById('dm-track')?.value   || null,
         delivery_address:         document.getElementById('dm-addr')?.value    || null,
-        ...(isAdmin() ? {
+        ...(hasSuperRight('view_financials') ? {
           received_amount: parseFloat(document.getElementById('dm-recv')?.value) || 0,
           discount: parseFloat(document.getElementById('dm-disc')?.value) || 0,
           payment_method: document.getElementById('dm-paymethod')?.value || 'cash',
@@ -2869,6 +2927,10 @@ function jobCardPrintHTML(j) {
           <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Date</div>
           <div style="font-size:21px;color:#444;font-weight:600">${fmtDate(j.created_at)}</div>
         </div>
+        ${j.snap_category ? `<div>
+          <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Category</div>
+          <div style="font-size:18px;color:#3949AB;font-weight:700">${esc(j.snap_category)}</div>
+        </div>` : ''}
       </div>
     </div>
     <div style="border-top:2px solid #f0f0f0;margin:0 30px 4px"></div>`;
@@ -2878,7 +2940,7 @@ function jobCardPrintHTML(j) {
     <div style="padding:8px 30px 4px">
       <div style="font-size:11px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:3px;margin-bottom:8px;display:flex;align-items:center;gap:8px">
         <span style="width:24px;height:2px;background:#E53935;display:inline-block"></span>
-        PRODUCTS (${(j.machines||[]).length})
+        PRODUCTS (${(j.machines||[]).reduce((s,m) => s + (parseInt(m.quantity)||1), 0)})
         <span style="flex:1;height:1px;background:#e0e0e0"></span>
       </div>
       ${(j.machines||[]).map((m,i) => {
@@ -2938,10 +3000,10 @@ function jobCardPrintHTML(j) {
       <span style="font-weight:800;color:#F57F17">📝 Note:</span> ${esc(j.note)}
     </div>` : '';
 
-  // ── 6. PAYMENT SECTION: QR code → Payment Details → Notices → Tracking QR+Link ──
+  // ── 6. PAYMENT SECTION: 1-row 4-column table: Notice|QR|Bank|TrackingQR ──
   const paymentBlock = showPayment ? `
     <div style="margin:0 30px 10px">
-      <!-- Row 1: Notices (top) -->
+      <!-- Notice banner (top) -->
       <div style="background:linear-gradient(135deg,#fff8e1,#ffecb3);border:2px solid #FFA000;border-radius:12px;padding:12px;margin-bottom:10px">
         <div style="font-size:14px;font-weight:900;color:#E65100;margin-bottom:6px">⚠️ Important Notices</div>
         <div style="font-size:13px;color:#5D4037;line-height:1.5">
@@ -2950,35 +3012,46 @@ function jobCardPrintHTML(j) {
           3. Any damage or loss during repair is the <strong>customer's responsibility</strong>.
         </div>
       </div>
-      <!-- Row 2: Full-HD QR left + Payment Details right -->
-      <div style="display:flex;gap:14px;margin-bottom:10px;align-items:stretch">
-        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;background:#f8fff8;border:2px solid #43A047;border-radius:12px;padding:16px;flex-shrink:0;min-width:260px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:220px;height:220px;border-radius:12px;border:3px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:18px;color:#2E7D32;margin-top:10px;font-weight:900;text-align:center">💳 Scan to Pay</div>
-          <div style="font-size:24px;color:#2E7D32;font-weight:900">${fmtRs(balance)}</div>
-          <div style="font-size:13px;color:#555;margin-top:3px">UPI: 9375940444@okbizaxis</div>
-        </div>
-        <div style="flex:1;background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:16px;display:flex;flex-direction:column;justify-content:center">
-          <div style="font-size:16px;font-weight:800;color:#2E7D32;margin-bottom:12px">🏦 Bank Details</div>
-          <table style="border-collapse:collapse;font-size:16px;width:100%">
-            <tr><td style="color:#555;padding:6px 0;width:70px;font-weight:600">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
-            <tr><td style="color:#555;padding:6px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank of India</td></tr>
-            <tr><td style="color:#555;padding:6px 0;font-weight:600">A/C</td><td style="font-weight:700">37321811864</td></tr>
-            <tr><td style="color:#555;padding:6px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
-          </table>
-        </div>
-      </div>
-      <!-- Row 3: Tracking QR + Link (bottom) -->
-      <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px">
-        <div style="font-size:13px;font-weight:800;color:#1565C0;margin-bottom:6px">🔗 Track Your Job Online</div>
-        <div style="display:flex;align-items:center;gap:10px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(printTrackUrl)}" style="width:80px;height:80px;border-radius:8px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
-          <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
-        </div>
-      </div>
+      <!-- 1-row 4-column table: PayQR | BankDetails | Amount | TrackQR -->
+      <table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin-bottom:10px">
+        <tr>
+          <!-- Col 1: Payment QR (full-HD) -->
+          <td style="width:30%;vertical-align:top;background:#f8fff8;border:2px solid #43A047;border-radius:12px;padding:14px;text-align:center">
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=upi%3A%2F%2Fpay%3Fpa%3D9375940444%40okbizaxis%26pn%3DADITION%2BELECTRIC%2BSOLUTION%26am%3D${balance}%26cu%3DINR" style="width:200px;height:200px;border-radius:10px;border:3px solid #43A047;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
+            <div style="font-size:16px;color:#2E7D32;margin-top:8px;font-weight:900">💳 Scan to Pay</div>
+            <div style="font-size:22px;color:#2E7D32;font-weight:900">${fmtRs(balance)}</div>
+            <div style="font-size:12px;color:#555;margin-top:2px">UPI: 9375940444@okbizaxis</div>
+          </td>
+          <!-- Col 2: Bank Details -->
+          <td style="width:35%;vertical-align:top;background:linear-gradient(135deg,#f8f9fb,#f0f2f5);border:2px solid #43A047;border-radius:12px;padding:14px">
+            <div style="font-size:15px;font-weight:800;color:#2E7D32;margin-bottom:10px">🏦 Bank Details</div>
+            <table style="border-collapse:collapse;font-size:15px;width:100%">
+              <tr><td style="color:#555;padding:5px 0;font-weight:600;width:50px">Phone</td><td style="font-weight:700;color:#1565C0">7801990001</td></tr>
+              <tr><td style="color:#555;padding:5px 0;font-weight:600">Bank</td><td style="font-weight:700">State Bank of India</td></tr>
+              <tr><td style="color:#555;padding:5px 0;font-weight:600">A/C</td><td style="font-weight:700">37321811864</td></tr>
+              <tr><td style="color:#555;padding:5px 0;font-weight:600">IFSC</td><td style="font-weight:700">SBIN0001353</td></tr>
+            </table>
+          </td>
+          <!-- Col 3: Amount Summary -->
+          <td style="width:15%;vertical-align:top;background:#f0f8f0;border:2px solid #43A047;border-radius:12px;padding:14px;text-align:center">
+            <div style="font-size:12px;color:#888;font-weight:700;text-transform:uppercase;margin-bottom:6px">Total</div>
+            <div style="font-size:20px;font-weight:900;color:#1a1a2e">${fmtRs(total)}</div>
+            ${received > 0 ? `<div style="font-size:12px;color:#888;font-weight:700;text-transform:uppercase;margin-top:8px">Received</div>
+            <div style="font-size:18px;font-weight:800;color:#43A047">${fmtRs(received)}</div>` : ''}
+            <div style="font-size:12px;color:#888;font-weight:700;text-transform:uppercase;margin-top:8px">Balance Due</div>
+            <div style="font-size:22px;font-weight:900;color:#E53935">${fmtRs(balance)}</div>
+          </td>
+          <!-- Col 4: Tracking QR + Link -->
+          <td style="width:20%;vertical-align:top;background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:14px;text-align:center">
+            <div style="font-size:12px;font-weight:800;color:#1565C0;margin-bottom:6px">🔗 Track Online</div>
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(printTrackUrl)}" style="width:140px;height:140px;border-radius:8px;border:2px solid #1565C0;background:#fff" crossorigin="anonymous" onerror="this.style.display='none'">
+            <div style="font-size:10px;color:#555;word-break:break-all;line-height:1.2;margin-top:6px">${printTrackUrl}</div>
+          </td>
+        </tr>
+      </table>
     </div>` : `
     <div style="margin:0 30px 10px">
-      <div style="background:linear-gradient(135deg,${isDelivered?'#E3F2FD,#BBDEFB':'#E8F5E9,#C8E6C9'};border:2px solid ${isDelivered?'#1E88E5':'#43A047'};border-radius:12px;padding:16px;margin-bottom:10px">
+      <div style="background:linear-gradient(135deg,${isDelivered?'#E3F2FD,#BBDEFB':'#E8F5E9,#C8E6C9'});border:2px solid ${isDelivered?'#1E88E5':'#43A047'};border-radius:12px;padding:16px;margin-bottom:10px">
         <div style="font-size:16px;font-weight:900;color:${isDelivered?'#1565C0':'#2E7D32'};margin-bottom:8px">
           ${isDelivered ? '📦 Delivered' : '✅ Fully Paid'}
         </div>
@@ -3002,7 +3075,7 @@ function jobCardPrintHTML(j) {
       <div style="background:linear-gradient(135deg,#E3F2FD,#e8eaf6);border:2px solid #1565C0;border-radius:12px;padding:12px">
         <div style="font-size:13px;font-weight:800;color:#1565C0;margin-bottom:6px">🔗 Track Your Job Online</div>
         <div style="display:flex;align-items:center;gap:10px">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(printTrackUrl)}" style="width:72px;height:72px;border-radius:8px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(printTrackUrl)}" style="width:80px;height:80px;border-radius:8px;border:2px solid #1565C0;background:#fff;flex-shrink:0" crossorigin="anonymous" onerror="this.style.display='none'">
           <div style="font-size:12px;color:#555;word-break:break-all;line-height:1.3">${printTrackUrl}</div>
         </div>
       </div>
@@ -3425,7 +3498,7 @@ function renderStaffList() {
   el.innerHTML = S.staff.map(s => `
   <div class="staff-card">
     <div>
-      <div class="staff-name">${esc(s.name)} <span class="role-badge ${s.role==='admin'?'role-admin':s.role==='supervisor'?'role-manager':'role-staff'}">${s.role}</span></div>
+      <div class="staff-name">${esc(s.name)} <span class="role-badge ${s.role==='admin'?'role-admin':s.role==='director'?'role-director':s.role==='manager'?'role-manager':'role-staff'}">${roleLabel(s.role)}</span></div>
       <div class="staff-email">${esc(s.email)}</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center">
@@ -3472,13 +3545,14 @@ function showAddStaffModal() {
       <input id="as-pass" type="password" class="form-input" placeholder="Temporary password"></div>
     <div class="form-group"><label class="form-label">Role</label>
       <select id="as-role" class="form-input">
-        <option value="staff">Staff</option>
-        <option value="supervisor">Supervisor</option>
-        <option value="admin">Admin</option>
+        <option value="staff">Staff (Assignable Rights)</option>
+        <option value="manager">Manager (All except Staff, Dashboard, Settings)</option>
+        <option value="director">Director (All except Staff Menu)</option>
+        <option value="admin">Admin (Full Rights)</option>
       </select>
     </div>
     <div id="as-rights-wrap" style="display:none">
-      <label class="form-label">Supervisor Rights</label>
+      <label class="form-label">Staff Rights (select which rights to grant)</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
         ${['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports'].map(r =>
           `<label style="display:flex;align-items:center;gap:4px;background:#f0f4ff;border:1px solid #d0d8f0;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;user-select:none">
@@ -3492,7 +3566,7 @@ function showAddStaffModal() {
     </div>`);
   // Show/hide rights panel
   document.getElementById('as-role')?.addEventListener('change', e => {
-    document.getElementById('as-rights-wrap').style.display = e.target.value === 'supervisor' ? 'block' : 'none';
+    document.getElementById('as-rights-wrap').style.display = e.target.value === 'staff' ? 'block' : 'none';
   });
   document.getElementById('as-save')?.addEventListener('click', async () => {
     const name  = document.getElementById('as-name')?.value.trim();
@@ -3500,7 +3574,7 @@ function showAddStaffModal() {
     const pass  = document.getElementById('as-pass')?.value;
     if (!name || !email || !pass) { toast('All fields required', 'error'); return; }
     const role = document.getElementById('as-role')?.value || 'staff';
-    const rights = role === 'supervisor' ? Array.from(document.querySelectorAll('.as-right-cb:checked')).map(cb => cb.value) : null;
+    const rights = role === 'staff' ? Array.from(document.querySelectorAll('.as-right-cb:checked')).map(cb => cb.value) : null;
     try {
       await API.post('/api/staff', { name, email, password: pass, role, supervisor_rights: rights });
       closeModal(); toast('Staff added', 'success'); await loadStaff();
@@ -3519,8 +3593,9 @@ function showEditStaffModal(s) {
     <div class="form-row-2">
       <div class="form-group"><label class="form-label">Role</label>
         <select id="es-role" class="form-input">
-          <option value="staff" ${s.role==='staff'?'selected':''}>Staff</option>
-          <option value="supervisor" ${s.role==='supervisor'?'selected':''}>Supervisor</option>
+          <option value="staff" ${s.role==='staff'?'selected':''}>Staff (Assignable)</option>
+          <option value="manager" ${s.role==='manager'?'selected':''}>Manager</option>
+          <option value="director" ${s.role==='director'?'selected':''}>Director</option>
           <option value="admin" ${s.role==='admin'?'selected':''}>Admin</option>
         </select>
       </div>
@@ -3531,8 +3606,8 @@ function showEditStaffModal(s) {
         </select>
       </div>
     </div>
-    <div id="es-rights-wrap" style="display:${s.role==='supervisor'?'block':'none'}">
-      <label class="form-label">Supervisor Rights</label>
+    <div id="es-rights-wrap" style="display:${s.role==='staff'?'block':'none'}">
+      <label class="form-label">Staff Rights (select which rights to grant)</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
         ${(() => { let existingRights = []; try { existingRights = typeof s.supervisor_rights === 'string' ? JSON.parse(s.supervisor_rights||'[]') : (s.supervisor_rights||[]); } catch{} return ['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports'].map(r =>
           `<label style="display:flex;align-items:center;gap:4px;background:#f0f4ff;border:1px solid #d0d8f0;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;user-select:none">
@@ -3545,11 +3620,11 @@ function showEditStaffModal(s) {
       <button id="es-save" class="btn-primary">Save Changes</button>
     </div>`);
   document.getElementById('es-role')?.addEventListener('change', e => {
-    document.getElementById('es-rights-wrap').style.display = e.target.value === 'supervisor' ? 'block' : 'none';
+    document.getElementById('es-rights-wrap').style.display = e.target.value === 'staff' ? 'block' : 'none';
   });
   document.getElementById('es-save')?.addEventListener('click', async () => {
     const selectedRole = document.getElementById('es-role')?.value;
-    const rights = selectedRole === 'supervisor' ? Array.from(document.querySelectorAll('.es-right-cb:checked')).map(cb => cb.value) : null;
+    const rights = selectedRole === 'staff' ? Array.from(document.querySelectorAll('.es-right-cb:checked')).map(cb => cb.value) : null;
     const body = {
       name:   document.getElementById('es-name')?.value.trim(),
       email:  document.getElementById('es-email')?.value.trim(),
@@ -3890,9 +3965,9 @@ function settingsHTML() {
     <div class="card" style="margin-bottom:12px">
       <div class="section-title"><i class="fas fa-user"></i> Logged In As</div>
       <div style="font-size:16px;font-weight:700">${esc(S.user?.name||'')}</div>
-      <div style="font-size:13px;color:#888;margin-top:2px">${esc(S.user?.email||'')} · ${S.user?.role||''}</div>
+      <div style="font-size:13px;color:#888;margin-top:2px">${esc(S.user?.email||'')} · ${roleLabel(S.user?.role||'')}</div>
     </div>
-    ${isAdmin() ? `
+    ${isAdminOnly() ? `
     <div class="card" style="margin-bottom:12px" id="job-prefix-card">
       <div class="section-title"><i class="fas fa-hashtag" style="color:#1E88E5"></i> Job Number Format</div>
       <div style="font-size:13px;color:#888;margin-bottom:10px">Configure job ID prefix and digit count (e.g. AD-0001)</div>
@@ -4118,118 +4193,159 @@ function bindTrack() {
 async function printAddressLabel(j) {
   toast('Generating address label…', 'info');
   try {
-    // Create off-screen canvas at 101mm × 152mm
-    // At 300 DPI: 101mm = 1193px, 152mm = 1795px
-    // Using 3x multiplier for high quality print
-    const W = 1193; // 101mm at 300dpi
-    const H = 1795; // 152mm at 300dpi
+    // 101mm × 152mm at 300 DPI = 1193px × 1795px
+    const W = 1193;
+    const H = 1795;
     const canvas = document.createElement('canvas');
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, W, H);
 
-    let y = 60;
     const padX = 60;
     const maxTextW = W - padX * 2;
 
-    // --- TO section ---
-    ctx.fillStyle = '#888888';
-    ctx.font = 'bold 40px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('To,', padX, y); y += 55;
+    // ── FIXED FROM block at bottom-right (measure height first) ──
+    const fromBlockH = 160;
+    const fromDividerY = H - fromBlockH - 30;
 
-    // Customer name — 22pt target (at 300dpi ~66px), adaptive down if very long
-    ctx.fillStyle = '#1a1a2e';
-    const nameLen = (j.snap_name||'').length;
-    let nameSize = 66; // 22pt at 300dpi
-    if (nameLen > 30) nameSize = 48;
-    else if (nameLen > 22) nameSize = 54;
-    else if (nameLen > 16) nameSize = 60;
-    ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
-    const nameLines = wrapText(ctx, j.snap_name || '', maxTextW);
-    nameLines.forEach(line => { ctx.fillText(line, padX, y); y += nameSize + 10; });
-    y += 10;
+    // Available height for TO section = everything above FROM divider - margins
+    const toAvailH = fromDividerY - 80; // 60 top pad + 20 margin
 
-    // Address — variable size, auto-shrink if too long
-    if (j.snap_address) {
-      ctx.fillStyle = '#333333';
-      let addrSize = 36; // ~12pt
-      ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
-      let addrLines = wrapText(ctx, j.snap_address, maxTextW);
-      // If too many lines, shrink font
-      if (addrLines.length > 4) {
-        addrSize = 30;
+    // ── AI-ADAPTIVE: measure all TO content, then scale to fill space ──
+    const nameText = j.snap_name || 'Customer';
+    const addrText = j.snap_address || '';
+    const mobText = 'M: ' + (j.snap_mobile || '');
+    const mob2Text = j.snap_mobile2 ? 'Alt: ' + j.snap_mobile2 : '';
+
+    // Binary search for optimal scale factor to fill available space
+    function measureToBlock(scale) {
+      let h = 0;
+      const toSize = Math.round(40 * scale);
+      h += toSize + 15 * scale; // "To," label
+      
+      const nameSize = Math.round(66 * scale);
+      ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
+      const nameLines = wrapText(ctx, nameText, maxTextW);
+      h += nameLines.length * (nameSize + 10 * scale) + 15 * scale;
+      
+      if (addrText) {
+        const addrSize = Math.round(40 * scale);
         ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
-        addrLines = wrapText(ctx, j.snap_address, maxTextW);
+        const addrLines = wrapText(ctx, addrText, maxTextW);
+        h += addrLines.length * (addrSize + 8 * scale) + 15 * scale;
       }
-      addrLines.forEach(line => { ctx.fillText(line, padX, y); y += addrSize + 8; });
+      
+      const mobSize = Math.round(48 * scale);
+      h += mobSize + 12 * scale;
+      if (mob2Text) h += Math.round(40 * scale) + 10 * scale;
+      
+      return h;
     }
-    y += 14;
 
-    // Mobile number (large, clear)
+    // Find best scale: start at 1.0, try up to 2.5x, find largest that fits
+    let bestScale = 1.0;
+    for (let s = 2.5; s >= 0.6; s -= 0.05) {
+      if (measureToBlock(s) <= toAvailH) {
+        bestScale = s;
+        break;
+      }
+    }
+
+    // ── RENDER TO section with adaptive scale ──
+    let y = 60;
+    const toSize = Math.round(40 * bestScale);
+    ctx.fillStyle = '#888888';
+    ctx.font = `bold ${toSize}px "Segoe UI", Arial, sans-serif`;
+    ctx.fillText('To,', padX, y); y += toSize + Math.round(15 * bestScale);
+
+    // Name — large, bold, centered
+    const nameSize = Math.round(66 * bestScale);
+    ctx.fillStyle = '#1a1a2e';
+    ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
+    const nameLines = wrapText(ctx, nameText, maxTextW);
+    ctx.textAlign = 'center';
+    nameLines.forEach(line => {
+      ctx.fillText(line, W / 2, y);
+      y += nameSize + Math.round(10 * bestScale);
+    });
+    ctx.textAlign = 'left';
+    y += Math.round(15 * bestScale);
+
+    // Address — centered, adaptive
+    if (addrText) {
+      const addrSize = Math.round(40 * bestScale);
+      ctx.fillStyle = '#333333';
+      ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
+      const addrLines = wrapText(ctx, addrText, maxTextW);
+      ctx.textAlign = 'center';
+      addrLines.forEach(line => {
+        ctx.fillText(line, W / 2, y);
+        y += addrSize + Math.round(8 * bestScale);
+      });
+      ctx.textAlign = 'left';
+      y += Math.round(15 * bestScale);
+    }
+
+    // Mobile — large, left-aligned, blue
+    const mobSize = Math.round(48 * bestScale);
     ctx.fillStyle = '#1565C0';
-    ctx.font = 'bold 44px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('M: ' + (j.snap_mobile || ''), padX, y); y += 54;
-    if (j.snap_mobile2) {
-      ctx.font = 'bold 36px "Segoe UI", Arial, sans-serif';
-      ctx.fillText('Alt: ' + j.snap_mobile2, padX, y); y += 46;
+    ctx.font = `bold ${mobSize}px "Segoe UI", Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(mobText, W / 2, y); y += mobSize + Math.round(12 * bestScale);
+    if (mob2Text) {
+      const mob2Size = Math.round(40 * bestScale);
+      ctx.font = `bold ${mob2Size}px "Segoe UI", Arial, sans-serif`;
+      ctx.fillText(mob2Text, W / 2, y); y += mob2Size + Math.round(10 * bestScale);
     }
+    ctx.textAlign = 'left';
 
-    // ---- FROM section fixed at bottom-right ----
-    // Ensure FROM never overflows the page; place it at bottom
-    const fromBlockH = 180; // fixed height for FROM section
-    const fromStartY = Math.max(y + 40, H - fromBlockH - 30);
-    y = fromStartY;
-
-    // Divider line
+    // ── DIVIDER LINE — placed just below TO content or at fromDividerY ──
+    const divY = Math.max(y + 20, fromDividerY);
     ctx.strokeStyle = '#aaaaaa';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([8, 5]);
-    ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(W - padX, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padX, divY); ctx.lineTo(W - padX, divY); ctx.stroke();
     ctx.setLineDash([]);
-    y += 30;
 
-    // From label (10pt → 30px at 300dpi), right-aligned
-    const fromX = W - padX; // right edge
+    // ── FROM section — right-aligned, fixed at bottom ──
+    let fy = divY + 30;
+    const fromX = W - padX;
     ctx.textAlign = 'right';
 
     ctx.fillStyle = '#888888';
     ctx.font = 'bold 26px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('From,', fromX, y); y += 32;
+    ctx.fillText('From,', fromX, fy); fy += 32;
 
-    // Shop name (10pt bold)
     ctx.fillStyle = '#E53935';
     ctx.font = '900 28px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('ADITION ELECTRIC SOLUTION', fromX, y); y += 32;
+    ctx.fillText('ADITION ELECTRIC SOLUTION', fromX, fy); fy += 32;
 
-    // Address (8pt → 24px at 300dpi)
     ctx.fillStyle = '#555555';
     ctx.font = '500 22px "Segoe UI", Arial, sans-serif';
-    const fromLines = ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'];
-    fromLines.forEach(line => { ctx.fillText(line, fromX, y); y += 26; });
+    ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'].forEach(line => {
+      ctx.fillText(line, fromX, fy); fy += 26;
+    });
 
-    // Reset text alignment
     ctx.textAlign = 'left';
 
-    // Convert to blob
+    // Convert to blob & share/download
     const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', 0.95));
     if (!blob) { toast('Failed to generate address label', 'error'); return; }
 
     const fileName = `Address_${j.id}.jpg`;
     const file = new File([blob], fileName, { type: 'image/jpeg' });
 
-    // Try Web Share API first (opens native share dialog on mobile)
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({ files: [file], title: `Address Label - ${j.id}`, text: `To: ${j.snap_name}` });
         toast('Address label shared', 'success');
         return;
       } catch (e) {
-        if (e.name === 'AbortError') return; // User cancelled
+        if (e.name === 'AbortError') return;
       }
     }
 
-    // Fallback: download
     const bUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = bUrl; a.download = fileName; a.style.display = 'none';
