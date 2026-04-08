@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v30                       ║
-// ║  v30: Staff RBAC (rights-based), machine qty sum, adaptive addr  ║
-// ║  label, payment QR 4-col table, filter UI, mic fix, category     ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v31                       ║
+// ║  v31: update_machine_status right, address fixes, job history DB ║
+// ║  fix deployed history, From font +4pt, left-align address        ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -236,6 +236,9 @@ function closeModal() {
   stopAudioRecorder();
 }
 window.closeModal = closeModal;
+window.showJobHistory = showJobHistory;
+window.navigate = navigate;
+window.S = S;
 // Expose global helpers used in inline onclick attributes
 window.setFilter  = setFilter;
 window.filterAll       = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0; loadJobs(); };
@@ -1749,8 +1752,9 @@ window.openImageViewer = openImageViewer;
 // ─────────────────────────────────────────────────────────────────────────────
 function machineCardHTML(m, currentUserId) {
   const color = sc(m.status);
-  const isAssigned = isAdmin() || (m.assigned_staff_id === currentUserId);
-  const staffNotAssigned = !isAdmin() && m.assigned_staff_id !== currentUserId;
+  const canUpdateStatus = hasSuperRight('update_machine_status');
+  const isAssigned = isAdmin() || (m.assigned_staff_id === currentUserId) || canUpdateStatus;
+  const staffNotAssigned = !isAdmin() && m.assigned_staff_id !== currentUserId && !canUpdateStatus;
   // Normalize audio URL: old records stored /api/images/audio/..., new ones /api/audio/...
   const audioUrl = m.audio_note_url
     ? m.audio_note_url.replace('/api/images/audio/', '/api/audio/')
@@ -2264,9 +2268,15 @@ async function showJobHistory(j) {
         </div>`;
       }).join('')}
     </div>`;
-  } catch (_) {
+  } catch (err) {
+    console.error('[AES] Job history load error:', err);
     const el = document.getElementById('jh-list');
-    if (el) el.innerHTML = `<p style="text-align:center;padding:16px;color:#888">Failed to load history</p>`;
+    if (el) el.innerHTML = `<div style="text-align:center;padding:16px;color:#E53935">
+      <i class="fas fa-exclamation-circle" style="font-size:24px;display:block;margin-bottom:8px"></i>
+      <p style="font-weight:700">Failed to load history</p>
+      <p style="font-size:12px;color:#888;margin-top:4px">The job history database may need to be initialized. Try again or contact admin.</p>
+      <button onclick="showJobHistory(S.job)" style="margin-top:10px;background:#1565C0;color:#fff;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;font-weight:700"><i class="fas fa-redo"></i> Retry</button>
+    </div>`;
   }
 
   // Share history via WhatsApp
@@ -3554,7 +3564,7 @@ function showAddStaffModal() {
     <div id="as-rights-wrap" style="display:none">
       <label class="form-label">Staff Rights (select which rights to grant)</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
-        ${['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports'].map(r =>
+        ${['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports','update_machine_status'].map(r =>
           `<label style="display:flex;align-items:center;gap:4px;background:#f0f4ff;border:1px solid #d0d8f0;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;user-select:none">
             <input type="checkbox" class="as-right-cb" value="${r}"> ${r.replace(/_/g,' ')}
           </label>`).join('')}
@@ -3609,7 +3619,7 @@ function showEditStaffModal(s) {
     <div id="es-rights-wrap" style="display:${s.role==='staff'?'block':'none'}">
       <label class="form-label">Staff Rights (select which rights to grant)</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
-        ${(() => { let existingRights = []; try { existingRights = typeof s.supervisor_rights === 'string' ? JSON.parse(s.supervisor_rights||'[]') : (s.supervisor_rights||[]); } catch{} return ['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports'].map(r =>
+        ${(() => { let existingRights = []; try { existingRights = typeof s.supervisor_rights === 'string' ? JSON.parse(s.supervisor_rights||'[]') : (s.supervisor_rights||[]); } catch{} return ['view_jobs','edit_jobs','create_jobs','view_financials','deliver','download','share','manage_machines','view_reports','update_machine_status'].map(r =>
           `<label style="display:flex;align-items:center;gap:4px;background:#f0f4ff;border:1px solid #d0d8f0;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;user-select:none">
             <input type="checkbox" class="es-right-cb" value="${r}" ${existingRights.includes(r)?'checked':''}> ${r.replace(/_/g,' ')}
           </label>`).join(''); })()}
@@ -4206,11 +4216,11 @@ async function printAddressLabel(j) {
     const maxTextW = W - padX * 2;
 
     // ── FIXED FROM block at bottom-right (measure height first) ──
-    const fromBlockH = 160;
+    const fromBlockH = 190;
     const fromDividerY = H - fromBlockH - 30;
 
     // Available height for TO section = everything above FROM divider - margins
-    const toAvailH = fromDividerY - 80; // 60 top pad + 20 margin
+    const toAvailH = fromDividerY - 120; // 100 top pad + 20 margin
 
     // ── AI-ADAPTIVE: measure all TO content, then scale to fill space ──
     const nameText = j.snap_name || 'Customer';
@@ -4253,11 +4263,14 @@ async function printAddressLabel(j) {
     }
 
     // ── RENDER TO section with adaptive scale ──
-    let y = 60;
+    // Move "To," down with more top padding so the top line of "T" is not clipped
+    let y = 100;
     const toSize = Math.round(40 * bestScale);
     ctx.fillStyle = '#888888';
     ctx.font = `bold ${toSize}px "Segoe UI", Arial, sans-serif`;
-    ctx.fillText('To,', padX, y); y += toSize + Math.round(15 * bestScale);
+    ctx.textAlign = 'center';
+    ctx.fillText('To,', W / 2, y); y += toSize + Math.round(10 * bestScale);
+    ctx.textAlign = 'left';
 
     // Name — large, bold, centered
     const nameSize = Math.round(66 * bestScale);
@@ -4267,36 +4280,34 @@ async function printAddressLabel(j) {
     ctx.textAlign = 'center';
     nameLines.forEach(line => {
       ctx.fillText(line, W / 2, y);
-      y += nameSize + Math.round(10 * bestScale);
+      y += nameSize + Math.round(8 * bestScale);
     });
     ctx.textAlign = 'left';
-    y += Math.round(15 * bestScale);
+    y += Math.round(10 * bestScale);
 
-    // Address — centered, adaptive
+    // Address — LEFT-ALIGNED after "To" (not centered), reduced gap from name
     if (addrText) {
       const addrSize = Math.round(40 * bestScale);
       ctx.fillStyle = '#333333';
       ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
       const addrLines = wrapText(ctx, addrText, maxTextW);
-      ctx.textAlign = 'center';
       addrLines.forEach(line => {
-        ctx.fillText(line, W / 2, y);
-        y += addrSize + Math.round(8 * bestScale);
+        ctx.fillText(line, padX, y);
+        y += addrSize + Math.round(6 * bestScale);
       });
-      ctx.textAlign = 'left';
-      y += Math.round(15 * bestScale);
+      y += Math.round(10 * bestScale);
     }
 
-    // Mobile — large, left-aligned, blue
+    // Mobile — centered, blue
     const mobSize = Math.round(48 * bestScale);
     ctx.fillStyle = '#1565C0';
     ctx.font = `bold ${mobSize}px "Segoe UI", Arial, sans-serif`;
     ctx.textAlign = 'center';
-    ctx.fillText(mobText, W / 2, y); y += mobSize + Math.round(12 * bestScale);
+    ctx.fillText(mobText, W / 2, y); y += mobSize + Math.round(10 * bestScale);
     if (mob2Text) {
       const mob2Size = Math.round(40 * bestScale);
       ctx.font = `bold ${mob2Size}px "Segoe UI", Arial, sans-serif`;
-      ctx.fillText(mob2Text, W / 2, y); y += mob2Size + Math.round(10 * bestScale);
+      ctx.fillText(mob2Text, W / 2, y); y += mob2Size + Math.round(8 * bestScale);
     }
     ctx.textAlign = 'left';
 
@@ -4314,17 +4325,17 @@ async function printAddressLabel(j) {
     ctx.textAlign = 'right';
 
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 26px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('From,', fromX, fy); fy += 32;
+    ctx.font = 'bold 30px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('From,', fromX, fy); fy += 36;
 
     ctx.fillStyle = '#E53935';
-    ctx.font = '900 28px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('ADITION ELECTRIC SOLUTION', fromX, fy); fy += 32;
+    ctx.font = '900 32px "Segoe UI", Arial, sans-serif';
+    ctx.fillText('ADITION ELECTRIC SOLUTION', fromX, fy); fy += 38;
 
     ctx.fillStyle = '#555555';
-    ctx.font = '500 22px "Segoe UI", Arial, sans-serif';
+    ctx.font = '500 26px "Segoe UI", Arial, sans-serif';
     ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'].forEach(line => {
-      ctx.fillText(line, fromX, fy); fy += 26;
+      ctx.fillText(line, fromX, fy); fy += 30;
     });
 
     ctx.textAlign = 'left';

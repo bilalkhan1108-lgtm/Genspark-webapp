@@ -156,6 +156,8 @@ async function ensureDbSchema(db: D1Database) {
         created_at TEXT DEFAULT (datetime('now'))
       )
     `).run().catch(() => {})
+    // Add user_id column to job_history if not present (v31)
+    await db.prepare(`ALTER TABLE job_history ADD COLUMN user_id INTEGER`).run().catch(() => {})
     // Performance indexes for high-volume operations (lakhs of jobs)
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_job ON job_history(job_id)`).run().catch(() => {})
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_created ON job_history(created_at)`).run().catch(() => {})
@@ -170,6 +172,19 @@ async function ensureDbSchema(db: D1Database) {
 // ── Job history helper — fire-and-forget, never blocks ───────────────────────
 async function logHistory(db: D1Database, jobId: string, action: string, detail: string, userName: string, userRole: string) {
   try {
+    // Ensure table exists before inserting (critical for first deploy)
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS job_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail TEXT,
+        user_name TEXT,
+        user_role TEXT,
+        user_id INTEGER,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `).run()
     await db.prepare(
       `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
     ).bind(jobId, action, detail, userName, userRole).run()
@@ -684,9 +699,10 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
   const machine = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(id).first<any>()
   if (!machine) return c.json({ error: 'Not found' }, 404)
 
-  // Staff can only update status if they are the assigned_staff
+  // Staff can only update status if they are the assigned_staff OR have update_machine_status right
   if (!isAdmin) {
-    if (machine.assigned_staff_id !== userId)
+    const canUpdateStatus = hasRight(c, 'update_machine_status')
+    if (machine.assigned_staff_id !== userId && !canUpdateStatus)
       return c.json({ error: 'Not assigned to this machine' }, 403)
     if ('status' in body) {
       const extraFields: string[] = []
@@ -977,7 +993,7 @@ app.get('/api/my-notifications', authMiddleware, async (c) => {
 app.get('/api/jobs/:id/history', authMiddleware, async (c) => {
   const jobId = c.req.param('id')
   try {
-    // Ensure job_history table exists (lazy create)
+    // Ensure job_history table exists (lazy create — critical for deployed model)
     await c.env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS job_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -986,14 +1002,17 @@ app.get('/api/jobs/:id/history', authMiddleware, async (c) => {
         detail TEXT,
         user_name TEXT,
         user_role TEXT,
+        user_id INTEGER,
         created_at TEXT DEFAULT (datetime('now'))
       )
     `).run()
+    await c.env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_job ON job_history(job_id)`).run().catch(() => {})
     const { results } = await c.env.DB.prepare(`
-      SELECT * FROM job_history WHERE job_id=? ORDER BY created_at DESC
+      SELECT * FROM job_history WHERE job_id=? ORDER BY created_at DESC LIMIT 200
     `).bind(jobId).all<any>()
     return c.json(results || [])
-  } catch (_) {
+  } catch (e: any) {
+    console.error('Job history fetch error:', e?.message || e)
     return c.json([])
   }
 })
@@ -1015,14 +1034,16 @@ app.post('/api/jobs/:id/history', authMiddleware, async (c) => {
         detail TEXT,
         user_name TEXT,
         user_role TEXT,
+        user_id INTEGER,
         created_at TEXT DEFAULT (datetime('now'))
       )
     `).run()
     await c.env.DB.prepare(
-      `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
-    ).bind(jobId, action, detail || null, c.get('userName') || 'System', c.get('userRole') || 'staff').run()
+      `INSERT INTO job_history (job_id, action, detail, user_name, user_role, user_id) VALUES (?,?,?,?,?,?)`
+    ).bind(jobId, action, detail || null, c.get('userName') || 'System', c.get('userRole') || 'staff', c.get('userId') || null).run()
     return c.json({ ok: true })
-  } catch (_) {
+  } catch (e: any) {
+    console.error('Job history post error:', e?.message || e)
     return c.json({ ok: false })
   }
 })
@@ -1609,7 +1630,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>ADITION ELECTRIC SOLUTION v30</title>
+<title>ADITION ELECTRIC SOLUTION v31</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">
