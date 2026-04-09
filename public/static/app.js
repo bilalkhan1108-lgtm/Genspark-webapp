@@ -1,7 +1,8 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v31                       ║
-// ║  v31: update_machine_status right, address fixes, job history DB ║
-// ║  fix deployed history, From font +4pt, left-align address        ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v32                       ║
+// ║  v32: address label fix (To top-left, From bottom-left +4pt),    ║
+// ║  warranty/brand dropdown, active-jobs filter, refresh icon,       ║
+// ║  staff notification dismiss, performance optimizations            ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -23,7 +24,7 @@ const S = {
   job    : null,
   staff  : [],
   requests: [],
-  filter : new URLSearchParams(window.location.search).get('status') || 'under_repair',
+  filter : new URLSearchParams(window.location.search).get('status') || '',
   search : '',
   searchJob : '',
   searchName: '',
@@ -183,9 +184,9 @@ const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { mini
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5' };
-const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD' };
-const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered' };
+const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5', active_only:'#2E7D32' };
+const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD', active_only:'#E8F5E9' };
+const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered', active_only:'Active Only' };
 const sc = s => STATUS_COLOR[s] || '#888';
 const sb = s => STATUS_BG[s]    || '#f5f5f5';
 const sl = s => STATUS_LABEL[s] || s;
@@ -254,6 +255,11 @@ window.filterMonth  = function() {
   const ms  = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
   const me  = now.toISOString().split('T')[0];
   setFilter(''); S.fromDate = ms; S.toDate = me; loadJobs();
+};
+// Active Only: show only jobs where NOT all machines are repaired/returned
+// This uses a special filter value that the backend understands
+window.filterActiveOnly = function() {
+  setFilter('active_only'); S.fromDate = ''; S.toDate = ''; loadJobs();
 };
 
 function setFilter(s) {
@@ -667,22 +673,29 @@ function bindView() {
       if (!notes.length) return;
       const bar = document.getElementById('staff-notif-bar');
       if (!bar) return;
-      bar.innerHTML = notes.slice(0, 5).map(n => {
+      bar.innerHTML = notes.slice(0, 5).map((n, idx) => {
         const icon   = n.status === 'approved' ? '✅' : '❌';
         const color  = n.status === 'approved' ? '#E8F5E9' : '#FFEBEE';
         const border = n.status === 'approved' ? '#43A047' : '#E53935';
         const action = n.status === 'approved' ? 'Assignment Approved' : 'Assignment Denied';
         const ts     = n.resolved_at || n.created_at;
         const tsStr  = ts ? new Date(ts).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
-        const msg    = n.status === 'approved'
-          ? `${icon} <b>${action}</b> — Job <b>#${esc(n.job_id)}</b> · <i>${esc(n.product_name)}</i>`
-          : `${icon} <b>${action}</b> — Job <b>#${esc(n.job_id)}</b> · <i>${esc(n.product_name)}</i>`;
-        return `<div style="background:${color};border-left:4px solid ${border};border-radius:8px;padding:10px 14px;margin-bottom:6px;font-size:13px;line-height:1.5">
+        const msg    = `${icon} <b>${action}</b> — Job <b>#${esc(n.job_id)}</b> · <i>${esc(n.product_name)}</i>`;
+        return `<div class="staff-notif-item" data-nidx="${idx}" style="position:relative;background:${color};border-left:4px solid ${border};border-radius:8px;padding:10px 32px 10px 14px;margin-bottom:6px;font-size:13px;line-height:1.5">
           ${msg}
           <div style="color:#999;font-size:11px;margin-top:3px">${tsStr}</div>
+          <button class="notif-dismiss-btn" data-nidx="${idx}" style="position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;font-size:14px;color:#999;padding:2px 5px;line-height:1;border-radius:4px" title="Dismiss">✕</button>
         </div>`;
       }).join('');
       bar.style.display = 'block';
+      // Bind dismiss buttons — click small cross to hide individual notification
+      bar.querySelectorAll('.notif-dismiss-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const item = btn.closest('.staff-notif-item');
+          if (item) { item.style.transition = 'opacity .2s,height .2s,margin .2s,padding .2s'; item.style.opacity = '0'; item.style.height = '0'; item.style.marginBottom = '0'; item.style.paddingTop = '0'; item.style.paddingBottom = '0'; item.style.overflow = 'hidden'; setTimeout(() => item.remove(), 250); }
+        });
+      });
     }).catch(() => {});
   }
 
@@ -703,7 +716,7 @@ function bindView() {
 // DASHBOARD — virtual-scroll list
 // ─────────────────────────────────────────────────────────────────────────────
 function dashboardHTML() {
-  const activeFilterLabel = S.filter ? sl(S.filter) : (S.fromDate || S.toDate ? 'Date Range' : 'All Jobs');
+  const activeFilterLabel = S.filter === 'active_only' ? 'Active Only' : S.filter ? sl(S.filter) : (S.fromDate || S.toDate ? 'Date Range' : 'All Jobs');
   const hasFilter = S.filter || S.fromDate || S.toDate;
   return `
   <div style="display:flex;flex-direction:column;height:100%">
@@ -716,6 +729,7 @@ function dashboardHTML() {
       ${hasFilter ? `<button id="btn-clear-filter" style="display:inline-flex;align-items:center;background:#FFEBEE;border:1px solid #E53935;border-radius:5px;padding:2px 6px;font-size:10px;color:#E53935;font-weight:700;cursor:pointer;line-height:1;min-height:24px"><i class="fas fa-times" style="font-size:8px"></i></button>` : ''}
       <div style="flex:1"></div>
       <span id="cc-count" style="font-size:10px;color:#aaa;font-weight:600"></span>
+      <button id="btn-refresh-jobs" style="display:inline-flex;align-items:center;justify-content:center;background:none;border:none;cursor:pointer;color:#1565C0;padding:4px;font-size:16px;-webkit-tap-highlight-color:transparent;transition:transform .15s" title="Refresh jobs"><i class="fas fa-sync-alt"></i></button>
     </div>
     <div id="filter-panel" style="display:none;padding:8px 12px;background:#f8f9fb;border-bottom:1px solid #e0e0e0;flex-shrink:0">
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Filter by Status</div>
@@ -726,6 +740,7 @@ function dashboardHTML() {
         <button class="fp-chip ${S.filter==='returned'?'fp-active':''}" data-fp-status="returned" style="--fp-color:${sc('returned')}">Returned</button>
         <button class="fp-chip ${S.filter==='partial_delivered'?'fp-active':''}" data-fp-status="partial_delivered" style="--fp-color:${sc('partial_delivered')}">Partial</button>
         <button class="fp-chip ${S.filter==='delivered'?'fp-active':''}" data-fp-status="delivered" style="--fp-color:${sc('delivered')}">Delivered</button>
+        <button class="fp-chip ${S.filter==='active_only'?'fp-active':''}" data-fp-status="active_only" style="--fp-color:#2E7D32">Active Only</button>
         ${isAdmin() ? `<button class="fp-chip ${S.filter==='pending_payment'?'fp-active':''}" data-fp-status="pending_payment" style="--fp-color:#FB8C00">Pending Payment</button>` : ''}
       </div>
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Date Range</div>
@@ -737,6 +752,7 @@ function dashboardHTML() {
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
         <button class="fp-quick" onclick="filterToday()">📅 Today</button>
         <button class="fp-quick" onclick="filterMonth()">📊 This Month</button>
+        <button class="fp-quick" onclick="filterActiveOnly()">🟢 Active Only</button>
         ${isAdmin() ? `<button class="fp-quick" onclick="filterByStatus('under_repair')">🔧 Pending</button>` : ''}
       </div>
       ${S.filter === 'delivered' && isAdmin() ? `
@@ -827,18 +843,18 @@ let _jobsHasMore = true;
 let _jobsOffset  = 0;
 const JOBS_PER_PAGE = 50;
 
-// localStorage job cache for instant dashboard load
+// localStorage job cache for instant dashboard load (performance: millisecond render)
 const _jobCache = {
-  _key: 'AES_JOBS_CACHE_V2',
+  _key: 'AES_JOBS_CACHE_V3',
   save(filter, jobs) {
-    try { localStorage.setItem(this._key + '_' + (filter||'all'), JSON.stringify({ ts: Date.now(), data: jobs.slice(0, 50) })); } catch {}
+    try { localStorage.setItem(this._key + '_' + (filter||'all'), JSON.stringify({ ts: Date.now(), data: jobs.slice(0, 100) })); } catch {}
   },
   load(filter) {
     try {
       const raw = JSON.parse(localStorage.getItem(this._key + '_' + (filter||'all')) || 'null');
       if (!raw || !raw.data) return null;
-      // Cache valid for 5 minutes
-      if (Date.now() - raw.ts > 300000) return null;
+      // Cache valid for 10 minutes for instant render
+      if (Date.now() - raw.ts > 600000) return null;
       return raw.data;
     } catch { return null; }
   }
@@ -899,6 +915,16 @@ async function loadJobs(append = false) {
   }, { passive: true });
   document.getElementById('btn-clear-my')?.addEventListener('click', () => {
     S.myJobsOnly = false; render();
+  }, { passive: true });
+
+  // Refresh button — reload all jobs with fresh data (clears cache)
+  document.getElementById('btn-refresh-jobs')?.addEventListener('click', () => {
+    const btn = document.getElementById('btn-refresh-jobs');
+    if (btn) { btn.style.transform = 'rotate(360deg)'; setTimeout(() => { btn.style.transform = ''; }, 400); }
+    _analyticsCacheTs = 0;
+    _jobCache.save(S.filter, []); // clear cache
+    loadJobs();
+    toast('Refreshing…', 'info');
   }, { passive: true });
 
   // Filter panel toggle
@@ -1169,7 +1195,26 @@ function newJobHTML() {
         <div id="nj-comp-sugs"></div>
       </div>
 
-      <!-- 5. Repair Amount -->
+      <!-- 5. Warranty Status -->
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-shield-alt" style="color:#1565C0"></i> Warranty Status</label>
+        <select id="nj-warranty" class="form-input">
+          <option value="out_warranty" selected>Out of Warranty</option>
+          <option value="warranty">Under Warranty</option>
+        </select>
+      </div>
+      <div id="nj-brand-wrap" class="form-group" style="display:none">
+        <label class="form-label">Brand / Company</label>
+        <select id="nj-brand" class="form-input">
+          <option value="">— Select Brand —</option>
+          <option value="IKONIC">IKONIC</option>
+          <option value="HNK">HNK</option>
+          <option value="MARC">MARC</option>
+          <option value="AYTY Pro">AYTY Pro</option>
+        </select>
+      </div>
+
+      <!-- 6. Repair Amount -->
       ${hasSuperRight('view_financials') ? `
       <div class="form-group">
         <label class="form-label">Repair Amount (₹)</label>
@@ -1177,7 +1222,7 @@ function newJobHTML() {
         <div id="nj-amt-sugs"></div>
       </div>` : ''}
 
-      <!-- 6. Quantity (below Repair Amount, default 1, clear on focus) -->
+      <!-- 7. Quantity (below Repair Amount, default 1, clear on focus) -->
       <div class="form-group">
         <label class="form-label">Quantity</label>
         <input id="nj-qty" type="number" class="form-input" placeholder="1" min="1" value="1" inputmode="numeric"
@@ -1211,6 +1256,12 @@ function bindNewJob() {
         S.staff.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
     }).catch(() => {});
   }
+
+  // Warranty dropdown toggle in New Job form
+  document.getElementById('nj-warranty')?.addEventListener('change', e => {
+    const wrap = document.getElementById('nj-brand-wrap');
+    if (wrap) wrap.style.display = e.target.value === 'warranty' ? 'block' : 'none';
+  });
 
   const mobileIn = document.getElementById('nj-mobile');
   let _mobileLookupDone = '';
@@ -1449,12 +1500,16 @@ function bindNewJob() {
       note:             document.getElementById('nj-note')?.value.trim()    || null,
       received_amount:  hasSuperRight('view_financials') ? (parseFloat(document.getElementById('nj-received')?.value) || 0) : 0,
     };
+    const njWarrantyType = document.getElementById('nj-warranty')?.value || 'out_warranty';
+    const njWarrantyBrand = njWarrantyType === 'warranty' ? (document.getElementById('nj-brand')?.value || null) : null;
     const machData = {
       product_name:      product,
       product_complaint: document.getElementById('nj-complaint')?.value.trim() || null,
       charges:           hasSuperRight('view_financials') ? (parseFloat(document.getElementById('nj-charges')?.value) || 0) : 0,
       quantity:          parseInt(document.getElementById('nj-qty')?.value) || 1,
       assigned_staff_id: hasSuperRight('manage_machines') ? (document.getElementById('nj-staff')?.value || null) : null,
+      warranty_type:     njWarrantyType,
+      warranty_brand:    njWarrantyBrand,
     };
     const imgFile = document.getElementById('nj-img')?.files[0];
     const audioBlob = _njAudioBlob;
@@ -1768,6 +1823,8 @@ function machineCardHTML(m, currentUserId) {
         ${m.product_complaint ? `<div class="machine-complaint" style="font-size:13px;color:#666;margin-top:3px;line-height:1.3;word-break:break-word">${esc(m.product_complaint)}</div>` : ''}
         ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:2px;line-height:1.3">✅ Work: ${esc(m.work_done)}</div>` : ''}
         ${m.return_reason ? `<div style="font-size:12px;color:#E65100;margin-top:2px;line-height:1.3">↩ ${esc(m.return_reason)}</div>` : ''}
+        ${m.warranty_type === 'warranty' && m.warranty_brand ? `<div style="font-size:12px;color:#1565C0;margin-top:2px;line-height:1.3;font-weight:700"><i class="fas fa-shield-alt"></i> Warranty: ${esc(m.warranty_brand)}</div>` : ''}
+        ${m.warranty_type === 'out_warranty' ? `<div style="font-size:11px;color:#999;margin-top:2px"><i class="fas fa-shield-alt" style="opacity:.5"></i> Out of Warranty</div>` : ''}
         ${m.staff_name ? `<div class="machine-staff" style="font-size:12px;color:#888;margin-top:2px"><i class="fas fa-user-cog"></i> ${esc(m.staff_name)}</div>` : ''}
       </div>
       <div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:90px">
@@ -1778,7 +1835,9 @@ function machineCardHTML(m, currentUserId) {
           <option value="returned"     ${m.status==='returned'    ?'selected':''}>Returned</option>
         </select>` : `
         <span class="status-chip" style="background:${sb(m.status)};color:${color};border:1.5px solid ${color};display:inline-flex;align-items:center;justify-content:center;padding:5px 14px;border-radius:8px;font-size:12px;font-weight:700;white-space:nowrap;text-align:center;min-width:90px;min-height:30px;box-sizing:border-box">${sl(m.status)}</span>`}
-        ${hasSuperRight('view_financials') ? `<div style="font-size:14px;font-weight:800;color:${m.status==='returned'?'#999':'#1a1a2e'};text-align:center;white-space:nowrap${m.status==='returned'?';text-decoration:line-through':''}">${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:10px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
+        ${hasSuperRight('view_financials') ? `<div style="font-size:14px;font-weight:800;color:${m.status==='returned'?'#999':'#1a1a2e'};text-align:center;white-space:nowrap${m.status==='returned'?';text-decoration:line-through':''}">
+          ${m.warranty_type === 'warranty' && m.warranty_brand ? `<div style="font-size:10px;color:#1565C0;font-weight:700">[${esc(m.warranty_brand)}]</div>` : ''}
+          ${fmtRs((parseFloat(m.charges)||0) * (parseInt(m.quantity)||1))}${m.quantity > 1 ? `<div style="font-size:10px;color:#888;font-weight:600">${fmtRs(m.charges)} × ${m.quantity}</div>` : ''}</div>` : ''}
       </div>
     </div>
 
@@ -2232,14 +2291,22 @@ async function showJobHistory(j) {
     }
 
     const ACTION_ICONS = {
-      'Job Created':     { icon: 'fa-plus-circle',   color: '#43A047' },
-      'Machine Added':   { icon: 'fa-tools',          color: '#1E88E5' },
-      'Status: delivered': { icon: 'fa-check-double', color: '#1E88E5' },
-      'Payment Updated': { icon: 'fa-rupee-sign',     color: '#FB8C00' },
+      'Job Created':       { icon: 'fa-plus-circle',   color: '#43A047' },
+      'Machine Added':     { icon: 'fa-tools',          color: '#1E88E5' },
+      'Status: delivered': { icon: 'fa-check-double',   color: '#1E88E5' },
+      'Payment Updated':   { icon: 'fa-rupee-sign',     color: '#FB8C00' },
+      'Discount Updated':  { icon: 'fa-tag',            color: '#FB8C00' },
+      'Note Updated':      { icon: 'fa-sticky-note',    color: '#795548' },
+      'Customer Info Updated': { icon: 'fa-user-edit',  color: '#1565C0' },
+      'Delivered':         { icon: 'fa-box-open',        color: '#1E88E5' },
+      'Machine Edited':    { icon: 'fa-wrench',          color: '#9C27B0' },
     };
     function getIcon(action) {
-      if (action.startsWith('Machine:')) return { icon: 'fa-cog', color: '#9C27B0' };
-      if (action.startsWith('Status:'))  return { icon: 'fa-exchange-alt', color: '#E53935' };
+      if (action.startsWith('Machine: repaired'))   return { icon: 'fa-check-circle', color: '#43A047' };
+      if (action.startsWith('Machine: returned'))   return { icon: 'fa-undo-alt',     color: '#B8860B' };
+      if (action.startsWith('Machine:'))            return { icon: 'fa-cog',           color: '#9C27B0' };
+      if (action.startsWith('Auto Status:'))        return { icon: 'fa-sync-alt',      color: '#FF6F00' };
+      if (action.startsWith('Status:'))             return { icon: 'fa-exchange-alt',   color: '#E53935' };
       return ACTION_ICONS[action] || { icon: 'fa-circle', color: '#888' };
     }
 
@@ -2498,7 +2565,26 @@ function showAddMachineModal(jobId) {
       <div id="am-comp-sugs">${suggestionTilesHTML(compSugs, 'am-comp', 'comp-sugs')}</div>
     </div>
 
-    <!-- 5. Repair Amount -->
+    <!-- 5. Warranty Status -->
+    <div class="form-group">
+      <label class="form-label"><i class="fas fa-shield-alt" style="color:#1565C0"></i> Warranty Status</label>
+      <select id="am-warranty" class="form-input">
+        <option value="out_warranty" selected>Out of Warranty</option>
+        <option value="warranty">Under Warranty</option>
+      </select>
+    </div>
+    <div id="am-brand-wrap" class="form-group" style="display:none">
+      <label class="form-label">Brand / Company</label>
+      <select id="am-brand" class="form-input">
+        <option value="">— Select Brand —</option>
+        <option value="IKONIC">IKONIC</option>
+        <option value="HNK">HNK</option>
+        <option value="MARC">MARC</option>
+        <option value="AYTY Pro">AYTY Pro</option>
+      </select>
+    </div>
+
+    <!-- 6. Repair Amount -->
     ${isAdmin() ? `
     <div class="form-group">
       <label class="form-label">Repair Amount (₹)</label>
@@ -2506,7 +2592,7 @@ function showAddMachineModal(jobId) {
       <div id="am-amt-sugs">${suggestionTilesHTML(amtSugs.map(a => '₹' + a), 'am-chg', 'amt-sugs')}</div>
     </div>` : ''}
 
-    <!-- 6. Quantity (below Repair Amount, default 1, clear on focus) -->
+    <!-- 7. Quantity (below Repair Amount, default 1, clear on focus) -->
     <div class="form-group">
       <label class="form-label">Quantity</label>
       <input id="am-qty" type="number" class="form-input" min="1" value="1" inputmode="numeric"
@@ -2602,6 +2688,12 @@ function showAddMachineModal(jobId) {
     });
   }
 
+  // Warranty dropdown toggle: show brand select when "warranty" is chosen
+  document.getElementById('am-warranty')?.addEventListener('change', e => {
+    const brandWrap = document.getElementById('am-brand-wrap');
+    if (brandWrap) brandWrap.style.display = e.target.value === 'warranty' ? 'block' : 'none';
+  });
+
   // Smart product name input — filter suggestions + update complaint/amount tiles as user types
   document.getElementById('am-prod')?.addEventListener('input', debounce(e => {
     const val = e.target.value.trim();
@@ -2671,6 +2763,8 @@ function showAddMachineModal(jobId) {
     const charges   = isAdmin() ? (parseFloat(document.getElementById('am-chg')?.value) || 0) : 0;
     const quantity  = parseInt(document.getElementById('am-qty')?.value) || 1;
     const staffId   = isAdmin() ? (document.getElementById('am-staff')?.value || null) : null;
+    const warrantyType = document.getElementById('am-warranty')?.value || 'out_warranty';
+    const warrantyBrand = warrantyType === 'warranty' ? (document.getElementById('am-brand')?.value || null) : null;
 
     // Save to suggestion cache
     _sugCache.addProduct(prod);
@@ -2683,6 +2777,7 @@ function showAddMachineModal(jobId) {
       const machR = await API.post(`/api/jobs/${jobId}/machines`, {
         product_name: prod, product_complaint: complaint,
         charges, quantity, assigned_staff_id: staffId,
+        warranty_type: warrantyType, warranty_brand: warrantyBrand,
       });
       const machId = machR.data.id;
 
@@ -2721,6 +2816,8 @@ function showAddMachineModal(jobId) {
 }
 
 function showEditMachineModal(m) {
+  const curWarranty = m.warranty_type || 'out_warranty';
+  const curBrand = m.warranty_brand || '';
   showModal(`
     <h3 class="modal-title"><i class="fas fa-edit" style="color:#FB8C00"></i> Edit Machine</h3>
     <div class="form-group">
@@ -2730,6 +2827,23 @@ function showEditMachineModal(m) {
     <div class="form-group">
       <label class="form-label">Complaint / Issue</label>
       <textarea id="em-comp" class="form-input" rows="2">${esc(m.product_complaint||'')}</textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label"><i class="fas fa-shield-alt" style="color:#1565C0"></i> Warranty Status</label>
+      <select id="em-warranty" class="form-input">
+        <option value="out_warranty" ${curWarranty==='out_warranty'?'selected':''}>Out of Warranty</option>
+        <option value="warranty" ${curWarranty==='warranty'?'selected':''}>Under Warranty</option>
+      </select>
+    </div>
+    <div id="em-brand-wrap" class="form-group" style="display:${curWarranty==='warranty'?'block':'none'}">
+      <label class="form-label">Brand / Company</label>
+      <select id="em-brand" class="form-input">
+        <option value="">— Select Brand —</option>
+        <option value="IKONIC" ${curBrand==='IKONIC'?'selected':''}>IKONIC</option>
+        <option value="HNK" ${curBrand==='HNK'?'selected':''}>HNK</option>
+        <option value="MARC" ${curBrand==='MARC'?'selected':''}>MARC</option>
+        <option value="AYTY Pro" ${curBrand==='AYTY Pro'?'selected':''}>AYTY Pro</option>
+      </select>
     </div>
     ${hasSuperRight('view_financials') ? `
     <div class="form-group">
@@ -2756,13 +2870,23 @@ function showEditMachineModal(m) {
       <button id="em-save" class="btn-primary">Update</button>
     </div>`);
 
+  // Warranty dropdown toggle
+  document.getElementById('em-warranty')?.addEventListener('change', e => {
+    const wrap = document.getElementById('em-brand-wrap');
+    if (wrap) wrap.style.display = e.target.value === 'warranty' ? 'block' : 'none';
+  });
+
   document.getElementById('em-save')?.addEventListener('click', async () => {
     const prod = document.getElementById('em-prod')?.value.trim();
     if (!prod) { toast('Product name required', 'error'); return; }
+    const warrantyType = document.getElementById('em-warranty')?.value || 'out_warranty';
+    const warrantyBrand = warrantyType === 'warranty' ? (document.getElementById('em-brand')?.value || null) : null;
     try {
       await API.put(`/api/machines/${m.id}`, {
         product_name:      prod,
         product_complaint: document.getElementById('em-comp')?.value.trim() || null,
+        warranty_type: warrantyType,
+        warranty_brand: warrantyBrand,
         ...(hasSuperRight('view_financials') ? { charges: parseFloat(document.getElementById('em-chg')?.value) || 0 } : {}),
         quantity:          parseInt(document.getElementById('em-qty')?.value) || 1,
         ...(hasSuperRight('manage_machines') ? { assigned_staff_id: document.getElementById('em-staff')?.value || null } : {}),
@@ -2974,8 +3098,9 @@ function jobCardPrintHTML(j) {
           ${m.product_complaint ? `<div style="font-size:20px;color:#666;line-height:1.2">${esc(m.product_complaint)}</div>` : ''}
           ${m.work_done ? `<div style="font-size:18px;color:#2E7D32;font-weight:600">✅ ${esc(m.work_done)}</div>` : ''}
           ${m.return_reason ? `<div style="font-size:18px;color:#E65100;font-weight:600">↩ ${esc(m.return_reason)}</div>` : ''}
+          ${m.warranty_type === 'warranty' && m.warranty_brand ? `<div style="font-size:16px;color:#1565C0;font-weight:700;margin-top:2px"><i class="fas fa-shield-alt"></i> Warranty: ${esc(m.warranty_brand)}</div>` : ''}
           <div style="margin-top:3px;font-size:26px;font-weight:800;color:${isReturned?'#aaa':'#1a1a2e'}${isReturned?';text-decoration:line-through':''}">
-            ${fmtRs(lineAmt)}${m.quantity>1?` <span style="color:#999;font-size:18px;font-weight:600">(${fmtRs(m.charges||0)} x ${m.quantity})</span>`:''}
+            ${m.warranty_type === 'warranty' && m.warranty_brand ? `<span style="color:#1565C0;font-size:18px;font-weight:700;margin-right:8px">[${esc(m.warranty_brand)}]</span>` : ''}${fmtRs(lineAmt)}${m.quantity>1?` <span style="color:#999;font-size:18px;font-weight:600">(${fmtRs(m.charges||0)} x ${m.quantity})</span>`:''}
           </div>
         </div>
       </div>`;
@@ -4215,77 +4340,67 @@ async function printAddressLabel(j) {
     const padX = 60;
     const maxTextW = W - padX * 2;
 
-    // ── FIXED FROM block at bottom-right (measure height first) ──
-    const fromBlockH = 190;
-    const fromDividerY = H - fromBlockH - 30;
+    // ── FROM block height (bottom-left, left-aligned, +4pt fonts) ──
+    const fromBlockH = 210;
+    const fromDividerY = H - fromBlockH - 20;
 
-    // Available height for TO section = everything above FROM divider - margins
-    const toAvailH = fromDividerY - 120; // 100 top pad + 20 margin
+    // Available height for TO section
+    const toStartY = 80; // top padding
+    const toAvailH = fromDividerY - toStartY - 20;
 
-    // ── AI-ADAPTIVE: measure all TO content, then scale to fill space ──
+    // ── TO content data ──
     const nameText = j.snap_name || 'Customer';
     const addrText = j.snap_address || '';
     const mobText = 'M: ' + (j.snap_mobile || '');
     const mob2Text = j.snap_mobile2 ? 'Alt: ' + j.snap_mobile2 : '';
 
-    // Binary search for optimal scale factor to fill available space
+    // Measure TO block at given scale
     function measureToBlock(scale) {
       let h = 0;
-      const toSize = Math.round(40 * scale);
-      h += toSize + 15 * scale; // "To," label
-      
-      const nameSize = Math.round(66 * scale);
+      const toSize = Math.round(38 * scale);
+      h += toSize + 8 * scale; // "To," label
+      const nameSize = Math.round(64 * scale);
       ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
       const nameLines = wrapText(ctx, nameText, maxTextW);
-      h += nameLines.length * (nameSize + 10 * scale) + 15 * scale;
-      
+      h += nameLines.length * (nameSize + 6 * scale) + 6 * scale;
       if (addrText) {
         const addrSize = Math.round(40 * scale);
         ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
         const addrLines = wrapText(ctx, addrText, maxTextW);
-        h += addrLines.length * (addrSize + 8 * scale) + 15 * scale;
+        h += addrLines.length * (addrSize + 6 * scale) + 8 * scale;
       }
-      
-      const mobSize = Math.round(48 * scale);
-      h += mobSize + 12 * scale;
-      if (mob2Text) h += Math.round(40 * scale) + 10 * scale;
-      
+      const mobSize = Math.round(46 * scale);
+      h += mobSize + 8 * scale;
+      if (mob2Text) h += Math.round(38 * scale) + 6 * scale;
       return h;
     }
 
-    // Find best scale: start at 1.0, try up to 2.5x, find largest that fits
+    // Find best scale to fill available space without overflow
     let bestScale = 1.0;
     for (let s = 2.5; s >= 0.6; s -= 0.05) {
-      if (measureToBlock(s) <= toAvailH) {
-        bestScale = s;
-        break;
-      }
+      if (measureToBlock(s) <= toAvailH) { bestScale = s; break; }
     }
 
-    // ── RENDER TO section with adaptive scale ──
-    // Move "To," down with more top padding so the top line of "T" is not clipped
-    let y = 100;
-    const toSize = Math.round(40 * bestScale);
+    // ── RENDER TO section — top-left aligned, no blank gaps ──
+    let y = toStartY;
+    const toSize = Math.round(38 * bestScale);
     ctx.fillStyle = '#888888';
     ctx.font = `bold ${toSize}px "Segoe UI", Arial, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText('To,', W / 2, y); y += toSize + Math.round(10 * bestScale);
     ctx.textAlign = 'left';
+    ctx.fillText('To,', padX, y); y += toSize + Math.round(8 * bestScale);
 
-    // Name — large, bold, centered
-    const nameSize = Math.round(66 * bestScale);
+    // Name — large, bold, left-aligned (tight after "To,")
+    const nameSize = Math.round(64 * bestScale);
     ctx.fillStyle = '#1a1a2e';
     ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
     const nameLines = wrapText(ctx, nameText, maxTextW);
-    ctx.textAlign = 'center';
     nameLines.forEach(line => {
-      ctx.fillText(line, W / 2, y);
-      y += nameSize + Math.round(8 * bestScale);
+      ctx.fillText(line, padX, y);
+      y += nameSize + Math.round(4 * bestScale);
     });
-    ctx.textAlign = 'left';
-    y += Math.round(10 * bestScale);
+    y += Math.round(4 * bestScale);
 
-    // Address — LEFT-ALIGNED after "To" (not centered), reduced gap from name
+    // Address — left-aligned, tight after name
     if (addrText) {
       const addrSize = Math.round(40 * bestScale);
       ctx.fillStyle = '#333333';
@@ -4293,52 +4408,47 @@ async function printAddressLabel(j) {
       const addrLines = wrapText(ctx, addrText, maxTextW);
       addrLines.forEach(line => {
         ctx.fillText(line, padX, y);
-        y += addrSize + Math.round(6 * bestScale);
+        y += addrSize + Math.round(4 * bestScale);
       });
-      y += Math.round(10 * bestScale);
+      y += Math.round(6 * bestScale);
     }
 
-    // Mobile — centered, blue
-    const mobSize = Math.round(48 * bestScale);
+    // Mobile — left-aligned, blue
+    const mobSize = Math.round(46 * bestScale);
     ctx.fillStyle = '#1565C0';
     ctx.font = `bold ${mobSize}px "Segoe UI", Arial, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText(mobText, W / 2, y); y += mobSize + Math.round(10 * bestScale);
+    ctx.fillText(mobText, padX, y); y += mobSize + Math.round(6 * bestScale);
     if (mob2Text) {
-      const mob2Size = Math.round(40 * bestScale);
+      const mob2Size = Math.round(38 * bestScale);
       ctx.font = `bold ${mob2Size}px "Segoe UI", Arial, sans-serif`;
-      ctx.fillText(mob2Text, W / 2, y); y += mob2Size + Math.round(8 * bestScale);
+      ctx.fillText(mob2Text, padX, y); y += mob2Size + Math.round(4 * bestScale);
     }
-    ctx.textAlign = 'left';
 
-    // ── DIVIDER LINE — placed just below TO content or at fromDividerY ──
-    const divY = Math.max(y + 20, fromDividerY);
+    // ── DIVIDER LINE — no blank gap, placed tightly below TO or at fromDividerY ──
+    const divY = Math.max(y + 14, fromDividerY);
     ctx.strokeStyle = '#aaaaaa';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([8, 5]);
     ctx.beginPath(); ctx.moveTo(padX, divY); ctx.lineTo(W - padX, divY); ctx.stroke();
     ctx.setLineDash([]);
 
-    // ── FROM section — right-aligned, fixed at bottom ──
-    let fy = divY + 30;
-    const fromX = W - padX;
-    ctx.textAlign = 'right';
+    // ── FROM section — bottom-left, left-aligned, +4pt larger fonts ──
+    let fy = divY + 24;
+    ctx.textAlign = 'left';
 
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 30px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('From,', fromX, fy); fy += 36;
+    ctx.font = 'bold 34px "Segoe UI", Arial, sans-serif';  // was 30 → +4pt
+    ctx.fillText('From,', padX, fy); fy += 40;
 
     ctx.fillStyle = '#E53935';
-    ctx.font = '900 32px "Segoe UI", Arial, sans-serif';
-    ctx.fillText('ADITION ELECTRIC SOLUTION', fromX, fy); fy += 38;
+    ctx.font = '900 36px "Segoe UI", Arial, sans-serif';    // was 32 → +4pt
+    ctx.fillText('ADITION ELECTRIC SOLUTION', padX, fy); fy += 42;
 
     ctx.fillStyle = '#555555';
-    ctx.font = '500 26px "Segoe UI", Arial, sans-serif';
+    ctx.font = '500 30px "Segoe UI", Arial, sans-serif';    // was 26 → +4pt
     ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'].forEach(line => {
-      ctx.fillText(line, fromX, fy); fy += 30;
+      ctx.fillText(line, padX, fy); fy += 34;
     });
-
-    ctx.textAlign = 'left';
 
     // Convert to blob & share/download
     const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', 0.95));

@@ -144,6 +144,9 @@ async function ensureDbSchema(db: D1Database) {
     // v29: customer category column
     await db.prepare(`ALTER TABLE customers ADD COLUMN category TEXT NOT NULL DEFAULT 'Salon'`).run().catch(() => {})
     await db.prepare(`ALTER TABLE jobs ADD COLUMN snap_category TEXT`).run().catch(() => {})
+    // v32: warranty type and brand columns on machines
+    await db.prepare(`ALTER TABLE machines ADD COLUMN warranty_type TEXT NOT NULL DEFAULT 'out_warranty'`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN warranty_brand TEXT`).run().catch(() => {})
     // Ensure job_history audit table exists with index
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS job_history (
@@ -165,11 +168,22 @@ async function ensureDbSchema(db: D1Database) {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_name ON jobs(snap_name)`).run().catch(() => {})
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_status_date ON jobs(status, created_at)`).run().catch(() => {})
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_cust_name ON customers(name)`).run().catch(() => {})
+    // v32: Performance indexes for machine warranty queries and job listing
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_job ON machines(job_id)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_staff ON machines(assigned_staff_id)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_status ON machines(status)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC)`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
 
 // ── Job history helper — fire-and-forget, never blocks ───────────────────────
+// v32: Separate job_history DB table with precise timestamps for:
+//   - Job creation (auto-logged on POST /api/jobs)
+//   - Machine/product addition (auto-logged on POST /api/jobs/:id/machines)
+//   - Status changes (auto-logged on PUT /api/machines/:id and PUT /api/jobs/:id)
+//   - Payment updates, customer edits, notes, delivery, etc.
+// Each entry stores: job_id, action, detail, user_name, user_role, created_at (UTC)
 async function logHistory(db: D1Database, jobId: string, action: string, detail: string, userName: string, userRole: string) {
   try {
     // Ensure table exists before inserting (critical for first deploy)
@@ -185,6 +199,7 @@ async function logHistory(db: D1Database, jobId: string, action: string, detail:
         created_at TEXT DEFAULT (datetime('now'))
       )
     `).run()
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_job ON job_history(job_id)`).run().catch(() => {})
     await db.prepare(
       `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
     ).bind(jobId, action, detail, userName, userRole).run()
@@ -363,7 +378,13 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const conds: string[] = []
   const params: any[] = []
 
-  if (status) { conds.push('j.status=?'); params.push(status) }
+  // active_only: hide jobs where ALL machines are repaired or returned
+  if (status === 'active_only') {
+    conds.push(`EXISTS (SELECT 1 FROM machines mx WHERE mx.job_id=j.id AND mx.status='under_repair')`)
+    conds.push("j.status != 'delivered'")
+  } else if (status) {
+    conds.push('j.status=?'); params.push(status)
+  }
   // Staff: hide delivered jobs only (supervisors and admin can see all)
   if (!isAdmin) {
     conds.push("j.status != 'delivered'")
@@ -670,21 +691,25 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
   const isAdminOrMgr = roleLevel(c.get('userRole')) >= 2
   const charges = isAdminOrMgr ? (parseFloat(body.charges) || 0) : 0
   const qty = parseInt(body.quantity) || 1
+  const warrantyType = body.warranty_type || 'out_warranty'
+  const warrantyBrand = warrantyType === 'warranty' ? (body.warranty_brand || null) : null
   const result = await c.env.DB.prepare(
-    `INSERT INTO machines(job_id,product_name,product_complaint,charges,quantity,assigned_staff_id,status)
-     VALUES(?,?,?,?,?,?,?)`
+    `INSERT INTO machines(job_id,product_name,product_complaint,charges,quantity,assigned_staff_id,status,warranty_type,warranty_brand)
+     VALUES(?,?,?,?,?,?,?,?,?)`
   ).bind(
     jobId, body.product_name, body.product_complaint || null,
     charges, qty,
     body.assigned_staff_id || null,
-    'under_repair'
+    'under_repair',
+    warrantyType, warrantyBrand
   ).run()
   const uName = c.get('userName') || 'System'
   const uRole = c.get('userRole') || 'admin'
   await updateJobStatus(c.env.DB, jobId, uName, uRole)
   // Log history: machine added with charges
   const lineTotal = charges * qty
-  logHistory(c.env.DB, jobId, 'Machine Added', `${body.product_name}${qty > 1 ? ' ×' + qty : ''}${body.product_complaint ? ' — ' + body.product_complaint : ''}${charges > 0 ? ' | ₹' + lineTotal : ''}${body.assigned_staff_id ? ' | Assigned staff ID: ' + body.assigned_staff_id : ''}`, uName, uRole)
+  const warrantyInfo = warrantyType === 'warranty' && warrantyBrand ? ` | Warranty: ${warrantyBrand}` : ''
+  logHistory(c.env.DB, jobId, 'Machine Added', `${body.product_name}${qty > 1 ? ' ×' + qty : ''}${body.product_complaint ? ' — ' + body.product_complaint : ''}${charges > 0 ? ' | ₹' + lineTotal : ''}${warrantyInfo}${body.assigned_staff_id ? ' | Assigned staff ID: ' + body.assigned_staff_id : ''}`, uName, uRole)
   return c.json({ id: result.meta.last_row_id }, 201)
 })
 
@@ -729,7 +754,7 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
 
   const fields: string[] = []
   const vals: any[] = []
-  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges','work_done','return_reason']
+  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges','work_done','return_reason','warranty_type','warranty_brand']
   for (const k of allowed) {
     if (k in body) { fields.push(`${k}=?`); vals.push(body[k]) }
   }
@@ -748,6 +773,7 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
   if (body.assigned_staff_id !== undefined) changes.push(`Staff assigned: ID ${body.assigned_staff_id}`)
   if (body.work_done) changes.push(`Work: ${body.work_done}`)
   if (body.return_reason) changes.push(`Return reason: ${body.return_reason}`)
+  if (body.warranty_type) changes.push(`Warranty: ${body.warranty_type}${body.warranty_brand ? ' ('+body.warranty_brand+')' : ''}`)
   const editDetail = changes.length ? `${machine.product_name}: ${changes.join(', ')}` : `${machine.product_name} edited`
   logHistory(c.env.DB, machine.job_id, body.status ? `Machine: ${body.status}` : 'Machine Edited', editDetail, adminName, adminRole)
   return c.json({ ok: true })
