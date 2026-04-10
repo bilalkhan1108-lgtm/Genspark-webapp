@@ -1,8 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v32                       ║
-// ║  v32: address label fix (To top-left, From bottom-left +4pt),    ║
-// ║  warranty/brand dropdown, active-jobs filter, refresh icon,       ║
-// ║  staff notification dismiss, performance optimizations            ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v33                       ║
+// ║  v33: dispatch-through option (in_person/courier), filter/refresh ║
+// ║  moved to top, address label 95mm fix, instant search, perf      ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -184,15 +183,15 @@ const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { mini
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5', active_only:'#2E7D32' };
-const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD', active_only:'#E8F5E9' };
-const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered', active_only:'Active Only' };
+const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5', active_only:'#2E7D32', courier_pending:'#7B1FA2' };
+const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD', active_only:'#E8F5E9', courier_pending:'#F3E5F5' };
+const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered', active_only:'Active Only', courier_pending:'Courier Pending' };
 const sc = s => STATUS_COLOR[s] || '#888';
 const sb = s => STATUS_BG[s]    || '#f5f5f5';
 const sl = s => STATUS_LABEL[s] || s;
 
-// 300ms debounce for search (optimal UX + performance balance)
-function debounce(fn, ms = 300) {
+// 150ms debounce for search (instant-feel UX for mobile + job number search)
+function debounce(fn, ms = 150) {
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
@@ -257,9 +256,12 @@ window.filterMonth  = function() {
   setFilter(''); S.fromDate = ms; S.toDate = me; loadJobs();
 };
 // Active Only: show only jobs where NOT all machines are repaired/returned
-// This uses a special filter value that the backend understands
 window.filterActiveOnly = function() {
   setFilter('active_only'); S.fromDate = ''; S.toDate = ''; loadJobs();
+};
+// Courier Pending: show jobs dispatched via courier, not yet delivered
+window.filterCourierPending = function() {
+  setFilter('courier_pending'); S.fromDate = ''; S.toDate = ''; loadJobs();
 };
 
 function setFilter(s) {
@@ -716,21 +718,22 @@ function bindView() {
 // DASHBOARD — virtual-scroll list
 // ─────────────────────────────────────────────────────────────────────────────
 function dashboardHTML() {
-  const activeFilterLabel = S.filter === 'active_only' ? 'Active Only' : S.filter ? sl(S.filter) : (S.fromDate || S.toDate ? 'Date Range' : 'All Jobs');
+  const activeFilterLabel = S.filter === 'active_only' ? 'Active Only' : S.filter === 'courier_pending' ? 'Courier Pending' : S.filter ? sl(S.filter) : (S.fromDate || S.toDate ? 'Date Range' : 'All Jobs');
   const hasFilter = S.filter || S.fromDate || S.toDate;
   return `
   <div style="display:flex;flex-direction:column;height:100%">
+    <!-- TOP BAR: Filter + Refresh icons at the very top -->
+    <div style="display:flex;align-items:center;gap:4px;padding:6px 12px 2px;flex-shrink:0;border-bottom:1px solid #f0f0f0">
+      <button id="btn-open-filter" style="display:inline-flex;align-items:center;gap:4px;background:${hasFilter?'#E3F2FD':'transparent'};border:${hasFilter?'1.5px solid #1E88E5':'1px solid #e0e0e0'};border-radius:8px;padding:5px 10px;font-size:12px;font-weight:700;color:${hasFilter?'#1565C0':'#666'};cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:all .15s;line-height:1;min-height:30px">
+        <i class="fas fa-filter" style="font-size:11px"></i>${hasFilter ? ' '+activeFilterLabel : ' Filter'}
+      </button>
+      ${hasFilter ? `<button id="btn-clear-filter" style="display:inline-flex;align-items:center;background:#FFEBEE;border:1px solid #E53935;border-radius:6px;padding:3px 8px;font-size:11px;color:#E53935;font-weight:700;cursor:pointer;line-height:1;min-height:26px"><i class="fas fa-times" style="font-size:9px;margin-right:3px"></i>Clear</button>` : ''}
+      <div style="flex:1"></div>
+      <span id="cc-count" style="font-size:11px;color:#aaa;font-weight:600"></span>
+      <button id="btn-refresh-jobs" style="display:inline-flex;align-items:center;justify-content:center;background:#f0f4ff;border:1.5px solid #1565C0;border-radius:8px;cursor:pointer;color:#1565C0;padding:5px 10px;font-size:14px;-webkit-tap-highlight-color:transparent;transition:transform .15s;min-height:30px;gap:4px" title="Refresh jobs"><i class="fas fa-sync-alt" style="font-size:12px"></i><span style="font-size:12px;font-weight:700">Refresh</span></button>
+    </div>
     ${!isAdmin() ? `<div id="staff-notif-bar" style="display:none;padding:8px 12px 0"></div>` : ''}
     ${isAdmin() ? `<div id="owner-dash" style="padding:6px 10px 2px;display:flex;gap:5px;flex-wrap:wrap"></div>` : ''}
-    <div style="display:flex;align-items:center;justify-content:center;gap:4px;padding:3px 12px 1px;flex-shrink:0">
-      <button id="btn-open-filter" style="display:inline-flex;align-items:center;gap:3px;background:${hasFilter?'#E3F2FD':'transparent'};border:${hasFilter?'1px solid #1E88E5':'none'};border-radius:6px;padding:3px 8px;font-size:11px;font-weight:700;color:${hasFilter?'#1565C0':'#888'};cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;transition:all .15s;line-height:1;min-height:28px">
-        <i class="fas fa-filter" style="font-size:10px"></i>${hasFilter ? ' '+activeFilterLabel : ''}
-      </button>
-      ${hasFilter ? `<button id="btn-clear-filter" style="display:inline-flex;align-items:center;background:#FFEBEE;border:1px solid #E53935;border-radius:5px;padding:2px 6px;font-size:10px;color:#E53935;font-weight:700;cursor:pointer;line-height:1;min-height:24px"><i class="fas fa-times" style="font-size:8px"></i></button>` : ''}
-      <div style="flex:1"></div>
-      <span id="cc-count" style="font-size:10px;color:#aaa;font-weight:600"></span>
-      <button id="btn-refresh-jobs" style="display:inline-flex;align-items:center;justify-content:center;background:none;border:none;cursor:pointer;color:#1565C0;padding:4px;font-size:16px;-webkit-tap-highlight-color:transparent;transition:transform .15s" title="Refresh jobs"><i class="fas fa-sync-alt"></i></button>
-    </div>
     <div id="filter-panel" style="display:none;padding:8px 12px;background:#f8f9fb;border-bottom:1px solid #e0e0e0;flex-shrink:0">
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Filter by Status</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
@@ -741,6 +744,7 @@ function dashboardHTML() {
         <button class="fp-chip ${S.filter==='partial_delivered'?'fp-active':''}" data-fp-status="partial_delivered" style="--fp-color:${sc('partial_delivered')}">Partial</button>
         <button class="fp-chip ${S.filter==='delivered'?'fp-active':''}" data-fp-status="delivered" style="--fp-color:${sc('delivered')}">Delivered</button>
         <button class="fp-chip ${S.filter==='active_only'?'fp-active':''}" data-fp-status="active_only" style="--fp-color:#2E7D32">Active Only</button>
+        <button class="fp-chip ${S.filter==='courier_pending'?'fp-active':''}" data-fp-status="courier_pending" style="--fp-color:#7B1FA2">📮 Courier Pending</button>
         ${isAdmin() ? `<button class="fp-chip ${S.filter==='pending_payment'?'fp-active':''}" data-fp-status="pending_payment" style="--fp-color:#FB8C00">Pending Payment</button>` : ''}
       </div>
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Date Range</div>
@@ -753,6 +757,7 @@ function dashboardHTML() {
         <button class="fp-quick" onclick="filterToday()">📅 Today</button>
         <button class="fp-quick" onclick="filterMonth()">📊 This Month</button>
         <button class="fp-quick" onclick="filterActiveOnly()">🟢 Active Only</button>
+        <button class="fp-quick" onclick="filterCourierPending()">📮 Courier Pending</button>
         ${isAdmin() ? `<button class="fp-quick" onclick="filterByStatus('under_repair')">🔧 Pending</button>` : ''}
       </div>
       ${S.filter === 'delivered' && isAdmin() ? `
@@ -788,7 +793,7 @@ function dashboardHTML() {
       <div style="flex:1.5;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;overflow:hidden;transition:border-color .15s">
         <i class="fas fa-search" style="position:absolute;left:12px;color:#888;font-size:14px;pointer-events:none"></i>
         <input id="dash-search-name" type="search" class="search-input"
-               placeholder="Name or Mobile…" value="${esc(S.searchName || '')}"
+               placeholder="Name or Mobile\u2026" value="${esc(S.searchName || '')}"
                autocomplete="off" autocorrect="off" spellcheck="false"
                style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none">
       </div>
@@ -827,6 +832,7 @@ function _applyChipCounts(d) {
       { label: 'Returned', value: d.returned || 0, icon: '↩️', bg: '#FFF8E1', color: '#B8860B', click: "filterByStatus('returned')" },
       { label: 'Partial', value: d.partial || 0, icon: '📦', bg: '#FFF3E0', color: '#FF6F00', click: "filterByStatus('partial_delivered')" },
       { label: 'Delivered', value: d.completed || 0, icon: '🚚', bg: '#E3F2FD', color: '#1565C0', click: 'filterDone()' },
+      { label: 'Courier', value: d.courierPending || 0, icon: '📮', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterCourierPending()' },
     ];
     ownerDash.innerHTML = tiles.map(t => `
       <div onclick="${t.click}" style="flex:1;min-width:44px;background:${t.bg};border-radius:8px;padding:4px 2px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
@@ -841,7 +847,7 @@ function _applyChipCounts(d) {
 let _jobsLoading = false;
 let _jobsHasMore = true;
 let _jobsOffset  = 0;
-const JOBS_PER_PAGE = 50;
+const JOBS_PER_PAGE = 80; // Higher batch = fewer API calls = faster perceived load
 
 // localStorage job cache for instant dashboard load (performance: millisecond render)
 const _jobCache = {
@@ -918,14 +924,18 @@ async function loadJobs(append = false) {
   }, { passive: true });
 
   // Refresh button — reload all jobs with fresh data (clears cache)
-  document.getElementById('btn-refresh-jobs')?.addEventListener('click', () => {
-    const btn = document.getElementById('btn-refresh-jobs');
-    if (btn) { btn.style.transform = 'rotate(360deg)'; setTimeout(() => { btn.style.transform = ''; }, 400); }
-    _analyticsCacheTs = 0;
-    _jobCache.save(S.filter, []); // clear cache
-    loadJobs();
-    toast('Refreshing…', 'info');
-  }, { passive: true });
+  const refreshBtn = document.getElementById('btn-refresh-jobs');
+  if (refreshBtn && !refreshBtn._bound) {
+    refreshBtn._bound = true;
+    refreshBtn.addEventListener('click', () => {
+      const icon = refreshBtn.querySelector('i');
+      if (icon) { icon.style.transform = 'rotate(360deg)'; icon.style.transition = 'transform .4s'; setTimeout(() => { icon.style.transform = ''; }, 450); }
+      _analyticsCacheTs = 0;
+      _jobCache.save(S.filter, []); // clear cache
+      loadJobs();
+      toast('Refreshing…', 'info');
+    }, { passive: true });
+  }
 
   // Filter panel toggle
   document.getElementById('btn-open-filter')?.addEventListener('click', () => {
@@ -1002,16 +1012,19 @@ async function loadJobs(append = false) {
     render();
   });
 
+  // Instant search: 100ms for job ID, 120ms for name/mobile — no manual refresh needed
   const dSearchJob = debounce(() => {
     S.searchJob = document.getElementById('dash-search-job')?.value.trim() || '';
     S.search = S.searchJob || S.searchName || '';
+    _jobCache.save(S.filter, []); // bypass cache for search
     loadJobs();
-  }, 300);
+  }, 100);
   const dSearchName = debounce(() => {
     S.searchName = document.getElementById('dash-search-name')?.value.trim() || '';
     S.search = S.searchJob || S.searchName || '';
+    _jobCache.save(S.filter, []); // bypass cache for search
     loadJobs();
-  }, 300);
+  }, 120);
   document.getElementById('dash-search-job')?.addEventListener('input', dSearchJob);
   document.getElementById('dash-search-name')?.addEventListener('input', dSearchName);
 }
@@ -1081,7 +1094,7 @@ function jobRowHTML(j) {
         <span class="job-id">${j.id}</span>
         <span class="status-chip" style="background:${bg};color:${color};border-color:${color}">${sl(j.status)}</span>
       </div>
-      <div class="job-name">${esc(j.snap_name)}</div>
+      <div class="job-name">${esc(j.snap_name)}${j.dispatch_method === 'courier' ? ' <span style="background:#F3E5F5;color:#7B1FA2;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;margin-left:4px">📮 Courier</span>' : ''}</div>
       <div class="job-row-foot">
         <span class="job-meta"><i class="fas fa-tools"></i> ${j.machine_count || 0}</span>
         ${hasSuperRight('view_financials')
@@ -1137,6 +1150,19 @@ function newJobHTML() {
         <label class="form-label">Received Amount (₹)</label>
         <input id="nj-received" type="number" class="form-input" placeholder="0" min="0" inputmode="decimal">
       </div>` : ''}
+
+      <!-- Dispatch Method -->
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-truck" style="color:#7B1FA2"></i> Dispatch Through</label>
+        <select id="nj-dispatch" class="form-input">
+          <option value="in_person" selected>🤝 In Person</option>
+          <option value="courier">📮 Courier</option>
+        </select>
+      </div>
+      <div id="nj-dispatch-courier-wrap" class="form-group" style="display:none">
+        <label class="form-label">Courier Name <span style="color:#999;font-size:12px">(optional)</span></label>
+        <input id="nj-dispatch-courier" type="text" class="form-input" placeholder="e.g. DTDC, BlueDart">
+      </div>
     </div>
 
     <div class="card">
@@ -1261,6 +1287,12 @@ function bindNewJob() {
   document.getElementById('nj-warranty')?.addEventListener('change', e => {
     const wrap = document.getElementById('nj-brand-wrap');
     if (wrap) wrap.style.display = e.target.value === 'warranty' ? 'block' : 'none';
+  });
+
+  // Dispatch method toggle — show courier name field when courier selected
+  document.getElementById('nj-dispatch')?.addEventListener('change', e => {
+    const wrap = document.getElementById('nj-dispatch-courier-wrap');
+    if (wrap) wrap.style.display = e.target.value === 'courier' ? 'block' : 'none';
   });
 
   const mobileIn = document.getElementById('nj-mobile');
@@ -1491,6 +1523,7 @@ function bindNewJob() {
     btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating…';
 
     // Capture form data before async ops
+    const njDispatch = document.getElementById('nj-dispatch')?.value || 'in_person';
     const formData = {
       customer_name:    name,
       customer_mobile:  mobile,
@@ -1499,6 +1532,8 @@ function bindNewJob() {
       customer_category: document.getElementById('nj-category')?.value || 'Salon',
       note:             document.getElementById('nj-note')?.value.trim()    || null,
       received_amount:  hasSuperRight('view_financials') ? (parseFloat(document.getElementById('nj-received')?.value) || 0) : 0,
+      dispatch_method:  njDispatch,
+      dispatch_courier_name: njDispatch === 'courier' ? (document.getElementById('nj-dispatch-courier')?.value.trim() || null) : null,
     };
     const njWarrantyType = document.getElementById('nj-warranty')?.value || 'out_warranty';
     const njWarrantyBrand = njWarrantyType === 'warranty' ? (document.getElementById('nj-brand')?.value || null) : null;
@@ -1642,6 +1677,11 @@ function renderDetail() {
         <i class="fas fa-calendar info-icon" style="color:${color}"></i>
         <span class="info-val text-muted">${fmtDate(j.created_at)}</span>
       </div>
+      ${j.dispatch_method === 'courier' ? `
+      <div class="info-row" style="background:#F3E5F5;border-radius:8px;padding:8px 12px;margin-top:4px">
+        <i class="fas fa-truck info-icon" style="color:#7B1FA2"></i>
+        <span class="info-val" style="color:#7B1FA2;font-weight:800">📮 Dispatch through Courier${j.dispatch_courier_name ? ' — ' + esc(j.dispatch_courier_name) : ''}</span>
+      </div>` : ''}
       ${hasSuperRight('view_jobs') && j.snap_mobile ? `
       <div class="info-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
         <button id="btn-cust-history" class="btn-sm" style="background:#7B1FA2;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer">
@@ -3065,6 +3105,10 @@ function jobCardPrintHTML(j) {
           <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Category</div>
           <div style="font-size:18px;color:#3949AB;font-weight:700">${esc(j.snap_category)}</div>
         </div>` : ''}
+        ${j.dispatch_method === 'courier' ? `<div>
+          <div style="font-size:12px;color:#999;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">Dispatch</div>
+          <div style="font-size:18px;color:#7B1FA2;font-weight:800">📮 Courier${j.dispatch_courier_name ? ' — ' + esc(j.dispatch_courier_name) : ''}</div>
+        </div>` : ''}
       </div>
     </div>
     <div style="border-top:2px solid #f0f0f0;margin:0 30px 4px"></div>`;
@@ -4329,6 +4373,7 @@ async function printAddressLabel(j) {
   toast('Generating address label…', 'info');
   try {
     // 101mm × 152mm at 300 DPI = 1193px × 1795px
+    // Width constraint: 95mm usable = 1122px (padded from 101mm)
     const W = 1193;
     const H = 1795;
     const canvas = document.createElement('canvas');
@@ -4337,15 +4382,16 @@ async function printAddressLabel(j) {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, W, H);
 
-    const padX = 60;
-    const maxTextW = W - padX * 2;
+    // Margins: ensure content fits within 95mm = 1122px usable width
+    const padX = 36; // (1193 - 1122) / 2 ≈ 36px each side → 95mm usable
+    const maxTextW = W - padX * 2; // 1121px ≈ 95mm
 
     // ── FROM block height (bottom-left, left-aligned, +4pt fonts) ──
-    const fromBlockH = 210;
+    const fromBlockH = 220;
     const fromDividerY = H - fromBlockH - 20;
 
-    // Available height for TO section
-    const toStartY = 80; // top padding
+    // Available height for TO section — start lower to avoid "T" clipping
+    const toStartY = 100; // extra top padding to prevent "To" top-line clipping
     const toAvailH = fromDividerY - toStartY - 20;
 
     // ── TO content data ──
@@ -4358,20 +4404,20 @@ async function printAddressLabel(j) {
     function measureToBlock(scale) {
       let h = 0;
       const toSize = Math.round(38 * scale);
-      h += toSize + 8 * scale; // "To," label
-      const nameSize = Math.round(64 * scale);
+      h += toSize + 16 * scale; // "To," label + gap before name (extra gap to separate)
+      const nameSize = Math.round(60 * scale);
       ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
       const nameLines = wrapText(ctx, nameText, maxTextW);
-      h += nameLines.length * (nameSize + 6 * scale) + 6 * scale;
+      h += nameLines.length * (nameSize + 8 * scale) + 10 * scale;
       if (addrText) {
         const addrSize = Math.round(40 * scale);
         ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
         const addrLines = wrapText(ctx, addrText, maxTextW);
-        h += addrLines.length * (addrSize + 6 * scale) + 8 * scale;
+        h += addrLines.length * (addrSize + 6 * scale) + 10 * scale;
       }
       const mobSize = Math.round(46 * scale);
-      h += mobSize + 8 * scale;
-      if (mob2Text) h += Math.round(38 * scale) + 6 * scale;
+      h += mobSize + 10 * scale;
+      if (mob2Text) h += Math.round(38 * scale) + 8 * scale;
       return h;
     }
 
@@ -4381,51 +4427,53 @@ async function printAddressLabel(j) {
       if (measureToBlock(s) <= toAvailH) { bestScale = s; break; }
     }
 
-    // ── RENDER TO section — top-left aligned, no blank gaps ──
+    // ── RENDER TO section — top-left aligned, "To" and name clearly separated ──
     let y = toStartY;
     const toSize = Math.round(38 * bestScale);
     ctx.fillStyle = '#888888';
     ctx.font = `bold ${toSize}px "Segoe UI", Arial, sans-serif`;
     ctx.textAlign = 'left';
-    ctx.fillText('To,', padX, y); y += toSize + Math.round(8 * bestScale);
+    ctx.fillText('To,', padX, y);
+    y += toSize + Math.round(16 * bestScale); // extra gap after "To," before name
 
-    // Name — large, bold, left-aligned (tight after "To,")
-    const nameSize = Math.round(64 * bestScale);
+    // Name — bold, left-aligned, positioned clearly below "To,"
+    const nameSize = Math.round(60 * bestScale);
     ctx.fillStyle = '#1a1a2e';
     ctx.font = `900 ${nameSize}px "Segoe UI", Arial, sans-serif`;
     const nameLines = wrapText(ctx, nameText, maxTextW);
     nameLines.forEach(line => {
       ctx.fillText(line, padX, y);
-      y += nameSize + Math.round(4 * bestScale);
+      y += nameSize + Math.round(6 * bestScale);
     });
-    y += Math.round(4 * bestScale);
+    y += Math.round(8 * bestScale);
 
-    // Address — left-aligned, tight after name
+    // Address — left-aligned, tight after name, wraps properly for long city names
     if (addrText) {
       const addrSize = Math.round(40 * bestScale);
       ctx.fillStyle = '#333333';
       ctx.font = `500 ${addrSize}px "Segoe UI", Arial, sans-serif`;
-      const addrLines = wrapText(ctx, addrText, maxTextW);
+      // Use character-aware wrapping for long words like "Himmatnagar"
+      const addrLines = wrapTextSmart(ctx, addrText, maxTextW);
       addrLines.forEach(line => {
         ctx.fillText(line, padX, y);
-        y += addrSize + Math.round(4 * bestScale);
+        y += addrSize + Math.round(5 * bestScale);
       });
-      y += Math.round(6 * bestScale);
+      y += Math.round(8 * bestScale);
     }
 
     // Mobile — left-aligned, blue
     const mobSize = Math.round(46 * bestScale);
     ctx.fillStyle = '#1565C0';
     ctx.font = `bold ${mobSize}px "Segoe UI", Arial, sans-serif`;
-    ctx.fillText(mobText, padX, y); y += mobSize + Math.round(6 * bestScale);
+    ctx.fillText(mobText, padX, y); y += mobSize + Math.round(8 * bestScale);
     if (mob2Text) {
       const mob2Size = Math.round(38 * bestScale);
       ctx.font = `bold ${mob2Size}px "Segoe UI", Arial, sans-serif`;
-      ctx.fillText(mob2Text, padX, y); y += mob2Size + Math.round(4 * bestScale);
+      ctx.fillText(mob2Text, padX, y); y += mob2Size + Math.round(6 * bestScale);
     }
 
-    // ── DIVIDER LINE — no blank gap, placed tightly below TO or at fromDividerY ──
-    const divY = Math.max(y + 14, fromDividerY);
+    // ── DIVIDER LINE — placed tightly below TO content ──
+    const divY = Math.max(y + 16, fromDividerY);
     ctx.strokeStyle = '#aaaaaa';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([8, 5]);
@@ -4433,21 +4481,28 @@ async function printAddressLabel(j) {
     ctx.setLineDash([]);
 
     // ── FROM section — bottom-left, left-aligned, +4pt larger fonts ──
-    let fy = divY + 24;
+    let fy = divY + 26;
     ctx.textAlign = 'left';
 
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 34px "Segoe UI", Arial, sans-serif';  // was 30 → +4pt
-    ctx.fillText('From,', padX, fy); fy += 40;
+    ctx.font = 'bold 36px "Segoe UI", Arial, sans-serif';  // was 30 → +6pt (34+2)
+    ctx.fillText('From,', padX, fy); fy += 44;
 
     ctx.fillStyle = '#E53935';
-    ctx.font = '900 36px "Segoe UI", Arial, sans-serif';    // was 32 → +4pt
-    ctx.fillText('ADITION ELECTRIC SOLUTION', padX, fy); fy += 42;
+    ctx.font = '900 38px "Segoe UI", Arial, sans-serif';    // was 32 → +6pt (36+2)
+    // Wrap company name if it overflows 95mm
+    const compLines = wrapText(ctx, 'ADITION ELECTRIC SOLUTION', maxTextW);
+    compLines.forEach(line => {
+      ctx.fillText(line, padX, fy); fy += 44;
+    });
 
     ctx.fillStyle = '#555555';
-    ctx.font = '500 30px "Segoe UI", Arial, sans-serif';    // was 26 → +4pt
-    ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'].forEach(line => {
-      ctx.fillText(line, padX, fy); fy += 34;
+    ctx.font = '500 32px "Segoe UI", Arial, sans-serif';    // was 26 → +6pt (30+2)
+    const fromAddr = ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'];
+    fromAddr.forEach(line => {
+      // Wrap from-address lines that exceed 95mm
+      const wrapped = wrapText(ctx, line, maxTextW);
+      wrapped.forEach(wl => { ctx.fillText(wl, padX, fy); fy += 36; });
     });
 
     // Convert to blob & share/download
@@ -4497,12 +4552,47 @@ function wrapText(ctx, text, maxWidth) {
   return lines;
 }
 
+// Smart text wrap that handles long words (e.g. "Himmatnagar") by breaking them
+function wrapTextSmart(ctx, text, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const test = line ? line + ' ' + word : word;
+    if (ctx.measureText(test).width > maxWidth) {
+      if (line) lines.push(line);
+      // If single word is too wide, break it character by character
+      if (ctx.measureText(word).width > maxWidth) {
+        let part = '';
+        for (const ch of word) {
+          if (ctx.measureText(part + ch).width > maxWidth && part) {
+            lines.push(part);
+            part = ch;
+          } else {
+            part += ch;
+          }
+        }
+        line = part;
+      } else {
+        line = word;
+      }
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ADMIN DASHBOARD — Summary tiles, revenue charts, staff performance
 // ─────────────────────────────────────────────────────────────────────────────
 function adminDashHTML() {
   return `
   <div class="view-pad" id="admin-dash-root">
+    <div style="display:flex;justify-content:flex-end;padding:4px 0 0">
+      <button id="btn-refresh-admin" style="display:inline-flex;align-items:center;gap:4px;background:#f0f4ff;border:1.5px solid #1565C0;border-radius:8px;cursor:pointer;color:#1565C0;padding:5px 12px;font-size:13px;font-weight:700;-webkit-tap-highlight-color:transparent;transition:transform .15s" title="Refresh dashboard"><i class="fas fa-sync-alt" style="font-size:12px"></i> Refresh</button>
+    </div>
     <div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>
   </div>`;
 }
@@ -4510,6 +4600,14 @@ function adminDashHTML() {
 async function loadAdminDash() {
   const root = document.getElementById('admin-dash-root');
   if (!root) return;
+  // Bind refresh button before loading data
+  document.getElementById('btn-refresh-admin')?.addEventListener('click', () => {
+    const btn = document.getElementById('btn-refresh-admin');
+    if (btn) { btn.querySelector('i').style.transform = 'rotate(360deg)'; btn.querySelector('i').style.transition = 'transform .4s'; setTimeout(() => { btn.querySelector('i').style.transform = ''; }, 450); }
+    _analyticsCacheTs = 0;
+    loadAdminDash();
+    toast('Refreshing dashboard…', 'info');
+  }, { passive: true });
   try {
     const r = await API.get('/api/analytics');
     const d = r.data;

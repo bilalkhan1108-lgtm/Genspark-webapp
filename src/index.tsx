@@ -147,6 +147,9 @@ async function ensureDbSchema(db: D1Database) {
     // v32: warranty type and brand columns on machines
     await db.prepare(`ALTER TABLE machines ADD COLUMN warranty_type TEXT NOT NULL DEFAULT 'out_warranty'`).run().catch(() => {})
     await db.prepare(`ALTER TABLE machines ADD COLUMN warranty_brand TEXT`).run().catch(() => {})
+    // v33: dispatch_method column on jobs (in_person/courier) — set at job creation
+    await db.prepare(`ALTER TABLE jobs ADD COLUMN dispatch_method TEXT NOT NULL DEFAULT 'in_person'`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE jobs ADD COLUMN dispatch_courier_name TEXT`).run().catch(() => {})
     // Ensure job_history audit table exists with index
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS job_history (
@@ -173,6 +176,11 @@ async function ensureDbSchema(db: D1Database) {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_staff ON machines(assigned_staff_id)`).run().catch(() => {})
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_status ON machines(status)`).run().catch(() => {})
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC)`).run().catch(() => {})
+    // v33: index for dispatch_method filter queries
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_dispatch ON jobs(dispatch_method)`).run().catch(() => {})
+    // v33: composite index for mobile search speed
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_mobile2 ON jobs(snap_mobile2)`).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_cust_mobile ON customers(mobile)`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
@@ -291,7 +299,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   const monthStart = today.substring(0, 8) + '01'
 
   const [total, pending, completed, todayCount, monthCount, byStatus, byStaff,
-         urCount, repCount, retCount, partialCount] = await Promise.all([
+         urCount, repCount, retCount, partialCount, courierPendingCount] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin}`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status IN ('under_repair','repaired','returned')`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='delivered'`).first<any>(),
@@ -309,6 +317,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='repaired'`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='returned'`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='partial_delivered'`).first<any>(),
+    c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.dispatch_method='courier' AND j.status != 'delivered'`).first<any>(),
   ])
 
   // Revenue data for admin dashboard
@@ -354,6 +363,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     repaired: repCount?.cnt || 0,
     returned: retCount?.cnt || 0,
     partial: partialCount?.cnt || 0,
+    courierPending: courierPendingCount?.cnt || 0,
     byStatus: isAdmin ? byStatus.results : [],
     byStaff: isAdmin ? byStaff.results : [],
     ...revenueData,
@@ -381,6 +391,10 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   // active_only: hide jobs where ALL machines are repaired or returned
   if (status === 'active_only') {
     conds.push(`EXISTS (SELECT 1 FROM machines mx WHERE mx.job_id=j.id AND mx.status='under_repair')`)
+    conds.push("j.status != 'delivered'")
+  } else if (status === 'courier_pending') {
+    // Show jobs dispatched via courier that are NOT yet delivered
+    conds.push("j.dispatch_method='courier'")
     conds.push("j.status != 'delivered'")
   } else if (status) {
     conds.push('j.status=?'); params.push(status)
@@ -414,7 +428,7 @@ app.get('/api/jobs', authMiddleware, async (c) => {
 
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
   const { results } = await c.env.DB.prepare(`
-    SELECT j.id, j.snap_name, j.snap_mobile, j.status,
+    SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.dispatch_method, j.dispatch_courier_name,
            j.received_amount, j.discount, j.payment_method, j.created_at, j.updated_at,
            (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
            (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges,
@@ -495,19 +509,22 @@ app.post('/api/jobs', authMiddleware, async (c) => {
   ).bind(customer_mobile).first<any>()
 
   const isAdminCreate = roleLevel(c.get('userRole')) >= 2
+  const dispatchMethod = body.dispatch_method === 'courier' ? 'courier' : 'in_person'
+  const dispatchCourierName = dispatchMethod === 'courier' ? (body.dispatch_courier_name || null) : null
   await c.env.DB.prepare(
     `INSERT INTO jobs(id,customer_id,snap_name,snap_mobile,snap_mobile2,
-                      snap_address,snap_category,note,received_amount)
-     VALUES(?,?,?,?,?,?,?,?,?)`
+                      snap_address,snap_category,note,received_amount,dispatch_method,dispatch_courier_name)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(jobId, cust.id, customer_name, customer_mobile,
          body.customer_mobile2 || null, body.customer_address || null,
          category,
          body.note || null,
-         isAdminCreate ? (body.received_amount || 0) : 0).run()
+         isAdminCreate ? (body.received_amount || 0) : 0,
+         dispatchMethod, dispatchCourierName).run()
 
   const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first<any>()
   // Log history: job created
-  logHistory(c.env.DB, jobId, 'Job Created', `Customer: ${customer_name} (${customer_mobile})${body.note ? ' | Note: ' + body.note : ''}`, c.get('userName') || 'System', c.get('userRole') || 'admin')
+  logHistory(c.env.DB, jobId, 'Job Created', `Customer: ${customer_name} (${customer_mobile})${body.note ? ' | Note: ' + body.note : ''}${dispatchMethod === 'courier' ? ' | Dispatch: Courier' + (dispatchCourierName ? ' (' + dispatchCourierName + ')' : '') : ''}`, c.get('userName') || 'System', c.get('userRole') || 'admin')
   return c.json(job, 201)
 })
 // ── API: Delivered jobs with filters (date range, delivery type) ─────────────
@@ -605,6 +622,7 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
     'note', 'status',
     'delivery_method', 'delivery_receiver_name', 'delivery_receiver_mobile',
     'delivery_courier_name', 'delivery_tracking', 'delivery_address',
+    'dispatch_method', 'dispatch_courier_name',
     'snap_name', 'snap_mobile', 'snap_mobile2', 'snap_address', 'snap_category',
     'received_amount', 'discount', 'payment_method'
   ]
