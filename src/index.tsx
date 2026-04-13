@@ -150,6 +150,11 @@ async function ensureDbSchema(db: D1Database) {
     // v33: dispatch_method column on jobs (in_person/courier) — set at job creation
     await db.prepare(`ALTER TABLE jobs ADD COLUMN dispatch_method TEXT NOT NULL DEFAULT 'in_person'`).run().catch(() => {})
     await db.prepare(`ALTER TABLE jobs ADD COLUMN dispatch_courier_name TEXT`).run().catch(() => {})
+    // v34: machine-level delivery columns
+    await db.prepare(`ALTER TABLE machines ADD COLUMN delivery_method TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN delivery_receiver_name TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN delivery_courier_name TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN delivered_at TEXT`).run().catch(() => {})
     // Ensure job_history audit table exists with index
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS job_history (
@@ -221,16 +226,37 @@ async function updateJobStatus(db: D1Database, jobId: string, userName?: string,
   ).bind(jobId).all<any>()
   if (!machines.length) return
   const job = await db.prepare('SELECT status FROM jobs WHERE id=?').bind(jobId).first<any>()
-  if (job?.status === 'delivered') return
+  if (job?.status === 'delivered') return // whole-job delivery overrides
   const allReturned    = machines.every((m: any) => m.status === 'returned')
   const anyUnderRepair = machines.some((m: any)  => m.status === 'under_repair')
   const anyReturned    = machines.some((m: any)  => m.status === 'returned')
   const anyRepaired    = machines.some((m: any)  => m.status === 'repaired')
-  // partial_delivered: some returned + some repaired/under_repair
-  let newStatus = anyUnderRepair ? 'under_repair' : allReturned ? 'returned' : (anyReturned && anyRepaired) ? 'partial_delivered' : 'repaired'
+  const anyDelivered   = machines.some((m: any)  => m.status === 'delivered')
+  const allDelivered   = machines.every((m: any) => m.status === 'delivered' || m.status === 'returned')
+  // partial_delivered: some machines delivered but others still under_repair/repaired
+  let newStatus: string
+  if (allDelivered && machines.some((m: any) => m.status === 'delivered')) {
+    newStatus = 'delivered'
+  } else if (anyDelivered) {
+    newStatus = 'partial_delivered'
+  } else if (anyUnderRepair) {
+    newStatus = 'under_repair'
+  } else if (allReturned) {
+    newStatus = 'returned'
+  } else if (anyReturned && anyRepaired) {
+    newStatus = 'partial_delivered'
+  } else {
+    newStatus = 'repaired'
+  }
   const oldStatus = job?.status
-  await db.prepare(`UPDATE jobs SET status=?,updated_at=datetime('now') WHERE id=?`)
-    .bind(newStatus, jobId).run()
+  // v34: If all machines are now delivered, also set delivered_at on the job
+  if (newStatus === 'delivered' && oldStatus !== 'delivered') {
+    await db.prepare(`UPDATE jobs SET status=?,delivered_at=datetime('now'),updated_at=datetime('now') WHERE id=?`)
+      .bind(newStatus, jobId).run()
+  } else {
+    await db.prepare(`UPDATE jobs SET status=?,updated_at=datetime('now') WHERE id=?`)
+      .bind(newStatus, jobId).run()
+  }
   // Log auto status transition
   if (oldStatus !== newStatus && userName) {
     logHistory(db, jobId, `Auto Status: ${newStatus}`, `Job status auto-changed from ${oldStatus} to ${newStatus}`, userName, userRole || 'system')
@@ -427,14 +453,14 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   if (to)   { conds.push('DATE(j.created_at)<=?'); params.push(to) }
 
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
+  // v35: Optimized query — uses indexed subqueries, avoids costly JOIN for thumb
   const { results } = await c.env.DB.prepare(`
     SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.dispatch_method, j.dispatch_courier_name,
            j.received_amount, j.discount, j.payment_method, j.created_at, j.updated_at,
-           (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
-           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges,
-           (SELECT url FROM machine_images mi
-            JOIN machines m2 ON mi.machine_id=m2.id
-            WHERE m2.job_id=j.id ORDER BY mi.id LIMIT 1) AS thumb
+           COALESCE((SELECT SUM(quantity) FROM machines WHERE job_id=j.id), 0) AS machine_count,
+           COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'), 0) AS total_charges,
+           (SELECT mi.url FROM machine_images mi WHERE mi.machine_id IN
+             (SELECT id FROM machines WHERE job_id=j.id LIMIT 1) LIMIT 1) AS thumb
     FROM jobs j ${where}
     ORDER BY j.created_at DESC LIMIT ${limit} OFFSET ${offset}
   `).bind(...params).all<any>()
@@ -752,6 +778,13 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
       const extraVals: any[] = []
       if ('work_done' in body)    { extraFields.push('work_done=?');    extraVals.push(body.work_done) }
       if ('return_reason' in body){ extraFields.push('return_reason=?'); extraVals.push(body.return_reason) }
+      // v34: machine-level delivery fields
+      if (body.status === 'delivered') {
+        extraFields.push('delivery_method=?');        extraVals.push(body.delivery_method || 'in_person')
+        extraFields.push('delivery_receiver_name=?'); extraVals.push(body.delivery_receiver_name || null)
+        extraFields.push('delivery_courier_name=?');  extraVals.push(body.delivery_courier_name || null)
+        extraFields.push("delivered_at=datetime('now')")
+      }
       const setClause = ['status=?', ...extraFields, `updated_at=datetime('now')`].join(',')
       await c.env.DB.prepare(`UPDATE machines SET ${setClause} WHERE id=?`)
         .bind(body.status, ...extraVals, id).run()
@@ -760,10 +793,12 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
       await updateJobStatus(c.env.DB, machine.job_id, staffName, staffRole)
       // Log history: machine status change
       const detail = body.status === 'repaired' && body.work_done
-        ? `${machine.product_name} → Repaired. Work: ${body.work_done}`
+        ? `${machine.product_name} \u2192 Repaired. Work: ${body.work_done}`
         : body.status === 'returned' && body.return_reason
-        ? `${machine.product_name} → Returned. Reason: ${body.return_reason}`
-        : `${machine.product_name} → ${body.status}`
+        ? `${machine.product_name} \u2192 Returned. Reason: ${body.return_reason}`
+        : body.status === 'delivered'
+        ? `${machine.product_name} \u2192 Delivered (${body.delivery_method === 'courier' ? 'Courier' : 'In Person'}${body.delivery_receiver_name ? ' to ' + body.delivery_receiver_name : ''})`
+        : `${machine.product_name} \u2192 ${body.status}`
       logHistory(c.env.DB, machine.job_id, `Machine: ${body.status}`, detail, staffName, staffRole)
       return c.json({ ok: true })
     }
@@ -772,11 +807,13 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
 
   const fields: string[] = []
   const vals: any[] = []
-  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges','work_done','return_reason','warranty_type','warranty_brand']
+  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges','work_done','return_reason','warranty_type','warranty_brand','delivery_method','delivery_receiver_name','delivery_courier_name']
   for (const k of allowed) {
     if (k in body) { fields.push(`${k}=?`); vals.push(body[k]) }
   }
   if (!fields.length) return c.json({ error: 'Nothing to update' }, 400)
+  // v34: set delivered_at timestamp for machine-level delivery
+  if (body.status === 'delivered') fields.push(`delivered_at=datetime('now')`)
   fields.push(`updated_at=datetime('now')`)
   vals.push(id)
   await c.env.DB.prepare(`UPDATE machines SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()

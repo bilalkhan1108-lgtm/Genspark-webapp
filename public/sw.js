@@ -1,7 +1,6 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v25
-// Strategy: Cache-first for static UI  ·  Network-first for API
-// Scope: / (serves entire app shell)
-const CACHE_VER  = 'aes-v25';
+// Service Worker — ADITION ELECTRIC SOLUTION v35
+// Strategy: Cache-first for static UI · Network-first for API · Offline memory via IndexedDB
+const CACHE_VER  = 'aes-v35';
 const STATIC_URLS = [
   '/',
   '/static/app.js',
@@ -34,7 +33,7 @@ self.addEventListener('fetch', e => {
   const { request } = e;
   const url = new URL(request.url);
 
-  // 1. API calls → network-first, don't cache
+  // 1. API calls → network-only (IndexedDB handles offline data in the app)
   if (url.pathname.startsWith('/api/')) return;
 
   // 2. CDN resources (tailwind, fontawesome, etc.) → stale-while-revalidate

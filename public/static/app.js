@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v33                       ║
-// ║  v33: dispatch-through option (in_person/courier), filter/refresh ║
-// ║  moved to top, address label 95mm fix, instant search, perf      ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v35                       ║
+// ║  v35: IndexedDB offline memory for instant load on app open,     ║
+// ║  machine delivered + partial_delivered, perf optimizations        ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -98,6 +98,152 @@ const _sugCache = {
     return d.amounts.slice(0, 10);
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INDEXEDDB OFFLINE MEMORY — instant app load
+// Stores jobs list + job details persistently; renders cached data on app open
+// before any network request, then silently refreshes in background.
+// ─────────────────────────────────────────────────────────────────────────────
+const IDB = {
+  _db: null,
+  _dbReady: null,
+  DB_NAME: 'AES_OFFLINE_V2',
+  DB_VER: 2,
+  STORE_JOBS: 'jobs',
+  STORE_DETAILS: 'details',
+  STORE_META: 'meta',
+
+  init() {
+    if (this._dbReady) return this._dbReady;
+    this._dbReady = new Promise((resolve, reject) => {
+      if (!window.indexedDB) { resolve(null); return; }
+      const req = indexedDB.open(this.DB_NAME, this.DB_VER);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(this.STORE_JOBS)) {
+          db.createObjectStore(this.STORE_JOBS, { keyPath: 'cacheKey' });
+        }
+        if (!db.objectStoreNames.contains(this.STORE_DETAILS)) {
+          db.createObjectStore(this.STORE_DETAILS, { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains(this.STORE_META)) {
+          db.createObjectStore(this.STORE_META, { keyPath: 'key' });
+        }
+      };
+      req.onsuccess = () => { this._db = req.result; resolve(this._db); };
+      req.onerror = () => resolve(null);
+    });
+    return this._dbReady;
+  },
+
+  async _tx(store, mode) {
+    const db = await this.init();
+    if (!db) return null;
+    try {
+      return db.transaction(store, mode).objectStore(store);
+    } catch { return null; }
+  },
+
+  // Save jobs list for a given filter key
+  async saveJobs(filterKey, jobs) {
+    const os = await this._tx(this.STORE_JOBS, 'readwrite');
+    if (!os) return;
+    try {
+      os.put({ cacheKey: filterKey || '_all', ts: Date.now(), data: jobs.slice(0, 200) });
+    } catch {}
+  },
+
+  // Load jobs list for a given filter key
+  async loadJobs(filterKey) {
+    const os = await this._tx(this.STORE_JOBS, 'readonly');
+    if (!os) return null;
+    return new Promise(resolve => {
+      const req = os.get(filterKey || '_all');
+      req.onsuccess = () => {
+        const r = req.result;
+        if (!r || !r.data) { resolve(null); return; }
+        // Cache valid for 30 minutes (offline memory)
+        if (Date.now() - r.ts > 1800000) { resolve(r.data); return; } // still return stale, just flag
+        resolve(r.data);
+      };
+      req.onerror = () => resolve(null);
+    });
+  },
+
+  // Save full job detail
+  async saveDetail(job) {
+    if (!job || !job.id) return;
+    const os = await this._tx(this.STORE_DETAILS, 'readwrite');
+    if (!os) return;
+    try {
+      os.put({ ...job, _cachedAt: Date.now() });
+    } catch {}
+  },
+
+  // Load cached job detail
+  async loadDetail(jobId) {
+    if (!jobId) return null;
+    const os = await this._tx(this.STORE_DETAILS, 'readonly');
+    if (!os) return null;
+    return new Promise(resolve => {
+      const req = os.get(jobId);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  },
+
+  // Save analytics cache
+  async saveMeta(key, value) {
+    const os = await this._tx(this.STORE_META, 'readwrite');
+    if (!os) return;
+    try { os.put({ key, value, ts: Date.now() }); } catch {}
+  },
+
+  async loadMeta(key) {
+    const os = await this._tx(this.STORE_META, 'readonly');
+    if (!os) return null;
+    return new Promise(resolve => {
+      const req = os.get(key);
+      req.onsuccess = () => resolve(req.result?.value || null);
+      req.onerror = () => resolve(null);
+    });
+  },
+
+  // Bulk save all job details from the jobs list (for instant detail view)
+  async bulkSaveDetails(jobs) {
+    const db = await this.init();
+    if (!db || !jobs?.length) return;
+    try {
+      const tx = db.transaction(this.STORE_DETAILS, 'readwrite');
+      const os = tx.objectStore(this.STORE_DETAILS);
+      for (const j of jobs) {
+        if (j && j.id) os.put({ ...j, _cachedAt: Date.now(), _listCache: true });
+      }
+    } catch {}
+  },
+
+  // Save staff list for offline
+  async saveStaff(staff) {
+    await this.saveMeta('staff', staff);
+  },
+  async loadStaff() {
+    return await this.loadMeta('staff');
+  },
+
+  // Clear all cached data
+  async clear() {
+    const db = await this.init();
+    if (!db) return;
+    try {
+      db.transaction(this.STORE_JOBS, 'readwrite').objectStore(this.STORE_JOBS).clear();
+      db.transaction(this.STORE_DETAILS, 'readwrite').objectStore(this.STORE_DETAILS).clear();
+      db.transaction(this.STORE_META, 'readwrite').objectStore(this.STORE_META).clear();
+    } catch {}
+  }
+};
+
+// Initialize IndexedDB immediately on script load (non-blocking)
+IDB.init();
 
 // Build suggestion tile HTML — scrollable horizontal row, tappable
 function suggestionTilesHTML(items, targetId, extraClass) {
@@ -453,6 +599,7 @@ async function login(email, password) {
 function logout() {
   S.token = null; S.user = null; S.jobs = []; S.job = null; S.staff = []; S.requests = [];
   localStorage.removeItem('AES_TOKEN'); localStorage.removeItem('AES_USER');
+  IDB.clear(); // Clear offline memory on logout
   navigate('login');
 }
 
@@ -805,16 +952,23 @@ function dashboardHTML() {
 // Analytics 30-second cache — only used for chip counts (no separate stats bar)
 let _analyticsCache = null;
 let _analyticsCacheTs = 0;
-function loadAnalytics(force) {
+async function loadAnalytics(force) {
   const now = Date.now();
   if (!force && _analyticsCache && (now - _analyticsCacheTs) < 30000) {
     _applyChipCounts(_analyticsCache);
     return;
   }
+  // Instant: load from offline cache first
+  if (!_analyticsCache) {
+    const cached = await IDB.loadMeta('analytics');
+    if (cached) { _analyticsCache = cached; _applyChipCounts(cached); }
+  }
+  // Background: fetch fresh
   API.get('/api/analytics').then(r => {
     _analyticsCache = r.data;
     _analyticsCacheTs = Date.now();
     _applyChipCounts(r.data);
+    IDB.saveMeta('analytics', r.data); // Persist for instant load
   }).catch(() => {});
 }
 function _applyChipCounts(d) {
@@ -843,39 +997,35 @@ function _applyChipCounts(d) {
   }
 }
 
-// Job cache for deduplication + localStorage persistence
+// Job loading state
 let _jobsLoading = false;
 let _jobsHasMore = true;
 let _jobsOffset  = 0;
-const JOBS_PER_PAGE = 80; // Higher batch = fewer API calls = faster perceived load
+const JOBS_PER_PAGE = 100; // Higher batch = fewer API calls = faster perceived load
 
-// localStorage job cache for instant dashboard load (performance: millisecond render)
-const _jobCache = {
-  _key: 'AES_JOBS_CACHE_V3',
-  save(filter, jobs) {
-    try { localStorage.setItem(this._key + '_' + (filter||'all'), JSON.stringify({ ts: Date.now(), data: jobs.slice(0, 100) })); } catch {}
-  },
-  load(filter) {
-    try {
-      const raw = JSON.parse(localStorage.getItem(this._key + '_' + (filter||'all')) || 'null');
-      if (!raw || !raw.data) return null;
-      // Cache valid for 10 minutes for instant render
-      if (Date.now() - raw.ts > 600000) return null;
-      return raw.data;
-    } catch { return null; }
-  }
-};
+// Build the IDB cache key for the current filter state
+function _idbFilterKey() {
+  if (S.search || S.searchJob || S.searchName || S.fromDate || S.toDate || S.myJobsOnly) return null;
+  return 'f_' + (S.filter || '_all');
+}
 
 async function loadJobs(append = false) {
   const wrap = document.getElementById('vlist-wrap');
   if (!append) {
     _jobsOffset = 0;
     _jobsHasMore = true;
-    // Show cached data instantly while fetching (lazy-load pattern)
-    const cached = !S.search && !S.searchJob && !S.searchName && !S.fromDate && !S.toDate && !S.myJobsOnly ? _jobCache.load(S.filter) : null;
-    if (cached && cached.length) {
-      S.jobs = cached;
-      renderVList(false);
+    const cacheKey = _idbFilterKey();
+    // 1) Instant render from IndexedDB offline memory (0ms perceived delay)
+    if (cacheKey) {
+      const cached = await IDB.loadJobs(cacheKey);
+      if (cached && cached.length) {
+        S.jobs = cached;
+        renderVList(false);
+        // Don't show spinner — user sees data instantly, we refresh in background
+      } else {
+        S.jobs = [];
+        if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+      }
     } else {
       S.jobs = [];
       if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
@@ -902,131 +1052,128 @@ async function loadJobs(append = false) {
       S.jobs = [...S.jobs, ...newJobs];
     } else {
       S.jobs = newJobs;
-      // Save to localStorage cache for instant load next time
-      if (!S.search && !S.searchJob && !S.searchName && !S.fromDate && !S.toDate && !S.myJobsOnly) {
-        _jobCache.save(S.filter, S.jobs);
+      // 2) Persist to IndexedDB for instant load on next app open
+      const cacheKey = _idbFilterKey();
+      if (cacheKey) {
+        IDB.saveJobs(cacheKey, S.jobs);
+        // Also bulk-save basic job data for instant detail rendering
+        IDB.bulkSaveDetails(S.jobs);
       }
     }
     renderVList(append);
   } catch {
-    if (!append && wrap) wrap.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Error loading jobs</p></div>`;
+    if (!append && (!S.jobs.length) && wrap) {
+      wrap.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Error loading jobs</p></div>`;
+    }
   }
   _jobsLoading = false;
 
-  // My Assigned Jobs toggle (staff only)
-  document.getElementById('btn-my-assigned')?.addEventListener('click', () => {
-    S.myJobsOnly = !S.myJobsOnly;
-    S.fromDate = ''; S.toDate = ''; setFilter('');
-    render();
-  }, { passive: true });
-  document.getElementById('btn-clear-my')?.addEventListener('click', () => {
-    S.myJobsOnly = false; render();
-  }, { passive: true });
+  // v34: Bind dashboard events only once (prevents event listener accumulation = major perf fix)
+  bindDashboardEvents();
+}
 
-  // Refresh button — reload all jobs with fresh data (clears cache)
-  const refreshBtn = document.getElementById('btn-refresh-jobs');
-  if (refreshBtn && !refreshBtn._bound) {
-    refreshBtn._bound = true;
-    refreshBtn.addEventListener('click', () => {
-      const icon = refreshBtn.querySelector('i');
-      if (icon) { icon.style.transform = 'rotate(360deg)'; icon.style.transition = 'transform .4s'; setTimeout(() => { icon.style.transform = ''; }, 450); }
-      _analyticsCacheTs = 0;
-      _jobCache.save(S.filter, []); // clear cache
-      loadJobs();
-      toast('Refreshing…', 'info');
-    }, { passive: true });
-  }
+// ── One-time dashboard event bindings (prevents accumulation on repeated loadJobs) ──
+let _dashEvtBound = false;
+function bindDashboardEvents() {
+  if (_dashEvtBound) return;
+  _dashEvtBound = true;
 
-  // Filter panel toggle
-  document.getElementById('btn-open-filter')?.addEventListener('click', () => {
-    const panel = document.getElementById('filter-panel');
-    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-  }, { passive: true });
+  // Use event delegation on the main container to avoid per-element binding
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[id]');
+    if (!t) return;
+    switch (t.id) {
+      case 'btn-my-assigned':
+        S.myJobsOnly = !S.myJobsOnly;
+        S.fromDate = ''; S.toDate = ''; setFilter('');
+        render();
+        break;
+      case 'btn-clear-my':
+        S.myJobsOnly = false; render();
+        break;
+      case 'btn-refresh-jobs': {
+        const icon = t.querySelector('i');
+        if (icon) { icon.style.transform = 'rotate(360deg)'; icon.style.transition = 'transform .4s'; setTimeout(() => { icon.style.transform = ''; }, 450); }
+        _analyticsCacheTs = 0;
+        IDB.saveJobs(_idbFilterKey(), []); // Clear offline cache to force fresh fetch
+        S.jobs = [];
+        loadJobs();
+        toast('Refreshing…', 'info');
+        break;
+      }
+      case 'btn-open-filter': {
+        const panel = document.getElementById('filter-panel');
+        if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        break;
+      }
+      case 'btn-clear-filter':
+        setFilter(''); S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0;
+        render();
+        break;
+      case 'fp-apply': {
+        const activeChip = document.querySelector('.fp-chip.fp-active');
+        const newStatus = activeChip?.dataset.fpStatus || '';
+        setFilter(newStatus);
+        S.fromDate = document.getElementById('fp-from')?.value || '';
+        S.toDate = document.getElementById('fp-to')?.value || '';
+        const panel = document.getElementById('filter-panel');
+        if (panel) panel.style.display = 'none';
 
-  document.getElementById('btn-clear-filter')?.addEventListener('click', () => {
-    setFilter(''); S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0;
-    render();
-  }, { passive: true });
+        if (newStatus === 'pending_payment') {
+          _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
+          setFilter('pending_payment');
+          const wrap = document.getElementById('vlist-wrap');
+          if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+          API.get('/api/jobs/pending-payment', { params: { q: S.searchJob || S.searchName || S.search } })
+            .then(r => { S.jobs = r.data || []; _jobsHasMore = false; renderVList(false); })
+            .catch(() => { if (wrap) wrap.innerHTML = '<div class="empty-state"><p>Filter failed</p></div>'; });
+          return;
+        }
 
-  // Filter panel status chips
-  document.querySelectorAll('.fp-chip').forEach(btn => {
-    btn.addEventListener('click', () => {
+        const delType = document.getElementById('del-type')?.value || '';
+        if (newStatus === 'delivered' && (S.fromDate || S.toDate || delType)) {
+          _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
+          const wrap = document.getElementById('vlist-wrap');
+          if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
+          API.get('/api/jobs/delivered', { params: { from: S.fromDate, to: S.toDate, method: delType, q: S.searchJob || S.searchName || S.search } })
+            .then(r => { S.jobs = r.data || []; _jobsHasMore = false; renderVList(false); })
+            .catch(() => { if (wrap) wrap.innerHTML = '<div class="empty-state"><p>Filter failed</p></div>'; });
+          return;
+        }
+
+        loadJobs();
+        break;
+      }
+      case 'fp-reset':
+        setFilter(''); S.fromDate = ''; S.toDate = '';
+        { const panel = document.getElementById('filter-panel'); if (panel) panel.style.display = 'none'; }
+        _analyticsCacheTs = 0;
+        render();
+        break;
+    }
+
+    // Filter panel status chips (event delegation)
+    if (e.target.closest('.fp-chip')) {
       document.querySelectorAll('.fp-chip').forEach(b => b.classList.remove('fp-active'));
-      btn.classList.add('fp-active');
-    }, { passive: true });
-  });
-
-  // Filter panel apply
-  document.getElementById('fp-apply')?.addEventListener('click', () => {
-    const activeChip = document.querySelector('.fp-chip.fp-active');
-    const newStatus = activeChip?.dataset.fpStatus || '';
-    setFilter(newStatus);
-    S.fromDate = document.getElementById('fp-from')?.value || '';
-    S.toDate = document.getElementById('fp-to')?.value || '';
-    const panel = document.getElementById('filter-panel');
-    if (panel) panel.style.display = 'none';
-
-    // Pending payment filter — special API
-    if (newStatus === 'pending_payment') {
-      _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
-      setFilter('pending_payment');
-      const wrap = document.getElementById('vlist-wrap');
-      if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
-      API.get('/api/jobs/pending-payment', { params: { q: S.searchJob || S.searchName || S.search } })
-        .then(r => {
-          S.jobs = r.data || [];
-          _jobsHasMore = false;
-          renderVList(false);
-          const panel = document.getElementById('filter-panel');
-          if (panel) panel.style.display = 'none';
-        })
-        .catch(() => { if (wrap) wrap.innerHTML = '<div class="empty-state"><p>Filter failed</p></div>'; });
-      return;
+      e.target.closest('.fp-chip').classList.add('fp-active');
     }
-
-    // Check for delivered filter with delivery type
-    const delType = document.getElementById('del-type')?.value || '';
-    if (newStatus === 'delivered' && (S.fromDate || S.toDate || delType)) {
-      _jobsOffset = 0; _jobsHasMore = true; S.jobs = [];
-      const wrap = document.getElementById('vlist-wrap');
-      if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
-      API.get('/api/jobs/delivered', { params: { from: S.fromDate, to: S.toDate, method: delType, q: S.searchJob || S.searchName || S.search } })
-        .then(r => {
-          S.jobs = r.data || [];
-          _jobsHasMore = false;
-          renderVList(false);
-        })
-        .catch(() => { if (wrap) wrap.innerHTML = '<div class="empty-state"><p>Filter failed</p></div>'; });
-      return;
-    }
-
-    loadJobs();
   });
 
-  // Filter panel reset
-  document.getElementById('fp-reset')?.addEventListener('click', () => {
-    setFilter(''); S.fromDate = ''; S.toDate = '';
-    const panel = document.getElementById('filter-panel');
-    if (panel) panel.style.display = 'none';
-    _analyticsCacheTs = 0;
-    render();
-  });
-
-  // Instant search: 100ms for job ID, 120ms for name/mobile — no manual refresh needed
+  // Instant search: 80ms for job ID, 100ms for name/mobile — faster feel
   const dSearchJob = debounce(() => {
     S.searchJob = document.getElementById('dash-search-job')?.value.trim() || '';
     S.search = S.searchJob || S.searchName || '';
-    _jobCache.save(S.filter, []); // bypass cache for search
     loadJobs();
-  }, 100);
+  }, 80);
   const dSearchName = debounce(() => {
     S.searchName = document.getElementById('dash-search-name')?.value.trim() || '';
     S.search = S.searchJob || S.searchName || '';
-    _jobCache.save(S.filter, []); // bypass cache for search
     loadJobs();
-  }, 120);
-  document.getElementById('dash-search-job')?.addEventListener('input', dSearchJob);
-  document.getElementById('dash-search-name')?.addEventListener('input', dSearchName);
+  }, 100);
+  document.addEventListener('input', e => {
+    if (e.target.id === 'dash-search-job')  dSearchJob();
+    if (e.target.id === 'dash-search-name') dSearchName();
+  });
 }
 
 function renderVList(append = false) {
@@ -1039,43 +1186,66 @@ function renderVList(append = false) {
   const total = S.jobs.length;
   const wrapH = wrap.clientHeight || (window.innerHeight - 200);
 
+  // v35: Pre-build all row HTML strings once, reuse on scroll (eliminates repeated jobRowHTML calls)
+  if (!wrap._rowCache || !append) wrap._rowCache = S.jobs.map(j => jobRowHTML(j));
+  else if (append) {
+    const existing = wrap._rowCache.length;
+    for (let i = existing; i < S.jobs.length; i++) wrap._rowCache.push(jobRowHTML(S.jobs[i]));
+  }
+
+  // v35: Track visible range to skip identical re-paints (huge perf win on scroll)
+  let _lastStart = -1, _lastEnd = -1;
+  let _rafPending = false;
+
   function paint() {
     const scrollTop = wrap.scrollTop;
-    const startIdx  = Math.max(0, Math.floor(scrollTop / CARD_H) - 4);
-    const endIdx    = Math.min(total - 1, startIdx + Math.ceil(wrapH / CARD_H) + 8);
+    const startIdx  = Math.max(0, Math.floor(scrollTop / CARD_H) - 3);
+    const endIdx    = Math.min(total - 1, startIdx + Math.ceil(wrapH / CARD_H) + 6);
+    if (startIdx === _lastStart && endIdx === _lastEnd) return; // skip no-op repaints
+    _lastStart = startIdx; _lastEnd = endIdx;
     const topH      = startIdx * CARD_H;
     const botH      = Math.max(0, (total - endIdx - 1) * CARD_H);
-    const visible   = S.jobs.slice(startIdx, endIdx + 1);
 
+    // Use cached row HTML strings for zero-cost rendering
+    const html = wrap._rowCache.slice(startIdx, endIdx + 1).join('');
     wrap.innerHTML =
       `<div style="height:${topH}px;pointer-events:none"></div>` +
-      visible.map(j => jobRowHTML(j)).join('') +
+      html +
       `<div style="height:${botH}px;pointer-events:none"></div>` +
       (_jobsHasMore ? `<div id="infinite-loader" style="text-align:center;padding:16px;color:#888"><i class="fas fa-spinner fa-spin"></i> Loading more…</div>` : '');
-
-    wrap.querySelectorAll('.job-row').forEach(row => {
-      row.addEventListener('click', () => navigate('detail', { jobId: row.dataset.id }), { passive: true });
-    });
   }
 
   paint();
-  // Remove old scroll listener before re-attaching to prevent accumulation
-  const newWrap = document.getElementById('vlist-wrap');
-  if (newWrap) {
-    const onScroll = () => {
-      paint();
-      requestAnimationFrame(() => applyAuthImages(newWrap));
-      // Infinite scroll: load more when near bottom
-      if (_jobsHasMore && !_jobsLoading) {
-        const nearBottom = newWrap.scrollTop + newWrap.clientHeight >= newWrap.scrollHeight - 200;
-        if (nearBottom) loadJobs(true);
-      }
-    };
-    newWrap._scrollHandler && newWrap.removeEventListener('scroll', newWrap._scrollHandler);
-    newWrap._scrollHandler = onScroll;
-    newWrap.addEventListener('scroll', onScroll, { passive: true });
+
+  // v35: Event delegation for job row clicks (no per-row binding = faster)
+  if (!wrap._clickDel) {
+    wrap._clickDel = true;
+    wrap.addEventListener('click', e => {
+      const row = e.target.closest('.job-row');
+      if (row?.dataset.id) navigate('detail', { jobId: row.dataset.id });
+    }, { passive: true });
   }
-  setTimeout(() => applyAuthImages(wrap), 50);
+
+  // v35: RAF-throttled scroll handler — max 1 paint per frame, prevents jank
+  if (wrap._scrollHandler) wrap.removeEventListener('scroll', wrap._scrollHandler);
+  const onScroll = () => {
+    if (!_rafPending) {
+      _rafPending = true;
+      requestAnimationFrame(() => {
+        paint();
+        applyAuthImages(wrap);
+        _rafPending = false;
+        // Infinite scroll: load more when near bottom
+        if (_jobsHasMore && !_jobsLoading) {
+          const nearBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 200;
+          if (nearBottom) loadJobs(true);
+        }
+      });
+    }
+  };
+  wrap._scrollHandler = onScroll;
+  wrap.addEventListener('scroll', onScroll, { passive: true });
+  setTimeout(() => applyAuthImages(wrap), 30);
 }
 
 function jobRowHTML(j) {
@@ -1605,16 +1775,44 @@ function bindNewJob() {
 // ─────────────────────────────────────────────────────────────────────────────
 async function loadDetail() {
   if (!S.jobId) return;
-  try {
-    const r = await API.get(`/api/jobs/${S.jobId}`);
-    S.job   = r.data;
+
+  // 1) INSTANT: Show cached detail from IndexedDB immediately (0ms)
+  const cached = await IDB.loadDetail(S.jobId);
+  if (cached) {
+    S.job = cached;
+    // Load staff from offline cache too
     if (isAdmin() && !S.staff.length) {
-      try { const sr = await API.get('/api/staff'); S.staff = sr.data; } catch (_) {}
+      const cachedStaff = await IDB.loadStaff();
+      if (cachedStaff) S.staff = cachedStaff;
     }
     renderDetail();
+  }
+
+  // 2) BACKGROUND: Fetch fresh data from API and update if changed
+  try {
+    const [jobResp, staffResp] = await Promise.all([
+      API.get(`/api/jobs/${S.jobId}`),
+      (isAdmin() && !S.staff.length) ? API.get('/api/staff').catch(() => null) : Promise.resolve(null)
+    ]);
+    const freshJob = jobResp.data;
+    if (staffResp?.data) {
+      S.staff = staffResp.data;
+      IDB.saveStaff(S.staff); // Cache staff for offline
+    }
+
+    // Only re-render if data actually changed (avoid flicker)
+    const changed = !cached || freshJob.updated_at !== cached.updated_at
+                    || freshJob.status !== cached.status
+                    || JSON.stringify(freshJob.machines) !== JSON.stringify(cached.machines);
+    S.job = freshJob;
+    IDB.saveDetail(freshJob); // Persist to offline memory
+    if (changed || !cached) renderDetail();
   } catch {
-    const root = document.getElementById('detail-root');
-    if (root) root.innerHTML = `<div class="empty-state" style="color:#e53935"><i class="fas fa-exclamation-triangle fa-2x"></i><p>Failed to load job</p></div>`;
+    // If no cached data and network fails, show error
+    if (!cached) {
+      const root = document.getElementById('detail-root');
+      if (root) root.innerHTML = `<div class="empty-state" style="color:#e53935"><i class="fas fa-exclamation-triangle fa-2x"></i><p>Failed to load job</p></div>`;
+    }
   }
 }
 
@@ -1866,13 +2064,15 @@ function machineCardHTML(m, currentUserId) {
         ${m.warranty_type === 'warranty' && m.warranty_brand ? `<div style="font-size:12px;color:#1565C0;margin-top:2px;line-height:1.3;font-weight:700"><i class="fas fa-shield-alt"></i> Warranty: ${esc(m.warranty_brand)}</div>` : ''}
         ${m.warranty_type === 'out_warranty' ? `<div style="font-size:11px;color:#999;margin-top:2px"><i class="fas fa-shield-alt" style="opacity:.5"></i> Out of Warranty</div>` : ''}
         ${m.staff_name ? `<div class="machine-staff" style="font-size:12px;color:#888;margin-top:2px"><i class="fas fa-user-cog"></i> ${esc(m.staff_name)}</div>` : ''}
+        ${m.status === 'delivered' ? `<div style="font-size:12px;color:#1E88E5;margin-top:3px;font-weight:700"><i class="fas fa-check-double"></i> Delivered ${m.delivery_method === 'courier' ? '📮 Courier' : '🤝 In Person'}${m.delivery_receiver_name ? ' to ' + esc(m.delivery_receiver_name) : ''}${m.delivery_courier_name ? ' via ' + esc(m.delivery_courier_name) : ''}</div>` : ''}
       </div>
       <div style="flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;min-width:90px">
         ${isAssigned ? `
-        <select data-mid="${m.id}" class="status-sel" style="border:2px solid ${color};color:${color};border-radius:8px;padding:4px 6px;font-size:12px;font-weight:700;text-align:center;text-align-last:center;background:#fff;min-width:110px;cursor:pointer;min-height:36px">
+        <select data-mid="${m.id}" class="status-sel" data-prev="${m.status}" style="border:2px solid ${color};color:${color};border-radius:8px;padding:4px 6px;font-size:12px;font-weight:700;text-align:center;text-align-last:center;background:#fff;min-width:110px;cursor:pointer;min-height:36px">
           <option value="under_repair" ${m.status==='under_repair'?'selected':''}>Under Repair</option>
           <option value="repaired"     ${m.status==='repaired'    ?'selected':''}>Repaired</option>
           <option value="returned"     ${m.status==='returned'    ?'selected':''}>Returned</option>
+          <option value="delivered"    ${m.status==='delivered'   ?'selected':''}>Delivered</option>
         </select>` : `
         <span class="status-chip" style="background:${sb(m.status)};color:${color};border:1.5px solid ${color};display:inline-flex;align-items:center;justify-content:center;padding:5px 14px;border-radius:8px;font-size:12px;font-weight:700;white-space:nowrap;text-align:center;min-width:90px;min-height:30px;box-sizing:border-box">${sl(m.status)}</span>`}
         ${hasSuperRight('view_financials') ? `<div style="font-size:14px;font-weight:800;color:${m.status==='returned'?'#999':'#1a1a2e'};text-align:center;white-space:nowrap${m.status==='returned'?';text-decoration:line-through':''}">
@@ -1935,6 +2135,53 @@ function bindDetail(j) {
       const mid      = e.target.dataset.mid;
       const newStatus = e.target.value;
       const prevStatus = e.target.dataset.prev || 'under_repair';
+
+      // v34: Machine-level "Delivered" — show delivery method modal
+      if (newStatus === 'delivered') {
+        showModal(`
+          <h3 class="modal-title"><i class="fas fa-check-double" style="color:#1E88E5"></i> Deliver Machine</h3>
+          <div class="form-group">
+            <label class="form-label">Delivery Method <span class="req">*</span></label>
+            <select id="md-method" class="form-input">
+              <option value="in_person">🤝 In Person</option>
+              <option value="courier">📮 Courier</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Receiver Name <span style="color:#999;font-size:12px">(optional)</span></label>
+            <input id="md-rname" type="text" class="form-input" placeholder="Person who collected">
+          </div>
+          <div class="form-group" id="md-courier-wrap" style="display:none">
+            <label class="form-label">Courier Name <span style="color:#999;font-size:12px">(optional)</span></label>
+            <input id="md-courier" type="text" class="form-input" placeholder="e.g. DTDC, BlueDart">
+          </div>
+          <div class="modal-footer">
+            <button onclick="closeModal()" class="btn-ghost">Cancel</button>
+            <button id="md-confirm" class="btn-primary" style="background:#1E88E5"><i class="fas fa-check"></i> Confirm</button>
+          </div>`);
+        document.getElementById('md-method')?.addEventListener('change', ev => {
+          document.getElementById('md-courier-wrap').style.display = ev.target.value === 'courier' ? '' : 'none';
+        });
+        document.getElementById('md-confirm')?.addEventListener('click', async () => {
+          const deliveryData = {
+            status: 'delivered',
+            delivery_method: document.getElementById('md-method')?.value || 'in_person',
+            delivery_receiver_name: document.getElementById('md-rname')?.value.trim() || null,
+            delivery_courier_name: document.getElementById('md-courier')?.value.trim() || null,
+          };
+          closeModal();
+          try {
+            await API.put(`/api/machines/${mid}`, deliveryData);
+            toast('Machine marked as delivered', 'success');
+            await loadDetail();
+          } catch (err) {
+            toast(err.response?.data?.error || 'Update failed', 'error');
+            e.target.value = prevStatus;
+          }
+        });
+        document.querySelector('.modal-overlay')?.addEventListener('click', () => { e.target.value = prevStatus; }, { once: true });
+        return;
+      }
 
       // Show optional note modal for meaningful transitions
       const needsNote = (prevStatus === 'under_repair' && newStatus === 'repaired')
@@ -4386,8 +4633,8 @@ async function printAddressLabel(j) {
     const padX = 36; // (1193 - 1122) / 2 ≈ 36px each side → 95mm usable
     const maxTextW = W - padX * 2; // 1121px ≈ 95mm
 
-    // ── FROM block height (bottom-left, left-aligned, +4pt fonts) ──
-    const fromBlockH = 220;
+    // ── FROM block height (bottom-left, left-aligned, +10pt fonts) ──
+    const fromBlockH = 260;
     const fromDividerY = H - fromBlockH - 20;
 
     // Available height for TO section — start lower to avoid "T" clipping
@@ -4485,24 +4732,24 @@ async function printAddressLabel(j) {
     ctx.textAlign = 'left';
 
     ctx.fillStyle = '#888888';
-    ctx.font = 'bold 36px "Segoe UI", Arial, sans-serif';  // was 30 → +6pt (34+2)
-    ctx.fillText('From,', padX, fy); fy += 44;
+    ctx.font = 'bold 40px "Segoe UI", Arial, sans-serif';  // was 30 → +10pt = 40
+    ctx.fillText('From,', padX, fy); fy += 48;
 
     ctx.fillStyle = '#E53935';
-    ctx.font = '900 38px "Segoe UI", Arial, sans-serif';    // was 32 → +6pt (36+2)
+    ctx.font = '900 42px "Segoe UI", Arial, sans-serif';    // was 32 → +10pt = 42
     // Wrap company name if it overflows 95mm
     const compLines = wrapText(ctx, 'ADITION ELECTRIC SOLUTION', maxTextW);
     compLines.forEach(line => {
-      ctx.fillText(line, padX, fy); fy += 44;
+      ctx.fillText(line, padX, fy); fy += 48;
     });
 
     ctx.fillStyle = '#555555';
-    ctx.font = '500 32px "Segoe UI", Arial, sans-serif';    // was 26 → +6pt (30+2)
+    ctx.font = '500 36px "Segoe UI", Arial, sans-serif';    // was 26 → +10pt = 36
     const fromAddr = ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'];
     fromAddr.forEach(line => {
       // Wrap from-address lines that exceed 95mm
       const wrapped = wrapText(ctx, line, maxTextW);
-      wrapped.forEach(wl => { ctx.fillText(wl, padX, fy); fy += 36; });
+      wrapped.forEach(wl => { ctx.fillText(wl, padX, fy); fy += 40; });
     });
 
     // Convert to blob & share/download
