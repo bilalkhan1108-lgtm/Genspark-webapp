@@ -1,6 +1,6 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v35
+// Service Worker — ADITION ELECTRIC SOLUTION v37
 // Strategy: Cache-first for static UI · Network-first for API · Offline memory via IndexedDB
-const CACHE_VER  = 'aes-v35';
+const CACHE_VER  = 'aes-v37';
 const STATIC_URLS = [
   '/',
   '/static/app.js',

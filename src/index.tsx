@@ -757,6 +757,84 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
   return c.json({ id: result.meta.last_row_id }, 201)
 })
 
+// ── API: Batch Machine Status Update ─────────────────────────────────────────
+// IMPORTANT: Must be registered BEFORE /api/machines/:id to avoid route conflict
+// Allows updating multiple machines at once (e.g. mark 9 machines as repaired)
+app.put('/api/machines/batch-status', authMiddleware, async (c) => {
+  let body: any
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const { machine_ids, status, work_done, return_reason, delivery_method, delivery_receiver_name, delivery_courier_name } = body
+  if (!machine_ids || !Array.isArray(machine_ids) || !machine_ids.length)
+    return c.json({ error: 'machine_ids array required' }, 400)
+  if (!status || !['under_repair','repaired','returned','delivered'].includes(status))
+    return c.json({ error: 'Invalid status' }, 400)
+  if (machine_ids.length > 50) return c.json({ error: 'Max 50 machines at once' }, 400)
+
+  const role = c.get('userRole')
+  const isAdm = roleLevel(role) >= 2
+  const userId = c.get('userId')
+  const userName = c.get('userName') || (isAdm ? 'Admin' : 'Staff')
+  const userRole = c.get('userRole') || 'staff'
+
+  // Fetch all machines to validate
+  const placeholders = machine_ids.map(() => '?').join(',')
+  const { results: machines } = await c.env.DB.prepare(
+    `SELECT id, job_id, product_name, status, assigned_staff_id FROM machines WHERE id IN (${placeholders})`
+  ).bind(...machine_ids).all<any>()
+  if (!machines.length) return c.json({ error: 'No machines found' }, 404)
+
+  // Check permissions for non-admin: must be assigned or have update_machine_status right
+  if (!isAdm) {
+    const canUpdate = hasRight(c, 'update_machine_status')
+    for (const m of machines) {
+      if (m.assigned_staff_id !== userId && !canUpdate)
+        return c.json({ error: `Not assigned to machine ${m.product_name} (ID ${m.id})` }, 403)
+    }
+  }
+
+  // Build batch update
+  const jobIds = new Set<string>()
+  for (const m of machines) {
+    const extraFields: string[] = []
+    const extraVals: any[] = []
+    if (status === 'repaired' && work_done) { extraFields.push('work_done=?'); extraVals.push(work_done) }
+    if (status === 'returned' && return_reason) { extraFields.push('return_reason=?'); extraVals.push(return_reason) }
+    if (status === 'delivered') {
+      extraFields.push('delivery_method=?');        extraVals.push(delivery_method || 'in_person')
+      extraFields.push('delivery_receiver_name=?'); extraVals.push(delivery_receiver_name || null)
+      extraFields.push('delivery_courier_name=?');  extraVals.push(delivery_courier_name || null)
+      extraFields.push("delivered_at=datetime('now')")
+    }
+    const setClause = ['status=?', ...extraFields, `updated_at=datetime('now')`].join(',')
+    await c.env.DB.prepare(`UPDATE machines SET ${setClause} WHERE id=?`)
+      .bind(status, ...extraVals, m.id).run()
+    jobIds.add(m.job_id)
+
+    // Log history per machine
+    const detail = status === 'repaired' && work_done
+      ? `${m.product_name} → Repaired. Work: ${work_done}`
+      : status === 'returned' && return_reason
+      ? `${m.product_name} → Returned. Reason: ${return_reason}`
+      : status === 'delivered'
+      ? `${m.product_name} → Delivered (${delivery_method === 'courier' ? 'Courier' : 'In Person'}${delivery_receiver_name ? ' to ' + delivery_receiver_name : ''})`
+      : `${m.product_name} → ${status}`
+    logHistory(c.env.DB, m.job_id, `Machine: ${status}`, detail, userName, userRole)
+  }
+
+  // Update job statuses for all affected jobs
+  for (const jobId of jobIds) {
+    await updateJobStatus(c.env.DB, jobId, userName, userRole)
+  }
+
+  // Log batch action
+  const names = machines.map((m: any) => m.product_name).join(', ')
+  for (const jobId of jobIds) {
+    logHistory(c.env.DB, jobId, `Batch: ${status}`, `Batch updated ${machines.length} machines to ${status}: ${names}`, userName, userRole)
+  }
+
+  return c.json({ ok: true, updated: machines.length })
+})
+
 // ── API: Machines — update ────────────────────────────────────────────────────
 app.put('/api/machines/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
@@ -833,6 +911,7 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
   logHistory(c.env.DB, machine.job_id, body.status ? `Machine: ${body.status}` : 'Machine Edited', editDetail, adminName, adminRole)
   return c.json({ ok: true })
 })
+
 app.delete('/api/machines/:id', authMiddleware, adminOnly, async (c) => {
   const id      = c.req.param('id')
   const machine = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(id).first<any>()

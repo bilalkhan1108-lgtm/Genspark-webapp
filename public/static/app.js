@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v35                       ║
-// ║  v35: IndexedDB offline memory for instant load on app open,     ║
-// ║  machine delivered + partial_delivered, perf optimizations        ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v38                       ║
+// ║  v38: WhatsApp share machine-count fix (sum qty), batch status     ║
+// ║  route fix, search bar, IndexedDB offline-first, multi-select      ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -154,6 +154,7 @@ const IDB = {
   },
 
   // Load jobs list for a given filter key
+  // v36: Always return cached data (no expiry) — WhatsApp-like instant load
   async loadJobs(filterKey) {
     const os = await this._tx(this.STORE_JOBS, 'readonly');
     if (!os) return null;
@@ -162,9 +163,7 @@ const IDB = {
       req.onsuccess = () => {
         const r = req.result;
         if (!r || !r.data) { resolve(null); return; }
-        // Cache valid for 30 minutes (offline memory)
-        if (Date.now() - r.ts > 1800000) { resolve(r.data); return; } // still return stale, just flag
-        resolve(r.data);
+        resolve(r.data); // Always return — stale or fresh, user sees data instantly
       };
       req.onerror = () => resolve(null);
     });
@@ -220,6 +219,48 @@ const IDB = {
         if (j && j.id) os.put({ ...j, _cachedAt: Date.now(), _listCache: true });
       }
     } catch {}
+  },
+
+  // v36: Load ALL cached job details for offline mode (WhatsApp-like)
+  async loadAllDetails() {
+    const db = await this.init();
+    if (!db) return [];
+    return new Promise(resolve => {
+      try {
+        const tx = db.transaction(this.STORE_DETAILS, 'readonly');
+        const os = tx.objectStore(this.STORE_DETAILS);
+        const req = os.getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch { resolve([]); }
+    });
+  },
+
+  // v36: Load ALL cached job lists (all filter keys)
+  async loadAllJobs() {
+    const db = await this.init();
+    if (!db) return [];
+    return new Promise(resolve => {
+      try {
+        const tx = db.transaction(this.STORE_JOBS, 'readonly');
+        const os = tx.objectStore(this.STORE_JOBS);
+        const req = os.getAll();
+        req.onsuccess = () => {
+          const results = req.result || [];
+          // Merge all cached job lists, deduplicate by id
+          const jobMap = new Map();
+          for (const r of results) {
+            if (r.data && Array.isArray(r.data)) {
+              for (const j of r.data) {
+                if (j && j.id) jobMap.set(j.id, j);
+              }
+            }
+          }
+          resolve(Array.from(jobMap.values()));
+        };
+        req.onerror = () => resolve([]);
+      } catch { resolve([]); }
+    });
   },
 
   // Save staff list for offline
@@ -592,6 +633,8 @@ async function login(email, password) {
     localStorage.setItem('AES_USER', JSON.stringify(S.user));
     maybeAskPushPermission();
     navigate('dashboard');
+    // v36: Pre-cache staff list for offline after login
+    API.get('/api/staff').then(sr => { if (sr.data) { S.staff = sr.data; IDB.saveStaff(sr.data); }}).catch(() => {});
   } catch (e) {
     toast(e.response?.data?.error || 'Login failed', 'error');
   }
@@ -1001,6 +1044,7 @@ function _applyChipCounts(d) {
 let _jobsLoading = false;
 let _jobsHasMore = true;
 let _jobsOffset  = 0;
+let _jobsLoadId  = 0; // v37: monotonic counter to discard stale API responses
 const JOBS_PER_PAGE = 100; // Higher batch = fewer API calls = faster perceived load
 
 // Build the IDB cache key for the current filter state
@@ -1014,6 +1058,8 @@ async function loadJobs(append = false) {
   if (!append) {
     _jobsOffset = 0;
     _jobsHasMore = true;
+    _jobsLoading = false; // v37: Always reset loading for new search/filter
+    _jobsLoadId++; // v37: Invalidate any in-flight request
     const cacheKey = _idbFilterKey();
     // 1) Instant render from IndexedDB offline memory (0ms perceived delay)
     if (cacheKey) {
@@ -1033,6 +1079,7 @@ async function loadJobs(append = false) {
   }
   if (_jobsLoading || !_jobsHasMore) return;
   _jobsLoading = true;
+  const myLoadId = _jobsLoadId; // v37: Capture current load ID
   // Load analytics stats in background — use cache to avoid redundant calls
   loadAnalytics();
   try {
@@ -1045,6 +1092,8 @@ async function loadJobs(append = false) {
     if (S.toDate)     params.to       = S.toDate;
     if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
     const r = await API.get('/api/jobs', { params });
+    // v37: Discard result if a newer loadJobs was triggered while we were waiting
+    if (myLoadId !== _jobsLoadId) { _jobsLoading = false; return; }
     const newJobs = r.data || [];
     if (newJobs.length < JOBS_PER_PAGE) _jobsHasMore = false;
     _jobsOffset += newJobs.length;
@@ -1059,9 +1108,12 @@ async function loadJobs(append = false) {
         // Also bulk-save basic job data for instant detail rendering
         IDB.bulkSaveDetails(S.jobs);
       }
+      // v37: Pre-fetch full details for first 20 jobs in background (WhatsApp-like offline)
+      _prefetchDetails(newJobs.slice(0, 20));
     }
     renderVList(append);
   } catch {
+    if (myLoadId !== _jobsLoadId) { _jobsLoading = false; return; }
     if (!append && (!S.jobs.length) && wrap) {
       wrap.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Error loading jobs</p></div>`;
     }
@@ -1070,6 +1122,29 @@ async function loadJobs(append = false) {
 
   // v34: Bind dashboard events only once (prevents event listener accumulation = major perf fix)
   bindDashboardEvents();
+}
+
+// v36: Pre-fetch full job details in background for WhatsApp-like offline access
+let _prefetchRunning = false;
+async function _prefetchDetails(jobs) {
+  if (_prefetchRunning || !jobs?.length) return;
+  _prefetchRunning = true;
+  try {
+    for (const j of jobs) {
+      if (!j?.id) continue;
+      // Skip if we already have fresh cached detail (less than 5 min old)
+      const existing = await IDB.loadDetail(j.id);
+      if (existing && existing._cachedAt && (Date.now() - existing._cachedAt) < 300000 && !existing._listCache) continue;
+      // Fetch full detail silently — no UI impact
+      try {
+        const resp = await API.get(`/api/jobs/${j.id}`);
+        if (resp.data) IDB.saveDetail(resp.data);
+      } catch { /* Silent — offline or rate limit */ }
+      // Small delay between requests to avoid API flood
+      await new Promise(r => setTimeout(r, 200));
+    }
+  } catch {}
+  _prefetchRunning = false;
 }
 
 // ── One-time dashboard event bindings (prevents accumulation on repeated loadJobs) ──
@@ -1159,7 +1234,8 @@ function bindDashboardEvents() {
     }
   });
 
-  // Instant search: 80ms for job ID, 100ms for name/mobile — faster feel
+  // v37: Instant search — loadJobs(false) now auto-resets _jobsLoading + _jobsHasMore
+  //      and uses _jobsLoadId to discard stale responses from previous searches
   const dSearchJob = debounce(() => {
     S.searchJob = document.getElementById('dash-search-job')?.value.trim() || '';
     S.search = S.searchJob || S.searchName || '';
@@ -1171,6 +1247,11 @@ function bindDashboardEvents() {
     loadJobs();
   }, 100);
   document.addEventListener('input', e => {
+    if (e.target.id === 'dash-search-job')  dSearchJob();
+    if (e.target.id === 'dash-search-name') dSearchName();
+  });
+  // v36 FIX: Also handle 'search' event (fires when user taps ✕ on mobile search input)
+  document.addEventListener('search', e => {
     if (e.target.id === 'dash-search-job')  dSearchJob();
     if (e.target.id === 'dash-search-name') dSearchName();
   });
@@ -1999,7 +2080,26 @@ function renderDetail() {
           <i class="fas fa-tools" style="color:#E53935"></i> Machines
           <span id="machine-counter" style="background:#E53935;color:#fff;border-radius:12px;padding:2px 10px;font-size:13px;font-weight:800;margin-left:8px">Total: ${(j.machines||[]).reduce((s,m) => s + (parseInt(m.quantity)||1), 0)}</span>
         </h3>
-        ${hasSuperRight('manage_machines') ? `<button id="btn-add-machine" class="btn-sm btn-red">+ Add</button>` : ''}
+        <div style="display:flex;gap:6px;align-items:center">
+          ${hasSuperRight('update_machine_status') ? `<button id="btn-batch-select" class="btn-sm" style="background:#7B1FA2;color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;cursor:pointer"><i class="fas fa-check-double"></i> Select</button>` : ''}
+          ${hasSuperRight('manage_machines') ? `<button id="btn-add-machine" class="btn-sm btn-red">+ Add</button>` : ''}
+        </div>
+      </div>
+      <!-- v36: Batch action bar — hidden until selection mode is active -->
+      <div id="batch-bar" style="display:none;padding:8px 10px;background:linear-gradient(135deg,#EDE7F6,#E8EAF6);border-radius:10px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <button id="batch-select-all" class="btn-sm" style="background:#fff;color:#7B1FA2;border:1.5px solid #7B1FA2;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700;cursor:pointer">Select All</button>
+            <span id="batch-count" style="font-size:12px;font-weight:700;color:#7B1FA2">0 selected</span>
+          </div>
+          <button id="batch-cancel" class="btn-sm" style="background:#fff;color:#E53935;border:1.5px solid #E53935;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700;cursor:pointer"><i class="fas fa-times"></i> Cancel</button>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="batch-action-btn" data-batch-status="repaired" style="flex:1;background:#43A047;color:#fff;border:none;border-radius:8px;padding:8px 6px;font-size:12px;font-weight:700;cursor:pointer;min-width:70px"><i class="fas fa-wrench"></i> Repaired</button>
+          <button class="batch-action-btn" data-batch-status="returned" style="flex:1;background:#B8860B;color:#fff;border:none;border-radius:8px;padding:8px 6px;font-size:12px;font-weight:700;cursor:pointer;min-width:70px"><i class="fas fa-undo"></i> Returned</button>
+          <button class="batch-action-btn" data-batch-status="delivered" style="flex:1;background:#1E88E5;color:#fff;border:none;border-radius:8px;padding:8px 6px;font-size:12px;font-weight:700;cursor:pointer;min-width:70px"><i class="fas fa-check-double"></i> Delivered</button>
+          <button class="batch-action-btn" data-batch-status="under_repair" style="flex:1;background:#E53935;color:#fff;border:none;border-radius:8px;padding:8px 6px;font-size:12px;font-weight:700;cursor:pointer;min-width:70px"><i class="fas fa-tools"></i> Under Repair</button>
+        </div>
       </div>
       <div id="machines-container">
         ${(j.machines||[]).length
@@ -2054,8 +2154,12 @@ function machineCardHTML(m, currentUserId) {
     : null;
 
   return `
-  <div class="machine-card" style="border-left-color:${color};will-change:transform,opacity">
+  <div class="machine-card" data-machine-id="${m.id}" style="border-left-color:${color};will-change:transform,opacity">
     <div class="machine-top" style="display:flex;gap:10px;align-items:flex-start">
+      <!-- v36: batch selection checkbox — hidden by default, shown in select mode -->
+      <label class="batch-check-wrap" style="display:none;flex-shrink:0;align-items:flex-start;padding-top:2px;cursor:pointer">
+        <input type="checkbox" class="batch-check" data-mid="${m.id}" style="width:22px;height:22px;accent-color:#7B1FA2;cursor:pointer;margin:0;flex-shrink:0">
+      </label>
       <div style="flex:1;min-width:0;overflow:hidden">
         <div class="machine-name" style="font-size:15px;font-weight:800;color:#1a1a2e;line-height:1.3;word-break:break-word">${esc(m.product_name)}${m.quantity>1?` <span class="machine-qty" style="color:#888;font-size:13px;font-weight:600">×${m.quantity}</span>`:''}</div>
         ${m.product_complaint ? `<div class="machine-complaint" style="font-size:13px;color:#666;margin-top:3px;line-height:1.3;word-break:break-word">${esc(m.product_complaint)}</div>` : ''}
@@ -2403,6 +2507,183 @@ function bindDetail(j) {
 
   // Edit Customer (admin only)
   document.getElementById('btn-edit-customer')?.addEventListener('click', () => showEditCustomerModal(j));
+
+  // ── v36: Batch multi-select machine logic ──────────────────────────────────
+  let _batchMode = false;
+  const batchBar = document.getElementById('batch-bar');
+  const batchCountEl = document.getElementById('batch-count');
+
+  function updateBatchCount() {
+    const checked = document.querySelectorAll('.batch-check:checked');
+    if (batchCountEl) batchCountEl.textContent = checked.length + ' selected';
+    // Disable action buttons if nothing selected
+    document.querySelectorAll('.batch-action-btn').forEach(btn => {
+      btn.style.opacity = checked.length > 0 ? '1' : '0.5';
+      btn.style.pointerEvents = checked.length > 0 ? 'auto' : 'none';
+    });
+  }
+
+  function enterBatchMode() {
+    _batchMode = true;
+    if (batchBar) batchBar.style.display = '';
+    document.querySelectorAll('.batch-check-wrap').forEach(w => w.style.display = 'flex');
+    document.querySelectorAll('.batch-check').forEach(cb => { cb.checked = false; });
+    // Hide individual status selects in batch mode
+    document.querySelectorAll('.status-sel').forEach(sel => sel.style.display = 'none');
+    updateBatchCount();
+    const btn = document.getElementById('btn-batch-select');
+    if (btn) { btn.innerHTML = '<i class="fas fa-times"></i> Cancel'; btn.style.background = '#E53935'; }
+  }
+
+  function exitBatchMode() {
+    _batchMode = false;
+    if (batchBar) batchBar.style.display = 'none';
+    document.querySelectorAll('.batch-check-wrap').forEach(w => w.style.display = 'none');
+    document.querySelectorAll('.batch-check').forEach(cb => { cb.checked = false; });
+    // Restore individual status selects
+    document.querySelectorAll('.status-sel').forEach(sel => sel.style.display = '');
+    const btn = document.getElementById('btn-batch-select');
+    if (btn) { btn.innerHTML = '<i class="fas fa-check-double"></i> Select'; btn.style.background = '#7B1FA2'; }
+  }
+
+  document.getElementById('btn-batch-select')?.addEventListener('click', () => {
+    if (_batchMode) exitBatchMode();
+    else enterBatchMode();
+  });
+
+  document.getElementById('batch-cancel')?.addEventListener('click', exitBatchMode);
+
+  document.getElementById('batch-select-all')?.addEventListener('click', () => {
+    const checks = document.querySelectorAll('.batch-check');
+    const allChecked = Array.from(checks).every(cb => cb.checked);
+    checks.forEach(cb => { cb.checked = !allChecked; });
+    updateBatchCount();
+    const btn = document.getElementById('batch-select-all');
+    if (btn) btn.textContent = allChecked ? 'Select All' : 'Deselect All';
+  });
+
+  // Listen for checkbox changes
+  document.getElementById('machines-container')?.addEventListener('change', e => {
+    if (e.target.classList.contains('batch-check')) updateBatchCount();
+  });
+
+  // Tap machine card to toggle checkbox in batch mode
+  document.getElementById('machines-container')?.addEventListener('click', e => {
+    if (!_batchMode) return;
+    const card = e.target.closest('.machine-card');
+    if (!card) return;
+    // Don't toggle if clicking the checkbox itself, edit/delete buttons, images, or audio
+    if (e.target.closest('.batch-check-wrap') || e.target.closest('.btn-edit-m') || e.target.closest('.btn-del-m') ||
+        e.target.closest('.img-wrap') || e.target.closest('.img-add-btn') || e.target.closest('.audio-row') ||
+        e.target.closest('.btn-request-assign') || e.target.closest('.img-del-btn')) return;
+    const cb = card.querySelector('.batch-check');
+    if (cb) { cb.checked = !cb.checked; updateBatchCount(); }
+  });
+
+  // Batch action buttons
+  document.querySelectorAll('.batch-action-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetStatus = btn.dataset.batchStatus;
+      const selectedIds = Array.from(document.querySelectorAll('.batch-check:checked')).map(cb => parseInt(cb.dataset.mid));
+      if (!selectedIds.length) { toast('Select machines first', 'error'); return; }
+      const selectedNames = selectedIds.map(id => {
+        const m = (j.machines || []).find(x => x.id === id);
+        return m ? m.product_name : 'Machine #' + id;
+      });
+
+      if (targetStatus === 'delivered') {
+        // Show delivery modal for batch
+        showModal(`
+          <h3 class="modal-title"><i class="fas fa-check-double" style="color:#1E88E5"></i> Deliver ${selectedIds.length} Machine${selectedIds.length>1?'s':''}</h3>
+          <div style="background:#E3F2FD;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:#1565C0">
+            ${selectedNames.map(n => '<div>• ' + esc(n) + '</div>').join('')}
+          </div>
+          <div class="form-group">
+            <label class="form-label">Delivery Method <span class="req">*</span></label>
+            <select id="bd-method" class="form-input">
+              <option value="in_person">🤝 In Person</option>
+              <option value="courier">📮 Courier</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Receiver Name <span style="color:#999;font-size:12px">(optional)</span></label>
+            <input id="bd-rname" type="text" class="form-input" placeholder="Person who collected">
+          </div>
+          <div class="form-group" id="bd-courier-wrap" style="display:none">
+            <label class="form-label">Courier Name <span style="color:#999;font-size:12px">(optional)</span></label>
+            <input id="bd-courier" type="text" class="form-input" placeholder="e.g. DTDC, BlueDart">
+          </div>
+          <div class="modal-footer">
+            <button onclick="closeModal()" class="btn-ghost">Cancel</button>
+            <button id="bd-confirm" class="btn-primary" style="background:#1E88E5"><i class="fas fa-check"></i> Deliver ${selectedIds.length}</button>
+          </div>`);
+        document.getElementById('bd-method')?.addEventListener('change', ev => {
+          document.getElementById('bd-courier-wrap').style.display = ev.target.value === 'courier' ? '' : 'none';
+        });
+        document.getElementById('bd-confirm')?.addEventListener('click', async () => {
+          closeModal();
+          toast('Updating ' + selectedIds.length + ' machines…', 'info');
+          try {
+            await API.put('/api/machines/batch-status', {
+              machine_ids: selectedIds, status: 'delivered',
+              delivery_method: document.getElementById('bd-method')?.value || 'in_person',
+              delivery_receiver_name: document.getElementById('bd-rname')?.value.trim() || null,
+              delivery_courier_name: document.getElementById('bd-courier')?.value.trim() || null,
+            });
+            toast(selectedIds.length + ' machines delivered ✅', 'success');
+            exitBatchMode();
+            await loadDetail();
+          } catch (err) { toast(err.response?.data?.error || 'Batch update failed', 'error'); }
+        });
+        return;
+      }
+
+      if (targetStatus === 'repaired' || targetStatus === 'returned') {
+        const label = targetStatus === 'repaired' ? 'Work Done (optional)' : 'Return Reason (optional)';
+        const pholder = targetStatus === 'repaired' ? 'e.g. Replaced motor, cleaned…' : 'e.g. Customer collected unrepaired…';
+        const noteKey = targetStatus === 'repaired' ? 'work_done' : 'return_reason';
+        showModal(`
+          <h3 class="modal-title"><i class="fas fa-clipboard-check" style="color:${targetStatus==='repaired'?'#43A047':'#B8860B'}"></i> Mark ${selectedIds.length} as ${sl(targetStatus)}</h3>
+          <div style="background:${sb(targetStatus)};border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:13px;color:${sc(targetStatus)}">
+            ${selectedNames.map(n => '<div>• ' + esc(n) + '</div>').join('')}
+          </div>
+          <div class="form-group">
+            <label class="form-label">${label}</label>
+            <textarea id="batch-note-input" class="form-input" rows="3" placeholder="${pholder}" style="resize:vertical"></textarea>
+          </div>
+          <div class="modal-footer">
+            <button onclick="closeModal()" class="btn-ghost">Cancel</button>
+            <button id="batch-note-save" class="btn-primary" style="background:${sc(targetStatus)}"><i class="fas fa-check"></i> Confirm ${selectedIds.length}</button>
+          </div>`);
+        document.getElementById('batch-note-save')?.addEventListener('click', async () => {
+          const noteVal = document.getElementById('batch-note-input')?.value.trim() || null;
+          closeModal();
+          toast('Updating ' + selectedIds.length + ' machines…', 'info');
+          try {
+            await API.put('/api/machines/batch-status', {
+              machine_ids: selectedIds, status: targetStatus, [noteKey]: noteVal,
+            });
+            toast(selectedIds.length + ' machines → ' + sl(targetStatus) + ' ✅', 'success');
+            exitBatchMode();
+            await loadDetail();
+          } catch (err) { toast(err.response?.data?.error || 'Batch update failed', 'error'); }
+        });
+        return;
+      }
+
+      // under_repair — simple direct update
+      if (!confirm(`Mark ${selectedIds.length} machine${selectedIds.length>1?'s':''} as Under Repair?`)) return;
+      (async () => {
+        toast('Updating ' + selectedIds.length + ' machines…', 'info');
+        try {
+          await API.put('/api/machines/batch-status', { machine_ids: selectedIds, status: targetStatus });
+          toast(selectedIds.length + ' machines → Under Repair ✅', 'success');
+          exitBatchMode();
+          await loadDetail();
+        } catch (err) { toast(err.response?.data?.error || 'Batch update failed', 'error'); }
+      })();
+    });
+  });
 
   // WhatsApp Reminder (admin only)
   document.getElementById('btn-wa-reminder')?.addEventListener('click', () => {
@@ -3754,7 +4035,8 @@ function shareText(j, multiPage) {
   const total       = j.total_charges || 0;
   const received    = j.received_amount || 0;
   const phone       = (j.snap_mobile || '').replace(/\D/g, '');
-  const prodCount   = (j.machines||[]).length;
+  // v37: Sum quantities — a machine with qty x2 counts as 2 products
+  const prodCount   = (j.machines||[]).reduce((s, m) => s + (parseInt(m.quantity) || 1), 0);
 
   // Tracking link
   const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(phone)}`;
