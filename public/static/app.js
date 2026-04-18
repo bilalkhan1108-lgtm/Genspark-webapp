@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v38                       ║
-// ║  v38: WhatsApp share machine-count fix (sum qty), batch status     ║
-// ║  route fix, search bar, IndexedDB offline-first, multi-select      ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v39                       ║
+// ║  v39: WhatsApp-style offline viewing (read-only), daily auto       ║
+// ║  backup scheduler, online/offline banner, full IndexedDB cache     ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -36,6 +36,134 @@ const S = {
 };
 
 const CARD_H = 88;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v39: OFFLINE DETECTION & READ-ONLY MODE
+// Monitors navigator.onLine + real connectivity. When offline, the entire UI
+// becomes read-only: mutating buttons are hidden, a persistent banner shows.
+// When back online, everything restores seamlessly.
+// ─────────────────────────────────────────────────────────────────────────────
+let _isOffline = !navigator.onLine;
+
+function _showOfflineBanner() {
+  let banner = document.getElementById('aes-offline-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'aes-offline-banner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:linear-gradient(135deg,#E53935,#C62828);color:#fff;text-align:center;padding:6px 16px;font-size:13px;font-weight:800;letter-spacing:.5px;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 2px 12px rgba(0,0,0,.3);transition:transform .3s ease;animation:offlinePulse 2s infinite';
+    banner.innerHTML = '<i class="fas fa-wifi-slash" style="font-size:14px"></i> Offline — View Only';
+    // Add keyframe animation
+    if (!document.getElementById('aes-offline-style')) {
+      const style = document.createElement('style');
+      style.id = 'aes-offline-style';
+      style.textContent = `
+        @keyframes offlinePulse { 0%,100%{opacity:1} 50%{opacity:.85} }
+        .aes-offline-hidden { display:none !important; }
+        .app-header { transition: margin-top .3s ease; }
+        body.aes-offline .app-header { margin-top:33px; }
+        body.aes-offline .bottom-nav { pointer-events:auto; }
+      `;
+      document.head.appendChild(style);
+    }
+    document.body.prepend(banner);
+  }
+  banner.style.display = '';
+  document.body.classList.add('aes-offline');
+  // Push header down so banner doesn't overlap
+  _lockMutatingUI(true);
+}
+
+function _hideOfflineBanner() {
+  const banner = document.getElementById('aes-offline-banner');
+  if (banner) banner.style.display = 'none';
+  document.body.classList.remove('aes-offline');
+  _lockMutatingUI(false);
+}
+
+// Show brief "Back Online" toast when reconnecting
+function _showOnlineToast() {
+  let el = document.getElementById('aes-online-toast');
+  if (el) el.remove();
+  el = document.createElement('div');
+  el.id = 'aes-online-toast';
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10001;background:linear-gradient(135deg,#43A047,#2E7D32);color:#fff;text-align:center;padding:6px 16px;font-size:13px;font-weight:800;letter-spacing:.5px;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 2px 12px rgba(0,0,0,.3);animation:toastIn .22s ease';
+  el.innerHTML = '<i class="fas fa-wifi" style="font-size:14px"></i> Back Online';
+  document.body.prepend(el);
+  setTimeout(() => { if (el.parentNode) el.remove(); }, 2500);
+}
+
+// v39: Hide/show mutating (write) UI elements based on offline state
+// Instead of removing DOM elements, we use a CSS class to hide them
+function _lockMutatingUI(lock) {
+  // Selectors for ALL buttons/elements that perform write operations
+  const mutatingSelectors = [
+    '#btn-add-machine', '#btn-batch-select', '#btn-deliver', '#btn-share',
+    '#btn-wa-reminder', '#btn-del-job', '#btn-edit-customer', '#btn-print-addr',
+    '#recv-save', '#discount-input', '#recv-input', '#pay-method',
+    '#btn-jobcard',  // download requires network for image fetch
+    '.batch-action-btn', '#batch-bar',
+    // New Job tab should be hidden entirely in bottom nav
+    '[data-nav="newjob"]',
+    // Settings mutating items
+    '#set-reset', '#set-cleanup', '#btn-save-prefix',
+    // Requests tab
+    '[data-nav="requests"]',
+    // Staff panel write actions
+    '#btn-add-staff',
+    // Dashboard refresh (can't fetch when offline)
+    '#btn-refresh-jobs',
+    // Machine card edit/delete buttons
+    '.mc-edit-btn', '.mc-del-btn',
+    // Image upload buttons
+    '.cam-upload-btn', '.cam-btn',
+    // Audio record buttons
+    '.audio-record-btn',
+    // Status dropdowns on machine cards
+    '.mc-status-select',
+  ];
+  document.querySelectorAll(mutatingSelectors.join(',')).forEach(el => {
+    if (lock) el.classList.add('aes-offline-hidden');
+    else      el.classList.remove('aes-offline-hidden');
+  });
+}
+
+// Check actual connectivity (navigator.onLine can lie on some networks)
+async function _checkRealConnectivity() {
+  if (!navigator.onLine) return false;
+  try {
+    const resp = await fetch('/api/health', { method: 'HEAD', cache: 'no-store' });
+    return resp.ok;
+  } catch { return false; }
+}
+
+function _handleOfflineChange(offline) {
+  const wasOffline = _isOffline;
+  _isOffline = offline;
+  if (offline) {
+    _showOfflineBanner();
+    // If on dashboard, load from IndexedDB cache
+    if (S.view === 'dashboard' && (!S.jobs || !S.jobs.length)) {
+      IDB.loadAllJobs().then(jobs => {
+        if (jobs.length) { S.jobs = jobs; renderVList(false); }
+      });
+    }
+  } else {
+    _hideOfflineBanner();
+    if (wasOffline) {
+      _showOnlineToast();
+      // Silently refresh current view data in background
+      if (S.view === 'dashboard') { loadJobs(); }
+      else if (S.view === 'detail' && S.jobId) { loadDetail(); }
+    }
+  }
+}
+
+// Listen for browser online/offline events
+window.addEventListener('online',  () => _handleOfflineChange(false));
+window.addEventListener('offline', () => _handleOfflineChange(true));
+
+// Initial check on boot — delay to let SW register first
+setTimeout(() => { if (!navigator.onLine) _handleOfflineChange(true); }, 500);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SMART SUGGESTIONS CACHE (localStorage-backed)
@@ -695,6 +823,8 @@ function render() {
     return;
   }
   if (!S.token || !S.user) {
+    // v39: If offline but previously logged in, allow read-only dashboard access
+    // (token expired or cleared but we still have cached data)
     app.innerHTML = loginHTML();
     bindLogin();
     return;
@@ -708,6 +838,11 @@ function render() {
       ${bottomNavHTML()}
     </div>`;
   bindView();
+  // v39: Re-apply offline state after re-render
+  if (_isOffline) {
+    _showOfflineBanner();
+    setTimeout(() => _lockMutatingUI(true), 100);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -815,6 +950,11 @@ function bottomNavHTML() {
 // VIEW DISPATCH
 // ─────────────────────────────────────────────────────────────────────────────
 function viewHTML() {
+  // v39: Block write-only views when offline — redirect to read-only dashboard
+  if (_isOffline && ['newjob', 'requests'].includes(S.view)) {
+    S.view = 'dashboard';
+    toast('Offline — view only mode', 'info');
+  }
   switch (S.view) {
     case 'dashboard': return dashboardHTML();
     case 'newjob':    return (isAdmin() || hasSuperRight('create_jobs')) ? newJobHTML() : deniedHTML();
@@ -1114,14 +1254,27 @@ async function loadJobs(append = false) {
     renderVList(append);
   } catch {
     if (myLoadId !== _jobsLoadId) { _jobsLoading = false; return; }
-    if (!append && (!S.jobs.length) && wrap) {
-      wrap.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Error loading jobs</p></div>`;
+    // v39: When offline and no cached data yet, fall back to ALL cached jobs from IndexedDB
+    if (!append && (!S.jobs.length)) {
+      const allCached = await IDB.loadAllJobs();
+      if (allCached.length) {
+        S.jobs = allCached;
+        renderVList(false);
+        if (_isOffline) toast('Showing cached data (offline)', 'info');
+      } else if (wrap) {
+        wrap.innerHTML = _isOffline
+          ? `<div class="empty-state"><i class="fas fa-wifi-slash fa-2x" style="color:#E53935"></i><p style="font-weight:700">You're Offline</p><p style="font-size:13px;color:#888">No cached data available yet. Connect to the internet to load jobs.</p></div>`
+          : `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Error loading jobs</p></div>`;
+      }
     }
   }
   _jobsLoading = false;
 
   // v34: Bind dashboard events only once (prevents event listener accumulation = major perf fix)
   bindDashboardEvents();
+
+  // v39: After rendering, lock mutating UI if offline
+  if (_isOffline) setTimeout(() => _lockMutatingUI(true), 50);
 }
 
 // v36: Pre-fetch full job details in background for WhatsApp-like offline access
@@ -1889,12 +2042,19 @@ async function loadDetail() {
     IDB.saveDetail(freshJob); // Persist to offline memory
     if (changed || !cached) renderDetail();
   } catch {
-    // If no cached data and network fails, show error
-    if (!cached) {
+    // v39: If offline with cached data, just show it (already rendered above)
+    if (cached && _isOffline) {
+      // Already rendered — just lock write buttons
+      setTimeout(() => _lockMutatingUI(true), 50);
+    } else if (!cached) {
       const root = document.getElementById('detail-root');
-      if (root) root.innerHTML = `<div class="empty-state" style="color:#e53935"><i class="fas fa-exclamation-triangle fa-2x"></i><p>Failed to load job</p></div>`;
+      if (root) root.innerHTML = _isOffline
+        ? `<div class="empty-state"><i class="fas fa-wifi-slash fa-2x" style="color:#E53935"></i><p style="font-weight:700">Offline</p><p style="font-size:13px;color:#888">This job hasn't been cached yet. Go online to view it.</p></div>`
+        : `<div class="empty-state" style="color:#e53935"><i class="fas fa-exclamation-triangle fa-2x"></i><p>Failed to load job</p></div>`;
     }
   }
+  // v39: Lock write UI after detail render if offline
+  if (_isOffline) setTimeout(() => _lockMutatingUI(true), 50);
 }
 
 function renderDetail() {
@@ -4665,6 +4825,90 @@ function bindReports() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// v39: DAILY AUTO-BACKUP SYSTEM
+// Schedules a daily backup at user-configured time (default 23:00).
+// Downloads an XLSX file with all jobs, machines, customers, images metadata.
+// Uses localStorage to persist schedule + last-backup timestamp.
+// ─────────────────────────────────────────────────────────────────────────────
+const _BACKUP_TIME_KEY = 'AES_BACKUP_TIME';
+const _BACKUP_LAST_KEY = 'AES_BACKUP_LAST';
+let _backupTimer = null;
+
+function _backupGetTime() {
+  return localStorage.getItem(_BACKUP_TIME_KEY) || '23:00';
+}
+function _backupSetTime(t) {
+  localStorage.setItem(_BACKUP_TIME_KEY, t);
+  _scheduleBackup(); // Reschedule after change
+}
+function _backupGetLast() {
+  return localStorage.getItem(_BACKUP_LAST_KEY) || null;
+}
+function _backupSetLast() {
+  const now = new Date().toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+  localStorage.setItem(_BACKUP_LAST_KEY, now);
+}
+
+async function _doBackupDownload() {
+  if (!S.token) { toast('Please log in to download backup', 'error'); return; }
+  if (_isOffline) { toast('Cannot download backup while offline', 'error'); return; }
+  const statusEl = document.getElementById('backup-status');
+  if (statusEl) statusEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing backup...';
+  try {
+    const resp = await fetch('/api/backup/export', {
+      headers: { Authorization: 'Bearer ' + S.token }
+    });
+    if (!resp.ok) throw new Error('Backup failed');
+    const blob = await resp.blob();
+    const date = new Date().toISOString().slice(0, 10);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `AES_backup_${date}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    _backupSetLast();
+    if (statusEl) statusEl.innerHTML = '<i class="fas fa-check-circle" style="color:#43A047"></i> Backup downloaded successfully!';
+    _updateBackupLastUI();
+    toast('Backup downloaded!', 'success');
+    // Show notification if app is in background
+    showLocalNotification('Daily Backup Complete', `AES_backup_${date}.xlsx saved`, 'backup');
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = '<i class="fas fa-exclamation-circle" style="color:#E53935"></i> Backup failed. Try again.';
+    toast('Backup download failed', 'error');
+  }
+}
+
+function _updateBackupLastUI() {
+  const el = document.getElementById('backup-last');
+  const last = _backupGetLast();
+  if (el) el.textContent = last ? `Last backup: ${last}` : 'No backup yet';
+}
+
+function _scheduleBackup() {
+  if (_backupTimer) clearTimeout(_backupTimer);
+  // Only schedule for admin users
+  if (!isAdminOnly()) return;
+  const timeStr = _backupGetTime(); // "HH:MM"
+  const [hh, mm] = timeStr.split(':').map(Number);
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(hh, mm, 0, 0);
+  // If target time has passed today, schedule for tomorrow
+  if (target <= now) target.setDate(target.getDate() + 1);
+  const delay = target.getTime() - now.getTime();
+  _backupTimer = setTimeout(() => {
+    _doBackupDownload();
+    // Reschedule for tomorrow after download
+    setTimeout(() => _scheduleBackup(), 1000);
+  }, delay);
+}
+
+// Start backup scheduler on app boot (admin only, non-blocking)
+setTimeout(() => { if (S.token && S.user) _scheduleBackup(); }, 3000);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SETTINGS
 // ─────────────────────────────────────────────────────────────────────────────
 function settingsHTML() {
@@ -4706,6 +4950,22 @@ function settingsHTML() {
       </div>
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>` : ''}
+    ${isAdminOnly() ? `
+    <!-- v39: Daily Auto-Backup -->
+    <div class="card" style="margin-bottom:12px" id="backup-card">
+      <div class="section-title"><i class="fas fa-cloud-download-alt" style="color:#1E88E5"></i> Daily Auto-Backup</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Automatically backs up all data daily. Download anytime.</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <label style="font-size:13px;font-weight:700;color:#555;white-space:nowrap">Backup Time:</label>
+        <input id="set-backup-time" type="time" class="form-input" style="flex:1;min-height:36px;padding:4px 10px;font-size:14px" value="${_backupGetTime()}">
+        <button id="btn-save-backup-time" class="btn-sm btn-blue" style="white-space:nowrap"><i class="fas fa-save"></i> Save</button>
+      </div>
+      <div id="backup-status" style="font-size:12px;color:#888;margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px">
+        <button id="btn-backup-now" class="btn-sm" style="flex:1;background:#1E88E5;color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:700;cursor:pointer"><i class="fas fa-download"></i> Download Backup Now</button>
+      </div>
+      <div id="backup-last" style="font-size:11px;color:#aaa;margin-top:8px;text-align:center"></div>
+    </div>` : ''}
     <div class="settings-item" id="set-install-app" style="${window._pwaInstallPrompt ? '' : 'display:none'}">
       <div>
         <div class="settings-label"><i class="fas fa-mobile-alt settings-icon" style="color:#43A047"></i> Install App</div>
@@ -4721,7 +4981,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v28.0<br>
+      ✨ adition™ since 1984 · v39.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -4781,6 +5041,26 @@ function bindSettings() {
         await API.put('/api/settings', { job_prefix: prefix, job_seq_digits: String(digits) });
         toast(`Format saved: ${prefix}-${String(1).padStart(digits, '0')} ✅`, 'success');
       } catch (_) { toast('Failed to save', 'error'); }
+    });
+  }
+
+  // v39: Backup controls (admin only)
+  if (isAdminOnly()) {
+    _updateBackupLastUI();
+    // Show next scheduled backup time
+    const statusEl = document.getElementById('backup-status');
+    if (statusEl) {
+      const t = _backupGetTime();
+      statusEl.innerHTML = `<i class="fas fa-clock" style="color:#1E88E5"></i> Next auto-backup scheduled at <b>${t}</b>`;
+    }
+    document.getElementById('btn-backup-now')?.addEventListener('click', () => _doBackupDownload());
+    document.getElementById('btn-save-backup-time')?.addEventListener('click', () => {
+      const timeInput = document.getElementById('set-backup-time');
+      if (!timeInput?.value) { toast('Select a time', 'error'); return; }
+      _backupSetTime(timeInput.value);
+      const statusEl = document.getElementById('backup-status');
+      if (statusEl) statusEl.innerHTML = `<i class="fas fa-check-circle" style="color:#43A047"></i> Backup scheduled at <b>${timeInput.value}</b>`;
+      toast(`Daily backup set for ${timeInput.value}`, 'success');
     });
   }
 }

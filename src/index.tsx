@@ -21,6 +21,9 @@ type Variables = {
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>()
 app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','PUT','DELETE','OPTIONS'] }))
 
+// v39: Health check endpoint for offline detection (no auth required)
+app.get('/api/health', (c) => c.json({ ok: true, ts: Date.now() }))
+
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 async function signToken(payload: Record<string, unknown>, secret: string) {
   const key = new TextEncoder().encode(secret)
