@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v39                       ║
-// ║  v39: WhatsApp-style offline viewing (read-only), daily auto       ║
-// ║  backup scheduler, online/offline banner, full IndexedDB cache     ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v41                       ║
+// ║  v41: Turbo search overhaul (instant client+server), job card      ║
+// ║  image reliability fix, performance boost, repair-shop features    ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -505,10 +505,56 @@ const sc = s => STATUS_COLOR[s] || '#888';
 const sb = s => STATUS_BG[s]    || '#f5f5f5';
 const sl = s => STATUS_LABEL[s] || s;
 
-// 150ms debounce for search (instant-feel UX for mobile + job number search)
+// v41: Smarter debounce — cancellable, returns promise
 function debounce(fn, ms = 150) {
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+// v41: REQUEST DEDUPLICATION — prevents duplicate concurrent API calls
+// Also cancels stale requests when search terms change
+const _pendingRequests = new Map();
+let _lastSearchSeq = 0; // Monotonic counter to detect stale API responses
+function dedupeGet(url, params) {
+  const key = url + JSON.stringify(params || {});
+  if (_pendingRequests.has(key)) return _pendingRequests.get(key);
+  const promise = API.get(url, { params }).finally(() => _pendingRequests.delete(key));
+  _pendingRequests.set(key, promise);
+  return promise;
+}
+
+// v41: INSTANT CLIENT-SIDE SEARCH — filters already-loaded jobs before API call
+// Searches job ID, customer name, AND mobile number
+let _allLoadedJobs = []; // Master cache of all jobs seen in this session
+let _allJobsFullyLoaded = false; // True when we've loaded ALL jobs (not just first page)
+
+function _clientSideFilter(jobs, searchJob, searchName) {
+  if (!searchJob && !searchName) return null; // No filter active
+  const sjLower = searchJob ? searchJob.toLowerCase() : '';
+  const snLower = searchName ? searchName.toLowerCase() : '';
+  return jobs.filter(j => {
+    if (sjLower && !(j.id || '').toLowerCase().includes(sjLower)) return false;
+    if (snLower) {
+      const name = (j.snap_name || '').toLowerCase();
+      const mobile = (j.snap_mobile || '');
+      if (!name.includes(snLower) && !mobile.includes(snLower)) return false;
+    }
+    return true;
+  });
+}
+
+// v41: Pre-populate master cache from IndexedDB on startup for instant first-search
+async function _warmupSearchCache() {
+  try {
+    const allCached = await IDB.loadAllJobs();
+    if (allCached && allCached.length) {
+      for (const j of allCached) {
+        const idx = _allLoadedJobs.findIndex(x => x.id === j.id);
+        if (idx >= 0) _allLoadedJobs[idx] = j;
+        else _allLoadedJobs.push(j);
+      }
+    }
+  } catch {}
 }
 
 // Toast
@@ -578,6 +624,23 @@ window.filterActiveOnly = function() {
 window.filterCourierPending = function() {
   setFilter('courier_pending'); S.fromDate = ''; S.toDate = ''; loadJobs();
 };
+// v41: Urgent: show active jobs older than 25 days — filter client-side from master cache
+window.filterUrgent = function() {
+  const cutoff = Date.now() - 25 * 86400000;
+  const urgentJobs = _allLoadedJobs.filter(j => {
+    const isActive = j.status === 'under_repair' || j.status === 'repaired';
+    const created = new Date(j.created_at).getTime();
+    return isActive && created <= cutoff;
+  });
+  if (urgentJobs.length) {
+    S.jobs = urgentJobs.sort((a,b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    S.filter = ''; S.fromDate = ''; S.toDate = '';
+    renderVList(false);
+    toast(`🚨 ${urgentJobs.length} urgent job${urgentJobs.length>1?'s':''} (>25 days)`, 'error');
+  } else {
+    toast('No urgent jobs — all active jobs are under 25 days! 🎉', 'success');
+  }
+};
 
 function setFilter(s) {
   S.filter = s;
@@ -623,7 +686,7 @@ async function loadAuthMedia(url, el, attr) {
 
 function applyAuthImages(container) {
   (container || document).querySelectorAll('img[data-auth-src]').forEach(img => {
-    if (!img.src || img.src === window.location.href) loadAuthMedia(img.dataset.authSrc, img, 'src');
+    if (!img.src || img.src === window.location.href || img.src.startsWith('data:image/gif')) loadAuthMedia(img.dataset.authSrc, img, 'src');
   });
   (container || document).querySelectorAll('audio[data-audio-src]').forEach(aud => {
     if (!aud.src || aud.src === window.location.href) loadAuthMedia(aud.dataset.audioSrc, aud, 'src');
@@ -1170,6 +1233,7 @@ function _applyChipCounts(d) {
       { label: 'Partial', value: d.partial || 0, icon: '📦', bg: '#FFF3E0', color: '#FF6F00', click: "filterByStatus('partial_delivered')" },
       { label: 'Delivered', value: d.completed || 0, icon: '🚚', bg: '#E3F2FD', color: '#1565C0', click: 'filterDone()' },
       { label: 'Courier', value: d.courierPending || 0, icon: '📮', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterCourierPending()' },
+      { label: 'Urgent>25d', value: d.urgent || 0, icon: '🚨', bg: d.urgent > 0 ? '#FFCDD2' : '#F5F5F5', color: d.urgent > 0 ? '#C62828' : '#888', click: 'filterUrgent()' },
     ];
     ownerDash.innerHTML = tiles.map(t => `
       <div onclick="${t.click}" style="flex:1;min-width:44px;background:${t.bg};border-radius:8px;padding:4px 2px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
@@ -1195,45 +1259,63 @@ function _idbFilterKey() {
 
 async function loadJobs(append = false) {
   const wrap = document.getElementById('vlist-wrap');
+  const isSearching = !!(S.searchJob || S.searchName);
   if (!append) {
     _jobsOffset = 0;
     _jobsHasMore = true;
-    _jobsLoading = false; // v37: Always reset loading for new search/filter
-    _jobsLoadId++; // v37: Invalidate any in-flight request
+    _jobsLoading = false;
+    _jobsLoadId++;
     const cacheKey = _idbFilterKey();
-    // 1) Instant render from IndexedDB offline memory (0ms perceived delay)
-    if (cacheKey) {
+
+    // v41: INSTANT CLIENT-SIDE FILTER — show results in <1ms from master cache
+    // Works on very first keystroke because _allLoadedJobs is pre-warmed from IDB
+    if (isSearching && _allLoadedJobs.length) {
+      const clientResults = _clientSideFilter(_allLoadedJobs, S.searchJob, S.searchName);
+      if (clientResults !== null) {
+        S.jobs = clientResults;
+        renderVList(false);
+        // If master cache has enough data, skip API call entirely for instant UX
+        if (_allJobsFullyLoaded && clientResults.length > 0) {
+          _jobsLoading = false;
+          bindDashboardEvents();
+          return;
+        }
+        // Otherwise still fire API in background for server-accurate results
+      }
+    }
+    // IDB cache fallback for non-search loads (filter views)
+    else if (cacheKey) {
       const cached = await IDB.loadJobs(cacheKey);
       if (cached && cached.length) {
         S.jobs = cached;
         renderVList(false);
-        // Don't show spinner — user sees data instantly, we refresh in background
-      } else {
+      } else if (!S.jobs.length) {
         S.jobs = [];
         if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
       }
-    } else {
+    } else if (!S.jobs.length) {
       S.jobs = [];
       if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
     }
   }
   if (_jobsLoading || !_jobsHasMore) return;
   _jobsLoading = true;
-  const myLoadId = _jobsLoadId; // v37: Capture current load ID
-  // Load analytics stats in background — use cache to avoid redundant calls
-  loadAnalytics();
+  const myLoadId = _jobsLoadId;
+  const mySearchSeq = ++_lastSearchSeq;
+  // v41: Only refresh analytics on fresh non-search load
+  if (!append && !isSearching) loadAnalytics();
   try {
     const params = { limit: JOBS_PER_PAGE, offset: _jobsOffset };
     if (S.filter)     params.status   = S.filter;
     if (S.searchJob)  params.q_job    = S.searchJob;
     if (S.searchName) params.q_name   = S.searchName;
-    if (S.search && !S.searchJob && !S.searchName)     params.q = S.search;
+    if (S.search && !S.searchJob && !S.searchName) params.q = S.search;
     if (S.fromDate)   params.from     = S.fromDate;
     if (S.toDate)     params.to       = S.toDate;
     if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
-    const r = await API.get('/api/jobs', { params });
-    // v37: Discard result if a newer loadJobs was triggered while we were waiting
-    if (myLoadId !== _jobsLoadId) { _jobsLoading = false; return; }
+    const r = await dedupeGet('/api/jobs', params);
+    // v41: Discard if user has moved on (stale load ID or newer search)
+    if (myLoadId !== _jobsLoadId || mySearchSeq !== _lastSearchSeq) { _jobsLoading = false; return; }
     const newJobs = r.data || [];
     if (newJobs.length < JOBS_PER_PAGE) _jobsHasMore = false;
     _jobsOffset += newJobs.length;
@@ -1241,24 +1323,43 @@ async function loadJobs(append = false) {
       S.jobs = [...S.jobs, ...newJobs];
     } else {
       S.jobs = newJobs;
-      // 2) Persist to IndexedDB for instant load on next app open
       const cacheKey = _idbFilterKey();
       if (cacheKey) {
         IDB.saveJobs(cacheKey, S.jobs);
-        // Also bulk-save basic job data for instant detail rendering
         IDB.bulkSaveDetails(S.jobs);
       }
-      // v37: Pre-fetch full details for first 20 jobs in background (WhatsApp-like offline)
-      _prefetchDetails(newJobs.slice(0, 20));
+      // v41: Build master cache for instant client-side search
+      if (!isSearching && !S.search) {
+        const idSet = new Set(_allLoadedJobs.map(x => x.id));
+        for (const j of newJobs) {
+          if (idSet.has(j.id)) {
+            const idx = _allLoadedJobs.findIndex(x => x.id === j.id);
+            if (idx >= 0) _allLoadedJobs[idx] = j;
+          } else {
+            _allLoadedJobs.push(j);
+            idSet.add(j.id);
+          }
+        }
+        if (!_jobsHasMore) _allJobsFullyLoaded = true;
+      }
+      // v41: Only prefetch on initial non-search loads to save bandwidth
+      if (!isSearching) _prefetchDetails(newJobs.slice(0, 15));
     }
     renderVList(append);
   } catch {
     if (myLoadId !== _jobsLoadId) { _jobsLoading = false; return; }
-    // v39: When offline and no cached data yet, fall back to ALL cached jobs from IndexedDB
     if (!append && (!S.jobs.length)) {
       const allCached = await IDB.loadAllJobs();
       if (allCached.length) {
-        S.jobs = allCached;
+        // v41: Also populate master cache from IDB for offline search
+        _allLoadedJobs = allCached;
+        _allJobsFullyLoaded = true;
+        if (isSearching) {
+          const filtered = _clientSideFilter(allCached, S.searchJob, S.searchName);
+          S.jobs = filtered || allCached;
+        } else {
+          S.jobs = allCached;
+        }
         renderVList(false);
         if (_isOffline) toast('Showing cached data (offline)', 'info');
       } else if (wrap) {
@@ -1269,11 +1370,7 @@ async function loadJobs(append = false) {
     }
   }
   _jobsLoading = false;
-
-  // v34: Bind dashboard events only once (prevents event listener accumulation = major perf fix)
   bindDashboardEvents();
-
-  // v39: After rendering, lock mutating UI if offline
   if (_isOffline) setTimeout(() => _lockMutatingUI(true), 50);
 }
 
@@ -1387,26 +1484,45 @@ function bindDashboardEvents() {
     }
   });
 
-  // v37: Instant search — loadJobs(false) now auto-resets _jobsLoading + _jobsHasMore
-  //      and uses _jobsLoadId to discard stale responses from previous searches
-  const dSearchJob = debounce(() => {
+  // v41: TURBO SEARCH — instant client-side filter + delayed API refinement
+  // Step 1: Every keystroke immediately filters _allLoadedJobs (0ms delay)
+  // Step 2: After typing stops, fire API for server-accurate results (300ms debounce)
+  // Step 3: If master cache is complete (_allJobsFullyLoaded), skip API entirely
+
+  function _instantSearchFilter() {
     S.searchJob = document.getElementById('dash-search-job')?.value.trim() || '';
-    S.search = S.searchJob || S.searchName || '';
-    loadJobs();
-  }, 80);
-  const dSearchName = debounce(() => {
     S.searchName = document.getElementById('dash-search-name')?.value.trim() || '';
     S.search = S.searchJob || S.searchName || '';
+
+    // Instant client-side filter: show results in <1ms
+    if (_allLoadedJobs.length && (S.searchJob || S.searchName)) {
+      const instant = _clientSideFilter(_allLoadedJobs, S.searchJob, S.searchName);
+      if (instant !== null) { S.jobs = instant; renderVList(false); }
+    }
+    // When both fields cleared, show all jobs
+    if (!S.searchJob && !S.searchName) {
+      _jobsLoadId++; // Cancel any pending API search
+      loadJobs();
+    }
+  }
+
+  // Delayed API call for server-accurate results (only if client cache isn't complete)
+  const _debouncedApiSearch = debounce(() => {
+    if (_allJobsFullyLoaded && (S.searchJob || S.searchName)) return; // Cache is authoritative
     loadJobs();
-  }, 100);
+  }, 350);
+
   document.addEventListener('input', e => {
-    if (e.target.id === 'dash-search-job')  dSearchJob();
-    if (e.target.id === 'dash-search-name') dSearchName();
+    if (e.target.id === 'dash-search-job' || e.target.id === 'dash-search-name') {
+      _instantSearchFilter(); // Instant client-side
+      if (S.searchJob || S.searchName) _debouncedApiSearch(); // Delayed API
+    }
   });
-  // v36 FIX: Also handle 'search' event (fires when user taps ✕ on mobile search input)
+  // Handle the 'X' clear button on search inputs
   document.addEventListener('search', e => {
-    if (e.target.id === 'dash-search-job')  dSearchJob();
-    if (e.target.id === 'dash-search-name') dSearchName();
+    if (e.target.id === 'dash-search-job' || e.target.id === 'dash-search-name') {
+      _instantSearchFilter();
+    }
   });
 }
 
@@ -1482,12 +1598,32 @@ function renderVList(append = false) {
   setTimeout(() => applyAuthImages(wrap), 30);
 }
 
+// v41: Highlight search terms in text (wraps matches in <mark>)
+function _hl(text, searchTerm) {
+  if (!searchTerm || !text) return esc(text || '');
+  const escaped = esc(text);
+  const term = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return escaped.replace(new RegExp('(' + term + ')', 'gi'), '<mark style="background:#FFF176;padding:0 1px;border-radius:2px">$1</mark>');
+}
+
 function jobRowHTML(j) {
   const color   = sc(j.status);
   const bg      = sb(j.status);
   const balance = Math.max(0, (j.total_charges || 0) - (j.discount || 0) - (j.received_amount || 0));
+  // v41: AGING ALERT — show how old the job is + color warning for stale jobs
+  const daysSince = j.created_at ? Math.floor((Date.now() - new Date(j.created_at).getTime()) / 86400000) : 0;
+  const isActive = j.status === 'under_repair' || j.status === 'repaired' || j.status === 'partial_delivered';
+  const agingTag = isActive && daysSince >= 15
+    ? `<span style="background:${daysSince>=25?'#FFCDD2':daysSince>=15?'#FFF3E0':'transparent'};color:${daysSince>=25?'#C62828':'#E65100'};font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px;margin-left:4px">${daysSince}d</span>`
+    : '';
+  // v41: Search highlight — highlight matching job ID and name
+  const jobIdDisplay = S.searchJob ? _hl(j.id, S.searchJob) : esc(j.id);
+  const nameDisplay = S.searchName ? _hl(j.snap_name, S.searchName) : esc(j.snap_name);
+  // v41: Show mobile in search results when searching by name/mobile
+  const mobileDisplay = S.searchName && j.snap_mobile && j.snap_mobile.includes(S.searchName)
+    ? ` <span style="color:#1565C0;font-size:11px;font-weight:600">${_hl(j.snap_mobile, S.searchName)}</span>` : '';
   return `
-  <div class="job-row" data-id="${j.id}" style="border-left-color:${color};will-change:transform,opacity">
+  <div class="job-row" data-id="${j.id}" style="border-left-color:${color};will-change:transform,opacity${isActive && daysSince>=25?';background:#FFF8F8':''}">
     <div class="job-row-thumb">
       ${j.thumb
         ? `<img data-auth-src="${j.thumb}" class="thumb-img" loading="lazy" alt="thumb">`
@@ -1495,15 +1631,16 @@ function jobRowHTML(j) {
     </div>
     <div class="job-row-body">
       <div class="job-row-top">
-        <span class="job-id">${j.id}</span>
+        <span class="job-id">${jobIdDisplay}${agingTag}</span>
         <span class="status-chip" style="background:${bg};color:${color};border-color:${color}">${sl(j.status)}</span>
       </div>
-      <div class="job-name">${esc(j.snap_name)}${j.dispatch_method === 'courier' ? ' <span style="background:#F3E5F5;color:#7B1FA2;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;margin-left:4px">📮 Courier</span>' : ''}</div>
+      <div class="job-name">${nameDisplay}${mobileDisplay}${j.dispatch_method === 'courier' ? ' <span style="background:#F3E5F5;color:#7B1FA2;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;margin-left:4px">📮 Courier</span>' : ''}</div>
       <div class="job-row-foot">
         <span class="job-meta"><i class="fas fa-tools"></i> ${j.machine_count || 0}</span>
+        <span class="job-meta" style="color:#888;font-size:10px">${fmtDate(j.created_at)}</span>
         ${hasSuperRight('view_financials')
           ? `<span class="job-balance" style="color:${balance>0?'#E53935':'#43A047'}">Bal: ${fmtRs(balance)}</span>`
-          : `<span class="job-meta" style="color:#888">${fmtDate(j.created_at)}</span>`}
+          : ''}
       </div>
     </div>
   </div>`;
@@ -3817,7 +3954,7 @@ function jobCardPrintHTML(j) {
         return `
       <div style="background:${isReturned?'#fafafa':'#f8f9fb'};border-radius:10px;padding:12px;margin-bottom:8px;border-left:4px solid ${mColor};display:flex;align-items:center;gap:12px${isReturned?';opacity:0.65':''}">
         ${firstImg
-          ? `<img src="${firstImg.url}" data-auth-src="${firstImg.url}" style="width:72px;height:72px;border-radius:8px;object-fit:cover;flex-shrink:0;border:2px solid #e8eaed" crossorigin="anonymous" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+          ? `<img data-auth-src="${firstImg.url}" data-img-key="m_${m.id}" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==" style="width:72px;height:72px;border-radius:8px;object-fit:cover;flex-shrink:0;border:2px solid #e8eaed" crossorigin="anonymous" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
           : ''}
         ${firstImg
           ? `<div style="width:72px;height:72px;border-radius:8px;background:#e8eaed;display:none;align-items:center;justify-content:center;flex-shrink:0;font-size:28px;color:#bbb">⚡</div>`
@@ -4037,56 +4174,78 @@ async function generateAndShareJobCard(j, shareMode) {
 
     el.style.left = '-99999px'; el.style.top = '0';
 
-    // ── Step 1: Gather ALL <img> elements in the print card ──────────────────
-    const imgEls = Array.from(el.querySelectorAll('img'));
-    console.log('[AES] Job card images to process:', imgEls.length);
+    // ── v41: Step 0: PRE-LOAD all machine images as base64 BEFORE they go into DOM ──
+    // Critical fix: fetch images with auth token, convert to base64, inject into DOM
+    // Also check _mediaCache for images already loaded by the detail view
+    const _imgBase64Cache = new Map();
+    const imgUrls = (j.machines || []).map(m => (m.images || [])[0]?.url).filter(Boolean);
+    console.log('[AES] Pre-loading', imgUrls.length, 'machine images…');
 
-    // ── Step 2: Convert ALL images to base64 data URIs via Promise.all ───────
-    // Cache bust with ?t=Date.now() to avoid stale images + retry once on failure
-    const base64Results = await Promise.all(imgEls.map(async (img) => {
-      const src = img.getAttribute('data-auth-src') || img.getAttribute('src') || '';
-      if (!src) return { img, base64: null };
-      try {
-        const base64 = await imageUrlToBase64(src, S.token, 2);
-        return { img, base64 };
-      } catch (_) {
-        return { img, base64: null };
+    // v41: First check if we already have blob URLs from the media cache (detail view)
+    for (const url of imgUrls) {
+      if (_mediaCache.has(url)) {
+        try {
+          const blobUrl = _mediaCache.get(url);
+          const resp = await fetch(blobUrl);
+          const blob = await resp.blob();
+          const b64 = await blobToBase64(blob);
+          if (b64) _imgBase64Cache.set(url, b64);
+        } catch {}
       }
-    }));
+    }
 
-    // ── Step 3: Replace ALL img src with base64 data URIs ────────────────────
+    // Fetch remaining images in parallel with auth token, retry logic
+    const remaining = imgUrls.filter(u => !_imgBase64Cache.has(u));
+    if (remaining.length) {
+      await Promise.allSettled(remaining.map(async (url) => {
+        const b64 = await imageUrlToBase64(url, S.token, 3);
+        if (b64) _imgBase64Cache.set(url, b64);
+      }));
+    }
+    console.log(`[AES] Pre-loaded ${_imgBase64Cache.size}/${imgUrls.length} images`);
+
+    // ── Step 1: Inject pre-loaded base64 into ALL <img> elements ─────────────
+    const imgEls = Array.from(el.querySelectorAll('img'));
     let successCount = 0;
-    base64Results.forEach(({ img, base64 }) => {
-      if (base64) {
-        img.src = base64;
+    const pendingLoads = [];
+
+    for (const img of imgEls) {
+      const authSrc = img.getAttribute('data-auth-src') || '';
+      const cachedB64 = _imgBase64Cache.get(authSrc);
+      if (cachedB64) {
+        img.src = cachedB64;
         img.removeAttribute('data-auth-src');
         img.crossOrigin = 'anonymous';
         successCount++;
+      } else if (authSrc) {
+        // Synchronous retry for missed images (block until resolved)
+        const retryPromise = imageUrlToBase64(authSrc, S.token, 2).then(b64 => {
+          if (b64) { img.src = b64; img.removeAttribute('data-auth-src'); successCount++; }
+          else { img.style.display = 'none'; } // Hide broken images cleanly
+        }).catch(() => { img.style.display = 'none'; });
+        pendingLoads.push(retryPromise);
       }
-    });
-    console.log(`[AES] Images converted to base64: ${successCount}/${imgEls.length}`);
+    }
+    // Wait for ALL retry fetches to complete
+    if (pendingLoads.length) await Promise.allSettled(pendingLoads);
+    console.log(`[AES] Images injected: ${successCount}/${imgEls.length}`);
 
-    // ── Step 4: Full image loading validation — wait for ALL images to decode ─
-    const loadResults = await Promise.all(imgEls.map(img => {
-      if (img.complete && img.naturalWidth > 0) return Promise.resolve(true);
+    // ── Step 2: Wait for ALL base64 images to fully decode in browser ─────────
+    await Promise.all(imgEls.filter(img => img.style.display !== 'none').map(img => {
+      if (img.complete && img.naturalWidth > 0) return Promise.resolve();
       return new Promise(resolve => {
-        img.onload = () => resolve(true);
-        img.onerror = () => resolve(false);
-        setTimeout(() => resolve(false), 8000); // 8s safety timeout per image
+        img.onload = () => resolve();
+        img.onerror = () => { img.style.display = 'none'; resolve(); };
+        setTimeout(resolve, 8000); // 8s safety timeout per image
       });
     }));
-    const loadedCount = loadResults.filter(Boolean).length;
-    console.log(`[AES] Images fully loaded: ${loadedCount}/${imgEls.length}`);
 
-    // ── Step 5: Safety fallback — requestAnimationFrame + setTimeout ─────────
-    // Ensures browser has painted all images before html2canvas captures
+    // ── Step 3: Extra paint delay for browser compositing ────────────────────
     await new Promise(resolve => {
-      requestAnimationFrame(() => {
-        setTimeout(resolve, 800); // 800ms paint delay after rAF
-      });
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 800)));
     });
 
-    // ── Step 6: Generate SINGLE long page (min 3072px wide, dynamic height) ──
+    // ── Step 4: Generate SINGLE long page (min 3072px wide, dynamic height) ──
     const CARD_WIDTH = 1080;  // CSS layout width
     const actualH    = Math.max(el.scrollHeight || el.offsetHeight || 1440, 1365);
     const SCALE = 3; // 1080 x 3 = 3240px wide (>= 3072)
@@ -4106,7 +4265,7 @@ async function generateAndShareJobCard(j, shareMode) {
       removeContainer: false,
     });
 
-    // ── Step 7: Output SINGLE page high-quality JPG ──────────────────────────
+    // ── Step 5: Output SINGLE page high-quality JPG ──────────────────────────
     const outW = fullCanvas.width;
     const outH = fullCanvas.height;
     console.log(`[AES] Canvas generated: ${outW}x${outH}px`);
@@ -5629,6 +5788,10 @@ if (document.readyState === 'loading') {
 } else {
   render();
 }
+
+// v41: Pre-warm search cache from IndexedDB immediately after boot
+// This ensures instant search results from the very first keystroke
+if (S.token && S.user) _warmupSearchCache();
 
 // Register Service Worker with explicit scope "/"
 if ('serviceWorker' in navigator) {

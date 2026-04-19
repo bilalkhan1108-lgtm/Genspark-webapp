@@ -328,7 +328,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   const monthStart = today.substring(0, 8) + '01'
 
   const [total, pending, completed, todayCount, monthCount, byStatus, byStaff,
-         urCount, repCount, retCount, partialCount, courierPendingCount] = await Promise.all([
+         urCount, repCount, retCount, partialCount, courierPendingCount, urgentCount] = await Promise.all([
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin}`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status IN ('under_repair','repaired','returned')`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='delivered'`).first<any>(),
@@ -347,6 +347,8 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='returned'`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status='partial_delivered'`).first<any>(),
     c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.dispatch_method='courier' AND j.status != 'delivered'`).first<any>(),
+    // v41: Urgent jobs — active jobs older than 25 days (needs immediate attention)
+    c.env.DB.prepare(`SELECT COUNT(DISTINCT j.id) AS cnt FROM jobs j ${staffJoin} WHERE j.status IN ('under_repair','repaired') AND j.created_at <= datetime('now','-25 days')`).first<any>(),
   ])
 
   // Revenue data for admin dashboard
@@ -393,6 +395,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     returned: retCount?.cnt || 0,
     partial: partialCount?.cnt || 0,
     courierPending: courierPendingCount?.cnt || 0,
+    urgent: urgentCount?.cnt || 0,
     byStatus: isAdmin ? byStatus.results : [],
     byStaff: isAdmin ? byStaff.results : [],
     ...revenueData,

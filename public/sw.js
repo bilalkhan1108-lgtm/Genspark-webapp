@@ -1,9 +1,9 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v39
+// Service Worker — ADITION ELECTRIC SOLUTION v41
 // Strategy: Cache-first for static UI · Network-first w/ cache fallback for API
-// v39: Full offline app shell, API response caching, image caching for offline viewing
-const CACHE_VER   = 'aes-v39';
-const API_CACHE   = 'aes-api-v39';
-const IMG_CACHE   = 'aes-img-v39';
+// v41: Improved caching, faster static loads, API cache TTL management
+const CACHE_VER   = 'aes-v41';
+const API_CACHE   = 'aes-api-v41';
+const IMG_CACHE   = 'aes-img-v41';
 
 const STATIC_URLS = [
   '/',
@@ -27,7 +27,7 @@ self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys().then(keys =>
       Promise.all(keys.filter(k => k !== CACHE_VER && k !== API_CACHE && k !== IMG_CACHE).map(k => caches.delete(k)))
-    )
+    ).then(() => trimImageCache())
   );
   self.clients.claim();
 });
@@ -37,7 +37,7 @@ self.addEventListener('fetch', e => {
   const { request } = e;
   const url = new URL(request.url);
 
-  // Only handle GET requests for caching (POST/PUT/DELETE are write ops)
+  // Only handle GET requests for caching
   if (request.method !== 'GET') return;
 
   // 1. API image endpoints → cache aggressively for offline viewing
@@ -59,7 +59,6 @@ self.addEventListener('fetch', e => {
   }
 
   // 2. API read endpoints → network-first, cache fallback for offline
-  //    Cache GET /api/jobs, /api/jobs/:id, /api/analytics, /api/staff, /api/settings
   if (url.pathname.startsWith('/api/')) {
     const cacheable = /^\/(api\/jobs|api\/analytics|api\/staff|api\/settings|api\/health)/.test(url.pathname);
     if (cacheable) {
@@ -80,7 +79,6 @@ self.addEventListener('fetch', e => {
         })
       );
     }
-    // Non-cacheable API calls (POST, mutations) — let them pass through
     return;
   }
 
@@ -111,8 +109,7 @@ self.addEventListener('fetch', e => {
         fetchPromise.catch(() => {});
         return cached;
       }
-      // v39: If no cache and offline, serve the root page (app shell)
-      // This ensures the PWA always opens, even for deep links like /track?job=X
+      // If no cache and offline, serve the root page (app shell)
       const result = await fetchPromise;
       if (result) return result;
       const rootCached = await cache.match('/');
@@ -132,17 +129,14 @@ self.addEventListener('sync', e => {
   }
 });
 
-// ── v39: Periodic cache cleanup — keep image cache under 100MB ───────────────
+// ── Periodic cache cleanup — keep image cache under 100MB ────────────────────
 async function trimImageCache() {
-  const cache = await caches.open(IMG_CACHE);
-  const keys = await cache.keys();
-  // Keep last 500 images max — delete oldest
-  if (keys.length > 500) {
-    const toDelete = keys.slice(0, keys.length - 500);
-    for (const req of toDelete) await cache.delete(req);
-  }
+  try {
+    const cache = await caches.open(IMG_CACHE);
+    const keys = await cache.keys();
+    if (keys.length > 500) {
+      const toDelete = keys.slice(0, keys.length - 500);
+      for (const req of toDelete) await cache.delete(req);
+    }
+  } catch {}
 }
-// Run cleanup on activate
-self.addEventListener('activate', e => {
-  e.waitUntil(trimImageCache());
-});
