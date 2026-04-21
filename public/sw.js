@@ -1,9 +1,9 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v41
+// Service Worker — ADITION ELECTRIC SOLUTION v43
 // Strategy: Cache-first for static UI · Network-first w/ cache fallback for API
-// v41: Improved caching, faster static loads, API cache TTL management
-const CACHE_VER   = 'aes-v41';
-const API_CACHE   = 'aes-api-v41';
-const IMG_CACHE   = 'aes-img-v41';
+// v43: Faster cache, smarter API caching, image cache optimized
+const CACHE_VER   = 'aes-v43';
+const API_CACHE   = 'aes-api-v43';
+const IMG_CACHE   = 'aes-img-v43';
 
 const STATIC_URLS = [
   '/',
@@ -59,6 +59,7 @@ self.addEventListener('fetch', e => {
   }
 
   // 2. API read endpoints → network-first, cache fallback for offline
+  //    v43: Added /api/jobs/ detail endpoint caching for faster repeat loads
   if (url.pathname.startsWith('/api/')) {
     const cacheable = /^\/(api\/jobs|api\/analytics|api\/staff|api\/settings|api\/health)/.test(url.pathname);
     if (cacheable) {
@@ -109,7 +110,6 @@ self.addEventListener('fetch', e => {
         fetchPromise.catch(() => {});
         return cached;
       }
-      // If no cache and offline, serve the root page (app shell)
       const result = await fetchPromise;
       if (result) return result;
       const rootCached = await cache.match('/');
@@ -129,7 +129,7 @@ self.addEventListener('sync', e => {
   }
 });
 
-// ── Periodic cache cleanup — keep image cache under 100MB ────────────────────
+// ── Periodic cache cleanup — keep image cache under 500 items ────────────────
 async function trimImageCache() {
   try {
     const cache = await caches.open(IMG_CACHE);

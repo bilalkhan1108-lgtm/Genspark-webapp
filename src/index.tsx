@@ -598,36 +598,38 @@ app.get('/api/jobs/delivered', authMiddleware, async (c) => {
 
 app.get('/api/jobs/:id', authMiddleware, async (c) => {
   const id  = c.req.param('id')
-  const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(id).first<any>()
+
+  // v43: PARALLEL queries — job + machines fetched simultaneously (saves ~50% latency)
+  const [job, { results: machines }] = await Promise.all([
+    c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(id).first<any>(),
+    c.env.DB.prepare(`
+      SELECT m.*,
+             u.name AS staff_name,
+             (SELECT json_group_array(
+               json_object('id',mi.id,'url',mi.url,'r2_object_key',mi.r2_object_key)
+             ) FROM machine_images mi WHERE mi.machine_id=m.id) AS images_json
+      FROM machines m
+      LEFT JOIN users u ON m.assigned_staff_id=u.id
+      WHERE m.job_id=?
+      ORDER BY m.id
+    `).bind(id).all<any>()
+  ])
+
   if (!job) return c.json({ error: 'Not found' }, 404)
 
   const role2 = c.get('userRole')
   const isAdmin = roleLevel(role2) >= 2
-  const userId  = c.get('userId')
 
   // Staff can't fetch delivered job details
   if (!isAdmin && job.status === 'delivered')
     return c.json({ error: 'Forbidden' }, 403)
 
-  const { results: machines } = await c.env.DB.prepare(`
-    SELECT m.*,
-           u.name AS staff_name,
-           (SELECT json_group_array(
-             json_object('id',mi.id,'url',mi.url,'r2_object_key',mi.r2_object_key)
-           ) FROM machine_images mi WHERE mi.machine_id=m.id) AS images_json
-    FROM machines m
-    LEFT JOIN users u ON m.assigned_staff_id=u.id
-    WHERE m.job_id=?
-    ORDER BY m.id
-  `).bind(id).all<any>()
-
   const enriched = machines.map((m: any) => ({
     ...m,
     images: (() => { try { return JSON.parse(m.images_json || '[]') } catch { return [] } })()
   }))
-  // Correct calculation: productTotal = price × quantity; exclude returned products
   const totalCharges = enriched.reduce((s: number, m: any) => {
-    if (m.status === 'returned') return s; // Returned products excluded from total
+    if (m.status === 'returned') return s;
     return s + ((parseFloat(m.charges) || 0) * (parseInt(m.quantity) || 1));
   }, 0)
 

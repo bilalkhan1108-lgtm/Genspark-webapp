@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v41                       ║
-// ║  v41: Turbo search overhaul (instant client+server), job card      ║
-// ║  image reliability fix, performance boost, repair-shop features    ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v43                       ║
+// ║  v43: Instant machine data (0ms), aggressive prefetch, hamburger   ║
+// ║  menu, WhatsApp icons, salon link, speed overhaul, extra features  ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -58,6 +58,7 @@ function _showOfflineBanner() {
       style.id = 'aes-offline-style';
       style.textContent = `
         @keyframes offlinePulse { 0%,100%{opacity:1} 50%{opacity:.85} }
+        @keyframes slideDown { from{max-height:0;opacity:0} to{max-height:300px;opacity:1} }
         .aes-offline-hidden { display:none !important; }
         .app-header { transition: margin-top .3s ease; }
         body.aes-offline .app-header { margin-top:33px; }
@@ -498,6 +499,8 @@ const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { mini
 const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
+// v42: Format phone number for WhatsApp (strip non-digits, add 91 prefix if needed)
+const _waNum  = p => { const d = (p || '').replace(/\D/g, ''); return d.startsWith('91') ? d : (d.length === 10 ? '91' + d : d); };
 const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5', active_only:'#2E7D32', courier_pending:'#7B1FA2' };
 const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD', active_only:'#E8F5E9', courier_pending:'#F3E5F5' };
 const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered', active_only:'Active Only', courier_pending:'Courier Pending' };
@@ -1126,7 +1129,21 @@ function dashboardHTML() {
       <button id="btn-refresh-jobs" style="display:inline-flex;align-items:center;justify-content:center;background:#f0f4ff;border:1.5px solid #1565C0;border-radius:8px;cursor:pointer;color:#1565C0;padding:5px 10px;font-size:14px;-webkit-tap-highlight-color:transparent;transition:transform .15s;min-height:30px;gap:4px" title="Refresh jobs"><i class="fas fa-sync-alt" style="font-size:12px"></i><span style="font-size:12px;font-weight:700">Refresh</span></button>
     </div>
     ${!isAdmin() ? `<div id="staff-notif-bar" style="display:none;padding:8px 12px 0"></div>` : ''}
-    ${isAdmin() ? `<div id="owner-dash" style="padding:6px 10px 2px;display:flex;gap:5px;flex-wrap:wrap"></div>` : ''}
+    ${isAdmin() ? `
+    <!-- v42: Hamburger menu replaces tiles row -->
+    <div style="padding:4px 12px 0;display:flex;align-items:center;gap:8px;flex-shrink:0">
+      <button id="btn-hamburger-menu" style="display:inline-flex;align-items:center;gap:6px;background:#f0f2f5;border:1.5px solid #e0e0e0;border-radius:10px;padding:6px 14px;font-size:13px;font-weight:700;color:#333;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:all .15s">
+        <i class="fas fa-bars" style="font-size:14px;color:#E53935"></i> Menu
+      </button>
+      <span style="font-size:14px;font-weight:800;color:#1a1a2e;letter-spacing:.5px">Job Dashboard</span>
+      <div style="flex:1"></div>
+    </div>
+    <!-- v43: Hidden tiles panel (hamburger overlay) with revenue bar -->
+    <div id="owner-dash-panel" style="display:none;padding:8px 10px;background:linear-gradient(135deg,#fafafa,#f0f2f5);border-bottom:2px solid #e0e0e0;flex-shrink:0;animation:slideDown .2s ease">
+      <div id="owner-dash" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+      <div id="owner-revenue-bar" style="display:flex;gap:6px;margin-top:6px;padding:6px 4px;background:#fff;border-radius:8px;border:1px solid #e8e8e8"></div>
+    </div>` : ''}
+    
     <div id="filter-panel" style="display:none;padding:8px 12px;background:#f8f9fb;border-bottom:1px solid #e0e0e0;flex-shrink:0">
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Filter by Status</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
@@ -1242,6 +1259,22 @@ function _applyChipCounts(d) {
         <div style="font-size:8px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
       </div>`).join('');
   }
+  // v43: Revenue mini-bar inside hamburger menu
+  const revBar = document.getElementById('owner-revenue-bar');
+  if (revBar && isAdmin() && d.todayRevenue !== undefined) {
+    const revItems = [
+      { label: 'Today', value: fmtRs(d.todayRevenue || 0), icon: '💰', color: '#2E7D32' },
+      { label: 'Month', value: fmtRs(d.monthRevenue || 0), icon: '📊', color: '#1565C0' },
+      { label: 'Pending', value: fmtRs(d.pendingDues || 0), icon: '⏳', color: '#E65100' },
+      { label: 'Total', value: fmtRs(d.totalRevenue || 0), icon: '🏦', color: '#7B1FA2' },
+    ];
+    revBar.innerHTML = revItems.map(r => `
+      <div style="flex:1;text-align:center;padding:2px 0">
+        <div style="font-size:11px">${r.icon}</div>
+        <div style="font-size:12px;font-weight:900;color:${r.color};line-height:1.2">${r.value}</div>
+        <div style="font-size:7px;color:#999;font-weight:700;text-transform:uppercase">${r.label}</div>
+      </div>`).join('');
+  }
 }
 
 // Job loading state
@@ -1342,8 +1375,8 @@ async function loadJobs(append = false) {
         }
         if (!_jobsHasMore) _allJobsFullyLoaded = true;
       }
-      // v41: Only prefetch on initial non-search loads to save bandwidth
-      if (!isSearching) _prefetchDetails(newJobs.slice(0, 15));
+      // v43: Prefetch ALL loaded jobs — ensures instant detail loading for any job tapped
+      if (!isSearching) _prefetchDetails(newJobs);
     }
     renderVList(append);
   } catch {
@@ -1374,27 +1407,49 @@ async function loadJobs(append = false) {
   if (_isOffline) setTimeout(() => _lockMutatingUI(true), 50);
 }
 
-// v36: Pre-fetch full job details in background for WhatsApp-like offline access
+// v43: Aggressive prefetch — fetches ALL job details in background for instant loading
 let _prefetchRunning = false;
+let _prefetchQueue = [];       // jobs waiting to be prefetched
+let _prefetchPriority = null;  // high-priority job ID (user tapped on this)
 async function _prefetchDetails(jobs) {
-  if (_prefetchRunning || !jobs?.length) return;
+  if (!jobs?.length) return;
+  // Merge into queue (deduplicate by id)
+  const existing = new Set(_prefetchQueue.map(j => j.id));
+  for (const j of jobs) {
+    if (j?.id && !existing.has(j.id)) { _prefetchQueue.push(j); existing.add(j.id); }
+  }
+  if (_prefetchRunning) return;
   _prefetchRunning = true;
   try {
-    for (const j of jobs) {
+    while (_prefetchQueue.length) {
+      // If a priority job was set, move it to front
+      if (_prefetchPriority) {
+        const idx = _prefetchQueue.findIndex(j => j.id === _prefetchPriority);
+        if (idx > 0) { const [pj] = _prefetchQueue.splice(idx, 1); _prefetchQueue.unshift(pj); }
+        _prefetchPriority = null;
+      }
+      const j = _prefetchQueue.shift();
       if (!j?.id) continue;
-      // Skip if we already have fresh cached detail (less than 5 min old)
-      const existing = await IDB.loadDetail(j.id);
-      if (existing && existing._cachedAt && (Date.now() - existing._cachedAt) < 300000 && !existing._listCache) continue;
-      // Fetch full detail silently — no UI impact
+      // Skip if we already have fresh cached detail (less than 3 min old)
+      const cached = await IDB.loadDetail(j.id);
+      if (cached && cached._cachedAt && (Date.now() - cached._cachedAt) < 180000 && !cached._listCache) continue;
       try {
         const resp = await API.get(`/api/jobs/${j.id}`);
         if (resp.data) IDB.saveDetail(resp.data);
-      } catch { /* Silent — offline or rate limit */ }
-      // Small delay between requests to avoid API flood
-      await new Promise(r => setTimeout(r, 200));
+      } catch { /* Silent */ }
+      // Minimal delay — 80ms keeps API happy, much faster than 200ms
+      await new Promise(r => setTimeout(r, 80));
     }
   } catch {}
   _prefetchRunning = false;
+}
+// v43: Priority prefetch — called when user taps a job row to ensure it loads first
+function _priorityPrefetch(jobId) {
+  _prefetchPriority = jobId;
+  // If prefetch not running, start a single-job fetch immediately
+  if (!_prefetchRunning) {
+    _prefetchDetails([{ id: jobId }]);
+  }
 }
 
 // ── One-time dashboard event bindings (prevents accumulation on repeated loadJobs) ──
@@ -1416,6 +1471,31 @@ function bindDashboardEvents() {
       case 'btn-clear-my':
         S.myJobsOnly = false; render();
         break;
+      case 'btn-hamburger-menu': {
+        // v43: Toggle hamburger menu panel with smooth animation
+        const panel = document.getElementById('owner-dash-panel');
+        if (panel) {
+          const isHidden = panel.style.display === 'none' || !panel.style.display;
+          panel.style.display = isHidden ? 'block' : 'none';
+          const icon = t.querySelector('i');
+          if (icon) icon.className = isHidden ? 'fas fa-times' : 'fas fa-bars';
+          // v43: Auto-close menu when any tile is clicked
+          if (isHidden && !panel._autoCloseSet) {
+            panel._autoCloseSet = true;
+            panel.addEventListener('click', ev => {
+              if (ev.target.closest('[onclick]')) {
+                setTimeout(() => {
+                  panel.style.display = 'none';
+                  const btn = document.getElementById('btn-hamburger-menu');
+                  const ic = btn?.querySelector('i');
+                  if (ic) ic.className = 'fas fa-bars';
+                }, 100);
+              }
+            });
+          }
+        }
+        break;
+      }
       case 'btn-refresh-jobs': {
         const icon = t.querySelector('i');
         if (icon) { icon.style.transform = 'rotate(360deg)'; icon.style.transition = 'transform .4s'; setTimeout(() => { icon.style.transform = ''; }, 450); }
@@ -1572,7 +1652,10 @@ function renderVList(append = false) {
     wrap._clickDel = true;
     wrap.addEventListener('click', e => {
       const row = e.target.closest('.job-row');
-      if (row?.dataset.id) navigate('detail', { jobId: row.dataset.id });
+      if (row?.dataset.id) {
+        _priorityPrefetch(row.dataset.id); // v43: start fetching detail immediately
+        navigate('detail', { jobId: row.dataset.id });
+      }
     }, { passive: true });
   }
 
@@ -2147,41 +2230,50 @@ function bindNewJob() {
 async function loadDetail() {
   if (!S.jobId) return;
 
-  // 1) INSTANT: Show cached detail from IndexedDB immediately (0ms)
-  const cached = await IDB.loadDetail(S.jobId);
+  // v43: TRIPLE-PARALLEL STRATEGY — IDB + API + Staff all start simultaneously
+  const apiPromise = API.get(`/api/jobs/${S.jobId}`).catch(() => null);
+  const staffPromise = (isAdmin() && !S.staff.length) ? API.get('/api/staff').catch(() => null) : Promise.resolve(null);
+  const idbPromise = IDB.loadDetail(S.jobId);
+  const idbStaffPromise = (isAdmin() && !S.staff.length) ? IDB.loadStaff() : Promise.resolve(null);
+
+  // 1) INSTANT: Show cached detail from IndexedDB (typically <5ms)
+  const [cached, cachedStaff] = await Promise.all([idbPromise, idbStaffPromise]);
+  if (cachedStaff) S.staff = cachedStaff;
+
   if (cached) {
     S.job = cached;
-    // Load staff from offline cache too
-    if (isAdmin() && !S.staff.length) {
-      const cachedStaff = await IDB.loadStaff();
-      if (cachedStaff) S.staff = cachedStaff;
-    }
     renderDetail();
+    // v43: If list-cache (no machines), show a subtle inline spinner in machines area
+    if (cached._listCache || !cached.machines?.length) {
+      const mc = document.getElementById('machines-container');
+      if (mc) mc.innerHTML = `<div style="padding:16px;text-align:center"><div style="display:inline-flex;align-items:center;gap:8px;background:#f8f9fa;border-radius:10px;padding:10px 20px"><i class="fas fa-spinner fa-spin" style="color:#E53935;font-size:16px"></i><span style="font-size:13px;color:#666;font-weight:600">Loading machines…</span></div></div>`;
+    }
+  } else {
+    // No cache at all — show full-page skeleton while API loads
+    const root = document.getElementById('detail-root');
+    if (root) root.innerHTML = `<div style="padding:24px;text-align:center"><i class="fas fa-spinner fa-spin fa-2x" style="color:#E53935"></i><p style="font-size:14px;color:#888;margin-top:12px">Loading job details…</p></div>`;
   }
 
-  // 2) BACKGROUND: Fetch fresh data from API and update if changed
+  // 2) Await API responses (already running in parallel since line 1)
   try {
-    const [jobResp, staffResp] = await Promise.all([
-      API.get(`/api/jobs/${S.jobId}`),
-      (isAdmin() && !S.staff.length) ? API.get('/api/staff').catch(() => null) : Promise.resolve(null)
-    ]);
+    const [jobResp, staffResp] = await Promise.all([apiPromise, staffPromise]);
+    if (!jobResp) throw new Error('No response');
     const freshJob = jobResp.data;
     if (staffResp?.data) {
       S.staff = staffResp.data;
-      IDB.saveStaff(S.staff); // Cache staff for offline
+      IDB.saveStaff(S.staff);
     }
 
-    // Only re-render if data actually changed (avoid flicker)
-    const changed = !cached || freshJob.updated_at !== cached.updated_at
-                    || freshJob.status !== cached.status
-                    || JSON.stringify(freshJob.machines) !== JSON.stringify(cached.machines);
+    // Only re-render if data actually changed
+    const needsRender = !cached || cached._listCache
+                        || freshJob.updated_at !== cached.updated_at
+                        || freshJob.status !== cached.status
+                        || (freshJob.machines?.length || 0) !== (cached.machines?.length || 0);
     S.job = freshJob;
-    IDB.saveDetail(freshJob); // Persist to offline memory
-    if (changed || !cached) renderDetail();
+    IDB.saveDetail(freshJob);
+    if (needsRender) renderDetail();
   } catch {
-    // v39: If offline with cached data, just show it (already rendered above)
     if (cached && _isOffline) {
-      // Already rendered — just lock write buttons
       setTimeout(() => _lockMutatingUI(true), 50);
     } else if (!cached) {
       const root = document.getElementById('detail-root');
@@ -2190,7 +2282,6 @@ async function loadDetail() {
         : `<div class="empty-state" style="color:#e53935"><i class="fas fa-exclamation-triangle fa-2x"></i><p>Failed to load job</p></div>`;
     }
   }
-  // v39: Lock write UI after detail render if offline
   if (_isOffline) setTimeout(() => _lockMutatingUI(true), 50);
 }
 
@@ -2234,10 +2325,14 @@ function renderDetail() {
         ${j.snap_category ? `<span style="background:#E8EAF6;color:#3949AB;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;margin-left:8px">${esc(j.snap_category)}</span>` : ''}
       </div>
       ${hasSuperRight('view_jobs') ? `
-      <div class="info-row">
+      <div class="info-row" style="flex-wrap:wrap;gap:6px">
         <i class="fas fa-phone info-icon" style="color:${color}"></i>
         <a href="tel:${j.snap_mobile}" class="info-link">${j.snap_mobile}</a>
-        ${j.snap_mobile2 ? `<a href="tel:${j.snap_mobile2}" class="info-link ml-8">${j.snap_mobile2}</a>` : ''}
+        <a href="https://wa.me/${_waNum(j.snap_mobile)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:#25D366;border-radius:50%;color:#fff;font-size:14px;text-decoration:none;flex-shrink:0;box-shadow:0 2px 6px rgba(37,211,102,.4)" title="WhatsApp ${j.snap_mobile}"><i class="fab fa-whatsapp"></i></a>
+        ${j.snap_mobile2 ? `
+        <span style="color:#ccc;font-size:11px">|</span>
+        <a href="tel:${j.snap_mobile2}" class="info-link">${j.snap_mobile2}</a>
+        <a href="https://wa.me/${_waNum(j.snap_mobile2)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;background:#25D366;border-radius:50%;color:#fff;font-size:14px;text-decoration:none;flex-shrink:0;box-shadow:0 2px 6px rgba(37,211,102,.4)" title="WhatsApp ${j.snap_mobile2}"><i class="fab fa-whatsapp"></i></a>` : ''}
       </div>` : ''}
       ${j.snap_address ? `
       <div class="info-row">
@@ -2365,9 +2460,6 @@ function renderDetail() {
       <button id="btn-del-job" class="action-btn" style="background:#E53935">
         <i class="fas fa-trash"></i><span>Delete</span>
       </button>` : ''}
-      <button id="btn-job-history" class="action-btn" style="background:#7B1FA2">
-        <i class="fas fa-history"></i><span>History</span>
-      </button>
     </div>
 
     <!-- Machines List -->
@@ -2793,8 +2885,7 @@ function bindDetail(j) {
   // WhatsApp share (admin only)
   document.getElementById('btn-share')?.addEventListener('click', () => generateAndShareJobCard(j, true));
 
-  // Job History (all roles)
-  document.getElementById('btn-job-history')?.addEventListener('click', () => showJobHistory(j));
+  // v43: Job History button removed from UI — function still available via showJobHistory(j) for modals
 
   // Print Address Label (admin only)
   document.getElementById('btn-print-addr')?.addEventListener('click', () => printAddressLabel(j));
@@ -2989,6 +3080,11 @@ function bindDetail(j) {
     const balance = Math.max(0, (j.total_charges||0) - (j.discount||0) - (j.received_amount||0));
     const products = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
     const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(waPhone.replace(/^91/, ''))}`;
+    // v42: Salon/Consumer customers get product shop link in reminders too
+    const _rCat = (j.snap_category || '').toLowerCase();
+    const _rShopLine = (_rCat === 'salon' || _rCat === 'consumer')
+      ? `\n🛒 *Shop Salon Products:* https://salonessentials.pages.dev/\n   Hair Dryers, Straighteners, Clippers, Trimmers & Accessories\n`
+      : '';
     const reminderMsg = `⚡ *ADITION ELECTRIC*
 
 Dear ${j.snap_name || 'Valued Customer'},
@@ -3003,7 +3099,7 @@ ${balance > 0 ? `\n*Due: ₹${balance}*\nPlease pay to proceed.\n` : ''}
 Collect within *25 days* to avoid liability.
 
 📞 7801990001
-📢 Join Updates: https://chat.whatsapp.com/ILjfPXXuyiBKuL2VdpMhg4
+📢 Join Updates: https://chat.whatsapp.com/ILjfPXXuyiBKuL2VdpMhg4${_rShopLine}
 — *ADITION ELECTRIC* ✨`;
     const text    = encodeURIComponent(reminderMsg);
     const url     = waPhone ? `https://wa.me/${waPhone}?text=${text}` : `https://wa.me/?text=${text}`;
@@ -4354,15 +4450,17 @@ function shareText(j, multiPage) {
   const total       = j.total_charges || 0;
   const received    = j.received_amount || 0;
   const phone       = (j.snap_mobile || '').replace(/\D/g, '');
-  // v37: Sum quantities — a machine with qty x2 counts as 2 products
   const prodCount   = (j.machines||[]).reduce((s, m) => s + (parseInt(m.quantity) || 1), 0);
-
-  // Tracking link
   const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(phone)}`;
-
   const communityLink = 'https://chat.whatsapp.com/ILjfPXXuyiBKuL2VdpMhg4';
 
-  // Compact format: ADITION header, job #, product count, amount
+  // v42: Salon/Consumer customers get a product shop link
+  const cat = (j.snap_category || '').toLowerCase();
+  const isSalonOrConsumer = cat === 'salon' || cat === 'consumer';
+  const shopLine = isSalonOrConsumer
+    ? `\n🛒 *Shop Salon Products:* https://salonessentials.pages.dev/\n   Hair Dryers, Straighteners, Clippers, Trimmers & Accessories`
+    : '';
+
   if (isRepaired && balance > 0) {
     return `⚡ *ADITION™ ELECTRIC*
 Job *#${j.id}* | 📦 ${prodCount} Products | 💰 *₹${total.toLocaleString('en-IN')}*
@@ -4374,7 +4472,7 @@ Dear *${custName}*, your items are *ready!* 🎉
 📞 7801990001
 
 🔗 Track: ${trackLink}
-📢 Join Updates: ${communityLink}`;
+📢 Join Updates: ${communityLink}${shopLine}`;
   }
 
   if (isDelivered) {
@@ -4384,7 +4482,7 @@ Job *#${j.id}* | 📦 ${prodCount} Products | ✅ *Delivered*
 Dear *${custName}*, your job is complete! 🙏
 ${balance > 0 ? `⚠️ Due: ₹${balance.toLocaleString('en-IN')}\n` : ''}
 🔗 Track: ${trackLink}
-📢 Join Updates: ${communityLink}`;
+📢 Join Updates: ${communityLink}${shopLine}`;
   }
 
   // Default: job creation / approval
@@ -4399,7 +4497,7 @@ ${received > 0 ? `Advance: ₹${received.toLocaleString('en-IN')} | ` : ''}${bal
 📞 7801990001
 
 🔗 Track: ${trackLink}
-📢 Join Updates: ${communityLink}`;
+📢 Join Updates: ${communityLink}${shopLine}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
