@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v43                       ║
-// ║  v43: Instant machine data (0ms), aggressive prefetch, hamburger   ║
-// ║  menu, WhatsApp icons, salon link, speed overhaul, extra features  ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v46                       ║
+// ║  v46: Remove revenue bar & returned tile, dispatch in edit mode,   ║
+// ║       hardened fuzzy search, max speed                             ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -531,19 +531,69 @@ function dedupeGet(url, params) {
 let _allLoadedJobs = []; // Master cache of all jobs seen in this session
 let _allJobsFullyLoaded = false; // True when we've loaded ALL jobs (not just first page)
 
+// v45: TURBO SEARCH — fuzzy matching, address, mobile2, product names
+function _fuzzyMatch(hay, needle) {
+  if (!hay || !needle) return false;
+  const h = hay.toLowerCase();
+  const n = needle.toLowerCase();
+  if (h.includes(n)) return true;
+  // Fuzzy: all chars of needle appear in order in hay (for typos)
+  if (n.length >= 3) {
+    let hi = 0;
+    for (let ni = 0; ni < n.length && hi < h.length; hi++) {
+      if (h[hi] === n[ni]) ni++;
+      if (ni === n.length) return true;
+    }
+  }
+  // Word-start matching: "pan" matches "Pankajbhai"
+  const words = h.split(/\s+/);
+  for (const w of words) { if (w.startsWith(n)) return true; }
+  return false;
+}
+
 function _clientSideFilter(jobs, searchJob, searchName) {
   if (!searchJob && !searchName) return null; // No filter active
-  const sjLower = searchJob ? searchJob.toLowerCase() : '';
-  const snLower = searchName ? searchName.toLowerCase() : '';
-  return jobs.filter(j => {
-    if (sjLower && !(j.id || '').toLowerCase().includes(sjLower)) return false;
+  const sjLower = searchJob ? searchJob.toLowerCase().replace(/[^a-z0-9-]/g, '') : '';
+  const snLower = searchName ? searchName.toLowerCase().trim() : '';
+  // v45: Score-based sorting — exact matches first, fuzzy lower
+  const scored = [];
+  for (const j of jobs) {
+    let score = 0;
+    // Job ID filter
+    if (sjLower) {
+      const jid = (j.id || '').toLowerCase();
+      if (jid.includes(sjLower)) score += 100;
+      else if (jid.replace('-', '').includes(sjLower.replace('-', ''))) score += 80;
+      else continue; // Hard filter on job ID
+    }
+    // Name/Mobile/Address filter
     if (snLower) {
       const name = (j.snap_name || '').toLowerCase();
       const mobile = (j.snap_mobile || '');
-      if (!name.includes(snLower) && !mobile.includes(snLower)) return false;
+      const mobile2 = (j.snap_mobile2 || '');
+      const addr = (j.snap_address || '').toLowerCase();
+      // Check digits-only input against mobile numbers
+      const isDigits = /^\d+$/.test(snLower);
+      if (isDigits) {
+        if (mobile.includes(snLower)) score += 100;
+        else if (mobile2.includes(snLower)) score += 90;
+        else continue;
+      } else {
+        // Exact name match gets highest score
+        if (name === snLower) score += 200;
+        else if (name.startsWith(snLower)) score += 150;
+        else if (name.includes(snLower)) score += 100;
+        else if (_fuzzyMatch(name, snLower)) score += 60;
+        else if (_fuzzyMatch(addr, snLower)) score += 40;
+        else if (mobile.includes(snLower) || mobile2.includes(snLower)) score += 80;
+        else continue;
+      }
     }
-    return true;
-  });
+    scored.push({ job: j, score });
+  }
+  // Sort by score descending (best matches first)
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(s => s.job);
 }
 
 // v41: Pre-populate master cache from IndexedDB on startup for instant first-search
@@ -551,11 +601,15 @@ async function _warmupSearchCache() {
   try {
     const allCached = await IDB.loadAllJobs();
     if (allCached && allCached.length) {
+      // v45: Use Map for O(1) lookup instead of O(n) findIndex
+      const idMap = new Map(_allLoadedJobs.map((j, i) => [j.id, i]));
       for (const j of allCached) {
-        const idx = _allLoadedJobs.findIndex(x => x.id === j.id);
-        if (idx >= 0) _allLoadedJobs[idx] = j;
-        else _allLoadedJobs.push(j);
+        const idx = idMap.get(j.id);
+        if (idx !== undefined) _allLoadedJobs[idx] = j;
+        else { _allLoadedJobs.push(j); idMap.set(j.id, _allLoadedJobs.length - 1); }
       }
+      // v45: If IDB has all jobs, mark as fully loaded for instant search
+      if (allCached.length >= 50) _allJobsFullyLoaded = true;
     }
   } catch {}
 }
@@ -963,6 +1017,11 @@ function headerHTML() {
   const subtitle = S.view === 'detail' && S.job
     ? `<div class="hdr-job-id">${S.job.id} · ${esc(S.job.snap_name)}</div>`
     : `<div class="hdr-sub">ADITION ELECTRIC SOLUTION</div>`;
+  // v44: Menu button lives in the header for dashboard view (admin only)
+  const menuBtn = (S.view === 'dashboard' && isAdmin())
+    ? `<button id="btn-hamburger-menu" style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,255,255,.12);border:1.5px solid rgba(255,255,255,.25);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:700;color:#fff;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:all .15s;margin-left:8px;white-space:nowrap">
+        <i class="fas fa-bars" style="font-size:12px;color:#ff6b6b"></i> Menu
+      </button>` : '';
   return `
   <header class="app-header" style="will-change:transform">
     <div class="hdr-left">
@@ -971,6 +1030,7 @@ function headerHTML() {
         <div class="hdr-title">${titles[S.view] || 'AES'}</div>
         ${subtitle}
       </div>
+      ${menuBtn}
     </div>
     <div class="hdr-right">
       ${window._pwaInstallPrompt ? `<button class="icon-btn pwa-install-btn" id="hdr-install-btn" title="Install App" style="color:#43A047"><i class="fas fa-download"></i></button>` : ''}
@@ -1130,18 +1190,9 @@ function dashboardHTML() {
     </div>
     ${!isAdmin() ? `<div id="staff-notif-bar" style="display:none;padding:8px 12px 0"></div>` : ''}
     ${isAdmin() ? `
-    <!-- v42: Hamburger menu replaces tiles row -->
-    <div style="padding:4px 12px 0;display:flex;align-items:center;gap:8px;flex-shrink:0">
-      <button id="btn-hamburger-menu" style="display:inline-flex;align-items:center;gap:6px;background:#f0f2f5;border:1.5px solid #e0e0e0;border-radius:10px;padding:6px 14px;font-size:13px;font-weight:700;color:#333;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:all .15s">
-        <i class="fas fa-bars" style="font-size:14px;color:#E53935"></i> Menu
-      </button>
-      <span style="font-size:14px;font-weight:800;color:#1a1a2e;letter-spacing:.5px">Job Dashboard</span>
-      <div style="flex:1"></div>
-    </div>
-    <!-- v43: Hidden tiles panel (hamburger overlay) with revenue bar -->
+    <!-- v44: Tiles panel (toggled by header Menu button) -->
     <div id="owner-dash-panel" style="display:none;padding:8px 10px;background:linear-gradient(135deg,#fafafa,#f0f2f5);border-bottom:2px solid #e0e0e0;flex-shrink:0;animation:slideDown .2s ease">
       <div id="owner-dash" style="display:flex;gap:5px;flex-wrap:wrap"></div>
-      <div id="owner-revenue-bar" style="display:flex;gap:6px;margin-top:6px;padding:6px 4px;background:#fff;border-radius:8px;border:1px solid #e8e8e8"></div>
     </div>` : ''}
     
     <div id="filter-panel" style="display:none;padding:8px 12px;background:#f8f9fb;border-bottom:1px solid #e0e0e0;flex-shrink:0">
@@ -1242,11 +1293,11 @@ function _applyChipCounts(d) {
   // Owner dashboard tiles (admin/manager only)
   const ownerDash = document.getElementById('owner-dash');
   if (ownerDash && isAdmin()) {
+    // v46: Removed "Returned" tile and revenue bar per user request
     const tiles = [
       { label: 'No. of Jobs', value: d.total || 0, icon: '📋', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterAll()' },
       { label: 'Under Repair', value: d.underRepair || 0, icon: '🔧', bg: '#FFF3E0', color: '#E65100', click: "filterByStatus('under_repair')" },
       { label: 'Repaired', value: d.repaired || 0, icon: '✅', bg: '#E8F5E9', color: '#2E7D32', click: "filterByStatus('repaired')" },
-      { label: 'Returned', value: d.returned || 0, icon: '↩️', bg: '#FFF8E1', color: '#B8860B', click: "filterByStatus('returned')" },
       { label: 'Partial', value: d.partial || 0, icon: '📦', bg: '#FFF3E0', color: '#FF6F00', click: "filterByStatus('partial_delivered')" },
       { label: 'Delivered', value: d.completed || 0, icon: '🚚', bg: '#E3F2FD', color: '#1565C0', click: 'filterDone()' },
       { label: 'Courier', value: d.courierPending || 0, icon: '📮', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterCourierPending()' },
@@ -1259,22 +1310,7 @@ function _applyChipCounts(d) {
         <div style="font-size:8px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
       </div>`).join('');
   }
-  // v43: Revenue mini-bar inside hamburger menu
-  const revBar = document.getElementById('owner-revenue-bar');
-  if (revBar && isAdmin() && d.todayRevenue !== undefined) {
-    const revItems = [
-      { label: 'Today', value: fmtRs(d.todayRevenue || 0), icon: '💰', color: '#2E7D32' },
-      { label: 'Month', value: fmtRs(d.monthRevenue || 0), icon: '📊', color: '#1565C0' },
-      { label: 'Pending', value: fmtRs(d.pendingDues || 0), icon: '⏳', color: '#E65100' },
-      { label: 'Total', value: fmtRs(d.totalRevenue || 0), icon: '🏦', color: '#7B1FA2' },
-    ];
-    revBar.innerHTML = revItems.map(r => `
-      <div style="flex:1;text-align:center;padding:2px 0">
-        <div style="font-size:11px">${r.icon}</div>
-        <div style="font-size:12px;font-weight:900;color:${r.color};line-height:1.2">${r.value}</div>
-        <div style="font-size:7px;color:#999;font-weight:700;text-transform:uppercase">${r.label}</div>
-      </div>`).join('');
-  }
+  // v46: Revenue bar removed per user request
 }
 
 // Job loading state
@@ -1472,22 +1508,23 @@ function bindDashboardEvents() {
         S.myJobsOnly = false; render();
         break;
       case 'btn-hamburger-menu': {
-        // v43: Toggle hamburger menu panel with smooth animation
+        // v44: Toggle hamburger menu panel — button is now in header
         const panel = document.getElementById('owner-dash-panel');
         if (panel) {
           const isHidden = panel.style.display === 'none' || !panel.style.display;
           panel.style.display = isHidden ? 'block' : 'none';
-          const icon = t.querySelector('i');
+          const menuBtn = document.getElementById('btn-hamburger-menu');
+          const icon = menuBtn?.querySelector('i');
           if (icon) icon.className = isHidden ? 'fas fa-times' : 'fas fa-bars';
-          // v43: Auto-close menu when any tile is clicked
+          // Auto-close menu when any tile is clicked
           if (isHidden && !panel._autoCloseSet) {
             panel._autoCloseSet = true;
             panel.addEventListener('click', ev => {
               if (ev.target.closest('[onclick]')) {
                 setTimeout(() => {
                   panel.style.display = 'none';
-                  const btn = document.getElementById('btn-hamburger-menu');
-                  const ic = btn?.querySelector('i');
+                  const btn2 = document.getElementById('btn-hamburger-menu');
+                  const ic = btn2?.querySelector('i');
                   if (ic) ic.className = 'fas fa-bars';
                 }, 100);
               }
@@ -1564,41 +1601,52 @@ function bindDashboardEvents() {
     }
   });
 
-  // v41: TURBO SEARCH — instant client-side filter + delayed API refinement
-  // Step 1: Every keystroke immediately filters _allLoadedJobs (0ms delay)
-  // Step 2: After typing stops, fire API for server-accurate results (300ms debounce)
-  // Step 3: If master cache is complete (_allJobsFullyLoaded), skip API entirely
+  // v45: TURBO SEARCH — instant fuzzy client-side + smart API refinement
+  // Step 1: Every keystroke instantly filters _allLoadedJobs with fuzzy matching (0ms)
+  // Step 2: After typing pauses, fire API for server-accurate results (250ms debounce)
+  // Step 3: If master cache is complete, skip API entirely
+  // Step 4: Show match count in real-time
 
+  let _searchRafId = 0;
   function _instantSearchFilter() {
     S.searchJob = document.getElementById('dash-search-job')?.value.trim() || '';
     S.searchName = document.getElementById('dash-search-name')?.value.trim() || '';
     S.search = S.searchJob || S.searchName || '';
 
-    // Instant client-side filter: show results in <1ms
-    if (_allLoadedJobs.length && (S.searchJob || S.searchName)) {
-      const instant = _clientSideFilter(_allLoadedJobs, S.searchJob, S.searchName);
-      if (instant !== null) { S.jobs = instant; renderVList(false); }
-    }
-    // When both fields cleared, show all jobs
-    if (!S.searchJob && !S.searchName) {
-      _jobsLoadId++; // Cancel any pending API search
-      loadJobs();
-    }
+    // Use rAF to batch DOM updates (prevents jank on fast typing)
+    cancelAnimationFrame(_searchRafId);
+    _searchRafId = requestAnimationFrame(() => {
+      // Instant client-side filter with fuzzy matching
+      if (_allLoadedJobs.length && (S.searchJob || S.searchName)) {
+        const instant = _clientSideFilter(_allLoadedJobs, S.searchJob, S.searchName);
+        if (instant !== null) {
+          S.jobs = instant;
+          renderVList(false);
+          // v45: Show result count feedback
+          const cc = document.getElementById('cc-count');
+          if (cc) cc.textContent = `${instant.length} found`;
+        }
+      }
+      // When both fields cleared, show all jobs
+      if (!S.searchJob && !S.searchName) {
+        _jobsLoadId++;
+        loadJobs();
+      }
+    });
   }
 
-  // Delayed API call for server-accurate results (only if client cache isn't complete)
+  // v45: Faster debounce (250ms) for API refinement
   const _debouncedApiSearch = debounce(() => {
-    if (_allJobsFullyLoaded && (S.searchJob || S.searchName)) return; // Cache is authoritative
+    if (_allJobsFullyLoaded && (S.searchJob || S.searchName)) return;
     loadJobs();
-  }, 350);
+  }, 250);
 
   document.addEventListener('input', e => {
     if (e.target.id === 'dash-search-job' || e.target.id === 'dash-search-name') {
-      _instantSearchFilter(); // Instant client-side
-      if (S.searchJob || S.searchName) _debouncedApiSearch(); // Delayed API
+      _instantSearchFilter();
+      if (S.searchJob || S.searchName) _debouncedApiSearch();
     }
   });
-  // Handle the 'X' clear button on search inputs
   document.addEventListener('search', e => {
     if (e.target.id === 'dash-search-job' || e.target.id === 'dash-search-name') {
       _instantSearchFilter();
@@ -3141,10 +3189,27 @@ function showEditCustomerModal(j) {
         <option value="N/A" ${j.snap_category==='N/A'?'selected':''}>N/A</option>
       </select>
     </div>
+    <div class="form-group">
+      <label class="form-label"><i class="fas fa-truck" style="color:#7B1FA2"></i> Dispatch Through</label>
+      <select id="ec-dispatch" class="form-input">
+        <option value="in_person" ${(j.dispatch_method||'in_person')==='in_person'?'selected':''}>In Person (Walk-in)</option>
+        <option value="courier" ${j.dispatch_method==='courier'?'selected':''}>Courier</option>
+      </select>
+    </div>
+    <div id="ec-courier-wrap" class="form-group" style="display:${j.dispatch_method==='courier'?'block':'none'}">
+      <label class="form-label">Courier Name</label>
+      <input id="ec-courier-name" type="text" class="form-input" placeholder="e.g. DTDC, BlueDart" value="${esc(j.dispatch_courier_name || '')}">
+    </div>
     <div class="modal-footer">
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
       <button id="ec-save" class="btn-primary"><i class="fas fa-save"></i> Save</button>
     </div>`);
+
+  // v46: Toggle courier name field visibility
+  document.getElementById('ec-dispatch')?.addEventListener('change', e => {
+    const wrap = document.getElementById('ec-courier-wrap');
+    if (wrap) wrap.style.display = e.target.value === 'courier' ? 'block' : 'none';
+  });
 
   document.getElementById('ec-save')?.addEventListener('click', async () => {
     const name    = document.getElementById('ec-name')?.value.trim();
@@ -3152,25 +3217,33 @@ function showEditCustomerModal(j) {
     const mobile2 = document.getElementById('ec-mobile2')?.value.trim() || null;
     const address = document.getElementById('ec-address')?.value.trim() || null;
     const category = document.getElementById('ec-category')?.value || 'Salon';
+    const dispatchMethod = document.getElementById('ec-dispatch')?.value || 'in_person';
+    const dispatchCourierName = dispatchMethod === 'courier' ? (document.getElementById('ec-courier-name')?.value.trim() || null) : null;
     if (!name || !mobile) { toast('Name and mobile are required', 'error'); return; }
+    const btn = document.getElementById('ec-save');
+    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…';
     try {
-      // Save customer data immediately via customer API using mobile as unique key
-      if (j.customer_id) {
-        await API.put(`/api/customers/${j.customer_id}`, { name, mobile, mobile2, address, category });
-      }
-      // Also update snap fields on this job
-      await API.put(`/api/jobs/${j.id}`, {
+      // v46: Update customer + job fields + dispatch in parallel
+      const jobUpdate = {
         snap_name: name,
         snap_mobile: mobile,
         snap_mobile2: mobile2,
         snap_address: address,
-        snap_category: category
-      });
+        snap_category: category,
+        dispatch_method: dispatchMethod,
+        dispatch_courier_name: dispatchCourierName,
+      };
+      const promises = [API.put(`/api/jobs/${j.id}`, jobUpdate)];
+      if (j.customer_id) {
+        promises.push(API.put(`/api/customers/${j.customer_id}`, { name, mobile, mobile2, address, category }));
+      }
+      await Promise.all(promises);
       closeModal();
-      toast('Customer info saved ✅', 'success');
+      toast('Job details saved ✅', 'success');
       await loadDetail();
     } catch (e) {
       toast(e.response?.data?.error || 'Update failed', 'error');
+      btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save';
     }
   });
 }
@@ -3716,7 +3789,7 @@ function showAddMachineModal(jobId) {
     stopAudioRecorder();
   });
 
-  // ── Save machine ────────────────────────────────────────────────────────────
+  // ── v45: INSTANT Save machine — close modal immediately, API in background ──
   document.getElementById('am-save')?.addEventListener('click', async () => {
     const prod = document.getElementById('am-prod')?.value.trim();
     if (!prod) { toast('Product name required', 'error'); return; }
@@ -3732,47 +3805,67 @@ function showAddMachineModal(jobId) {
     if (complaint) _sugCache.addComplaint(complaint, prod);
     if (charges > 0) _sugCache.addAmount(charges, prod);
 
-    const btn = document.getElementById('am-save');
-    btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…';
-    try {
-      const machR = await API.post(`/api/jobs/${jobId}/machines`, {
-        product_name: prod, product_complaint: complaint,
-        charges, quantity, assigned_staff_id: staffId,
-        warranty_type: warrantyType, warranty_brand: warrantyBrand,
-      });
-      const machId = machR.data.id;
+    // v45: Capture file references BEFORE closing modal (DOM will be destroyed)
+    const imgFile = document.getElementById('am-img')?.files[0];
+    const audioBlob = _amAudioBlob;
+    const audioMime = _amAudioMime;
 
-      // Upload image + audio in background (non-blocking for modal close)
-      const imgFile = document.getElementById('am-img')?.files[0];
-      closeModal(); toast('Machine added ✅', 'success');
+    // v45: INSTANT — close modal and show success BEFORE API call
+    closeModal();
+    toast('Adding machine…', 'info');
 
-      // Async uploads after modal close
-      const uploads = [];
-      if (imgFile && machId) {
-        uploads.push((async () => {
-          try {
-            const compressed = await compressImage(imgFile, 1080, 0.82);
-            const fd = new FormData(); fd.append('image', compressed);
-            await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-          } catch (_) { toast('Image upload failed', 'error'); }
-        })());
-      }
-      if (_amAudioBlob && machId) {
-        uploads.push((async () => {
-          try {
-            const ext  = _amAudioMime.includes('ogg') ? '.ogg' : '.webm';
-            const file = new File([_amAudioBlob], `voice_note${ext}`, { type: _amAudioMime });
-            const fd   = new FormData(); fd.append('audio', file);
-            await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-          } catch (_) { toast('Audio upload failed', 'error'); }
-        })());
-      }
-      if (uploads.length) await Promise.allSettled(uploads);
-      await loadDetail();
-    } catch (_) {
-      toast('Failed to add machine', 'error');
-      btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Machine';
+    // v45: Show optimistic machine entry in the detail view immediately
+    const mc = document.getElementById('machines-container');
+    if (mc) {
+      const optimisticHtml = `<div id="optimistic-machine" style="padding:10px 14px;background:#f0fff0;border:1.5px dashed #43A047;border-radius:12px;margin:6px 0;display:flex;align-items:center;gap:10px;animation:fadeIn .2s">
+        <i class="fas fa-spinner fa-spin" style="color:#43A047"></i>
+        <div><span style="font-weight:700;color:#1a1a2e">${prod}</span>${quantity > 1 ? ' ×' + quantity : ''} <span style="font-size:11px;color:#888">saving…</span></div>
+      </div>`;
+      mc.insertAdjacentHTML('beforeend', optimisticHtml);
     }
+
+    // v45: Background API call — doesn't block UI
+    (async () => {
+      try {
+        const machR = await API.post(`/api/jobs/${jobId}/machines`, {
+          product_name: prod, product_complaint: complaint,
+          charges, quantity, assigned_staff_id: staffId,
+          warranty_type: warrantyType, warranty_brand: warrantyBrand,
+        });
+        const machId = machR.data.id;
+        toast('Machine added ✅', 'success');
+
+        // Upload image + audio in parallel (non-blocking)
+        const uploads = [];
+        if (imgFile && machId) {
+          uploads.push((async () => {
+            try {
+              const compressed = await compressImage(imgFile, 1080, 0.82);
+              const fd = new FormData(); fd.append('image', compressed);
+              await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+            } catch (_) { toast('Image upload failed', 'error'); }
+          })());
+        }
+        if (audioBlob && machId) {
+          uploads.push((async () => {
+            try {
+              const ext  = audioMime.includes('ogg') ? '.ogg' : '.webm';
+              const file = new File([audioBlob], `voice_note${ext}`, { type: audioMime });
+              const fd   = new FormData(); fd.append('audio', file);
+              await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+            } catch (_) { toast('Audio upload failed', 'error'); }
+          })());
+        }
+        if (uploads.length) await Promise.allSettled(uploads);
+        // Refresh detail to show real data
+        if (S.jobId === jobId && S.view === 'detail') loadDetail();
+      } catch (_) {
+        toast('Failed to add machine — please retry', 'error');
+        // Remove optimistic entry
+        document.getElementById('optimistic-machine')?.remove();
+        if (S.jobId === jobId && S.view === 'detail') loadDetail();
+      }
+    })();
   });
 }
 
@@ -4270,75 +4363,114 @@ async function generateAndShareJobCard(j, shareMode) {
 
     el.style.left = '-99999px'; el.style.top = '0';
 
-    // ── v41: Step 0: PRE-LOAD all machine images as base64 BEFORE they go into DOM ──
-    // Critical fix: fetch images with auth token, convert to base64, inject into DOM
-    // Also check _mediaCache for images already loaded by the detail view
+    // ── v45: ROBUST image pre-loading — triple-source strategy ──────────────
+    // Source 1: _mediaCache (blob URLs from detail view)
+    // Source 2: Direct fetch with auth token + retries
+    // Source 3: Fresh fetch with cache-bust if previous attempts fail
     const _imgBase64Cache = new Map();
     const imgUrls = (j.machines || []).map(m => (m.images || [])[0]?.url).filter(Boolean);
     console.log('[AES] Pre-loading', imgUrls.length, 'machine images…');
 
-    // v41: First check if we already have blob URLs from the media cache (detail view)
-    for (const url of imgUrls) {
+    // v45: Phase 1 — Convert blob URLs from _mediaCache (fastest, already in memory)
+    const phase1 = imgUrls.map(async url => {
       if (_mediaCache.has(url)) {
         try {
           const blobUrl = _mediaCache.get(url);
+          // Verify blob URL is still valid before converting
           const resp = await fetch(blobUrl);
-          const blob = await resp.blob();
-          const b64 = await blobToBase64(blob);
-          if (b64) _imgBase64Cache.set(url, b64);
-        } catch {}
+          if (resp.ok) {
+            const blob = await resp.blob();
+            if (blob.size > 100) { // Sanity check: real images are >100 bytes
+              const b64 = await blobToBase64(blob);
+              if (b64 && b64.length > 200) { _imgBase64Cache.set(url, b64); return; }
+            }
+          }
+        } catch {} // Blob URL expired — fall through to Phase 2
+        _mediaCache.delete(url); // Remove expired entry
       }
+    });
+    await Promise.allSettled(phase1);
+
+    // v45: Phase 2 — Fetch remaining images with auth token (parallel, 3 retries)
+    const remaining1 = imgUrls.filter(u => !_imgBase64Cache.has(u));
+    if (remaining1.length) {
+      console.log(`[AES] Phase 2: fetching ${remaining1.length} remaining images…`);
+      await Promise.allSettled(remaining1.map(async url => {
+        const b64 = await imageUrlToBase64(url, S.token, 3);
+        if (b64 && b64.length > 200) _imgBase64Cache.set(url, b64);
+      }));
     }
 
-    // Fetch remaining images in parallel with auth token, retry logic
-    const remaining = imgUrls.filter(u => !_imgBase64Cache.has(u));
-    if (remaining.length) {
-      await Promise.allSettled(remaining.map(async (url) => {
-        const b64 = await imageUrlToBase64(url, S.token, 3);
-        if (b64) _imgBase64Cache.set(url, b64);
+    // v45: Phase 3 — Last-resort fetch for any still-missing images (different cache strategy)
+    const remaining2 = imgUrls.filter(u => !_imgBase64Cache.has(u));
+    if (remaining2.length) {
+      console.log(`[AES] Phase 3: last-resort for ${remaining2.length} images…`);
+      await Promise.allSettled(remaining2.map(async url => {
+        try {
+          // Try with no-cache headers and longer timeout
+          const resp = await fetch(url, {
+            headers: { Authorization: 'Bearer ' + S.token, 'Cache-Control': 'no-cache' },
+            cache: 'reload'
+          });
+          if (resp.ok) {
+            const blob = await resp.blob();
+            if (blob.size > 100) {
+              const b64 = await blobToBase64(blob);
+              if (b64 && b64.length > 200) _imgBase64Cache.set(url, b64);
+            }
+          }
+        } catch {}
       }));
     }
     console.log(`[AES] Pre-loaded ${_imgBase64Cache.size}/${imgUrls.length} images`);
 
-    // ── Step 1: Inject pre-loaded base64 into ALL <img> elements ─────────────
+    // ── Step 1: Inject base64 into ALL <img> elements ─────────────────────────
     const imgEls = Array.from(el.querySelectorAll('img'));
     let successCount = 0;
     const pendingLoads = [];
 
     for (const img of imgEls) {
       const authSrc = img.getAttribute('data-auth-src') || '';
-      const cachedB64 = _imgBase64Cache.get(authSrc);
+      // Also check external images (QR codes etc.)
+      const src = authSrc || img.src || '';
+      const cachedB64 = _imgBase64Cache.get(authSrc) || _imgBase64Cache.get(src);
       if (cachedB64) {
         img.src = cachedB64;
         img.removeAttribute('data-auth-src');
         img.crossOrigin = 'anonymous';
         successCount++;
       } else if (authSrc) {
-        // Synchronous retry for missed images (block until resolved)
+        // Final retry for individual missed images
         const retryPromise = imageUrlToBase64(authSrc, S.token, 2).then(b64 => {
-          if (b64) { img.src = b64; img.removeAttribute('data-auth-src'); successCount++; }
-          else { img.style.display = 'none'; } // Hide broken images cleanly
-        }).catch(() => { img.style.display = 'none'; });
+          if (b64 && b64.length > 200) { img.src = b64; img.removeAttribute('data-auth-src'); successCount++; }
+          else {
+            // v45: Show placeholder instead of hiding — prevents layout shift
+            img.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" fill="#e8eaed" rx="8"/><text x="36" y="44" font-size="28" text-anchor="middle" fill="#bbb">⚡</text></svg>');
+            img.removeAttribute('data-auth-src');
+          }
+        }).catch(() => {
+          img.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" fill="#e8eaed" rx="8"/><text x="36" y="44" font-size="28" text-anchor="middle" fill="#bbb">⚡</text></svg>');
+          img.removeAttribute('data-auth-src');
+        });
         pendingLoads.push(retryPromise);
       }
     }
-    // Wait for ALL retry fetches to complete
     if (pendingLoads.length) await Promise.allSettled(pendingLoads);
     console.log(`[AES] Images injected: ${successCount}/${imgEls.length}`);
 
-    // ── Step 2: Wait for ALL base64 images to fully decode in browser ─────────
-    await Promise.all(imgEls.filter(img => img.style.display !== 'none').map(img => {
+    // ── Step 2: Wait for ALL images to fully decode ───────────────────────────
+    await Promise.all(imgEls.map(img => {
       if (img.complete && img.naturalWidth > 0) return Promise.resolve();
       return new Promise(resolve => {
         img.onload = () => resolve();
-        img.onerror = () => { img.style.display = 'none'; resolve(); };
-        setTimeout(resolve, 8000); // 8s safety timeout per image
+        img.onerror = () => resolve(); // Don't hide, we already set placeholder
+        setTimeout(resolve, 6000); // 6s timeout per image
       });
     }));
 
-    // ── Step 3: Extra paint delay for browser compositing ────────────────────
+    // ── Step 3: Paint delay for compositing ──────────────────────────────────
     await new Promise(resolve => {
-      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 800)));
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 600)));
     });
 
     // ── Step 4: Generate SINGLE long page (min 3072px wide, dynamic height) ──

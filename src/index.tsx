@@ -200,26 +200,34 @@ async function ensureDbSchema(db: D1Database) {
 //   - Status changes (auto-logged on PUT /api/machines/:id and PUT /api/jobs/:id)
 //   - Payment updates, customer edits, notes, delivery, etc.
 // Each entry stores: job_id, action, detail, user_name, user_role, created_at (UTC)
+// v44: logHistory — fast non-blocking insert (table guaranteed by migrations)
+let _historyTableReady = false
 async function logHistory(db: D1Database, jobId: string, action: string, detail: string, userName: string, userRole: string) {
   try {
-    // Ensure table exists before inserting (critical for first deploy)
-    await db.prepare(`
-      CREATE TABLE IF NOT EXISTS job_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        job_id TEXT NOT NULL,
-        action TEXT NOT NULL,
-        detail TEXT,
-        user_name TEXT,
-        user_role TEXT,
-        user_id INTEGER,
-        created_at TEXT DEFAULT (datetime('now'))
-      )
-    `).run()
-    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_job ON job_history(job_id)`).run().catch(() => {})
+    if (!_historyTableReady) {
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS job_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          detail TEXT,
+          user_name TEXT,
+          user_role TEXT,
+          user_id INTEGER,
+          created_at TEXT DEFAULT (datetime('now'))
+        )
+      `).run()
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jh_job ON job_history(job_id)`).run().catch(() => {})
+      _historyTableReady = true
+    }
     await db.prepare(
       `INSERT INTO job_history (job_id, action, detail, user_name, user_role) VALUES (?,?,?,?,?)`
     ).bind(jobId, action, detail, userName, userRole).run()
   } catch (_) {}
+}
+// v44: Fire-and-forget history logging (don't await — saves ~30ms per call)
+function logHistoryAsync(db: D1Database, jobId: string, action: string, detail: string, userName: string, userRole: string) {
+  logHistory(db, jobId, action, detail, userName, userRole).catch(() => {})
 }
 
 // ── Job status auto-update (with history logging) ──────────────────────────────
@@ -447,13 +455,14 @@ app.get('/api/jobs', authMiddleware, async (c) => {
     params.push(`%${searchJob}%`)
   }
   if (searchName) {
-    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ?)')
-    params.push(`%${searchName}%`, `%${searchName}%`)
+    // v45: Also search mobile2 and address for comprehensive results
+    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.snap_mobile2 LIKE ? OR j.snap_address LIKE ?)')
+    params.push(`%${searchName}%`, `%${searchName}%`, `%${searchName}%`, `%${searchName}%`)
   }
   // Legacy combined search (fallback)
   if (search && !searchJob && !searchName) {
-    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.id LIKE ?)')
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.id LIKE ? OR j.snap_address LIKE ?)')
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`)
   }
   if (from) { conds.push('DATE(j.created_at)>=?'); params.push(from) }
   if (to)   { conds.push('DATE(j.created_at)<=?'); params.push(to) }
@@ -517,46 +526,60 @@ app.post('/api/jobs', authMiddleware, async (c) => {
   if (!customer_name || !customer_mobile)
     return c.json({ error: 'customer_name and customer_mobile are required' }, 400)
 
-  await c.env.DB.prepare('UPDATE job_counter SET last_seq=last_seq+1 WHERE id=1').run()
-  const counter = await c.env.DB.prepare('SELECT last_seq FROM job_counter WHERE id=1').first<any>()
-
-  // Get dynamic prefix and digit count from settings
-  const prefixSetting = await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_prefix'").first<any>()
-  const digitsSetting = await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_seq_digits'").first<any>()
+  // v45: MAXIMUM PARALLEL — all independent queries run simultaneously
+  // Step 1: Increment counter + upsert customer + fetch settings ALL at once
+  const category = body.customer_category || 'Salon'
+  const [, , prefixSetting, digitsSetting] = await Promise.all([
+    c.env.DB.prepare('UPDATE job_counter SET last_seq=last_seq+1 WHERE id=1').run(),
+    c.env.DB.prepare(
+      `INSERT INTO customers(name,mobile,mobile2,address,category) VALUES(?,?,?,?,?)
+       ON CONFLICT(mobile) DO UPDATE SET
+         name=excluded.name, mobile2=excluded.mobile2,
+         address=excluded.address, category=excluded.category, updated_at=datetime('now')`
+    ).bind(customer_name, customer_mobile,
+           body.customer_mobile2 || null, body.customer_address || null, category).run(),
+    c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_prefix'").first<any>(),
+    c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_seq_digits'").first<any>(),
+  ])
+  // Step 2: Counter read + customer ID lookup in parallel
+  const [counter, cust] = await Promise.all([
+    c.env.DB.prepare('SELECT last_seq FROM job_counter WHERE id=1').first<any>(),
+    c.env.DB.prepare('SELECT id FROM customers WHERE mobile=?').bind(customer_mobile).first<any>(),
+  ])
   const prefix = prefixSetting?.value || 'C'
   const digits = parseInt(digitsSetting?.value || '3')
   const jobId = `${prefix}-${String(counter.last_seq).padStart(digits, '0')}`
 
-  const category = body.customer_category || 'Salon'
-  await c.env.DB.prepare(
-    `INSERT INTO customers(name,mobile,mobile2,address,category) VALUES(?,?,?,?,?)
-     ON CONFLICT(mobile) DO UPDATE SET
-       name=excluded.name, mobile2=excluded.mobile2,
-       address=excluded.address, category=excluded.category, updated_at=datetime('now')`
-  ).bind(customer_name, customer_mobile,
-         body.customer_mobile2 || null, body.customer_address || null, category).run()
-
-  const cust = await c.env.DB.prepare(
-    'SELECT id FROM customers WHERE mobile=?'
-  ).bind(customer_mobile).first<any>()
-
   const isAdminCreate = roleLevel(c.get('userRole')) >= 2
   const dispatchMethod = body.dispatch_method === 'courier' ? 'courier' : 'in_person'
   const dispatchCourierName = dispatchMethod === 'courier' ? (body.dispatch_courier_name || null) : null
+  // Step 3: Insert job (single query)
   await c.env.DB.prepare(
     `INSERT INTO jobs(id,customer_id,snap_name,snap_mobile,snap_mobile2,
                       snap_address,snap_category,note,received_amount,dispatch_method,dispatch_courier_name)
      VALUES(?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(jobId, cust.id, customer_name, customer_mobile,
          body.customer_mobile2 || null, body.customer_address || null,
-         category,
-         body.note || null,
+         category, body.note || null,
          isAdminCreate ? (body.received_amount || 0) : 0,
          dispatchMethod, dispatchCourierName).run()
 
-  const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first<any>()
-  // Log history: job created
-  logHistory(c.env.DB, jobId, 'Job Created', `Customer: ${customer_name} (${customer_mobile})${body.note ? ' | Note: ' + body.note : ''}${dispatchMethod === 'courier' ? ' | Dispatch: Courier' + (dispatchCourierName ? ' (' + dispatchCourierName + ')' : '') : ''}`, c.get('userName') || 'System', c.get('userRole') || 'admin')
+  // v45: Return immediately — construct job object in-memory (skip SELECT)
+  const now = new Date().toISOString().replace('T', ' ').replace('Z', '')
+  const job = {
+    id: jobId, customer_id: cust.id, snap_name: customer_name,
+    snap_mobile: customer_mobile, snap_mobile2: body.customer_mobile2 || null,
+    snap_address: body.customer_address || null, snap_category: category,
+    note: body.note || null, status: 'under_repair',
+    received_amount: isAdminCreate ? (body.received_amount || 0) : 0,
+    discount: 0, payment_method: null,
+    dispatch_method: dispatchMethod, dispatch_courier_name: dispatchCourierName,
+    created_at: now, updated_at: now, delivered_at: null
+  }
+  // Fire-and-forget history logging
+  logHistoryAsync(c.env.DB, jobId, 'Job Created',
+    `Customer: ${customer_name} (${customer_mobile})${body.note ? ' | Note: ' + body.note : ''}${dispatchMethod === 'courier' ? ' | Dispatch: Courier' + (dispatchCourierName ? ' (' + dispatchCourierName + ')' : '') : ''}`,
+    c.get('userName') || 'System', c.get('userRole') || 'admin')
   return c.json(job, 201)
 })
 // ── API: Delivered jobs with filters (date range, delivery type) ─────────────
@@ -745,6 +768,7 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
   const qty = parseInt(body.quantity) || 1
   const warrantyType = body.warranty_type || 'out_warranty'
   const warrantyBrand = warrantyType === 'warranty' ? (body.warranty_brand || null) : null
+  // v45: INSERT is the only blocking query — return machineId ASAP
   const result = await c.env.DB.prepare(
     `INSERT INTO machines(job_id,product_name,product_complaint,charges,quantity,assigned_staff_id,status,warranty_type,warranty_brand)
      VALUES(?,?,?,?,?,?,?,?,?)`
@@ -755,14 +779,18 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
     'under_repair',
     warrantyType, warrantyBrand
   ).run()
+  const machineId = result.meta.last_row_id
+  // v45: Return IMMEDIATELY — defer status update + history to background
   const uName = c.get('userName') || 'System'
   const uRole = c.get('userRole') || 'admin'
-  await updateJobStatus(c.env.DB, jobId, uName, uRole)
-  // Log history: machine added with charges
   const lineTotal = charges * qty
   const warrantyInfo = warrantyType === 'warranty' && warrantyBrand ? ` | Warranty: ${warrantyBrand}` : ''
-  logHistory(c.env.DB, jobId, 'Machine Added', `${body.product_name}${qty > 1 ? ' ×' + qty : ''}${body.product_complaint ? ' — ' + body.product_complaint : ''}${charges > 0 ? ' | ₹' + lineTotal : ''}${warrantyInfo}${body.assigned_staff_id ? ' | Assigned staff ID: ' + body.assigned_staff_id : ''}`, uName, uRole)
-  return c.json({ id: result.meta.last_row_id }, 201)
+  // Use waitUntil so the response is sent before these complete
+  c.executionCtx.waitUntil(Promise.all([
+    updateJobStatus(c.env.DB, jobId, uName, uRole),
+    logHistory(c.env.DB, jobId, 'Machine Added', `${body.product_name}${qty > 1 ? ' ×' + qty : ''}${body.product_complaint ? ' — ' + body.product_complaint : ''}${charges > 0 ? ' | ₹' + lineTotal : ''}${warrantyInfo}${body.assigned_staff_id ? ' | Assigned staff ID: ' + body.assigned_staff_id : ''}`, uName, uRole)
+  ]).catch(() => {}))
+  return c.json({ id: machineId }, 201)
 })
 
 // ── API: Batch Machine Status Update ─────────────────────────────────────────

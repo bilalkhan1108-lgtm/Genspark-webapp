@@ -1,9 +1,9 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v43
+// Service Worker — ADITION ELECTRIC SOLUTION v46
 // Strategy: Cache-first for static UI · Network-first w/ cache fallback for API
-// v43: Faster cache, smarter API caching, image cache optimized
-const CACHE_VER   = 'aes-v43';
-const API_CACHE   = 'aes-api-v43';
-const IMG_CACHE   = 'aes-img-v43';
+// v46: Remove revenue bar & returned tile, dispatch edit, hardened search
+const CACHE_VER   = 'aes-v46';
+const API_CACHE   = 'aes-api-v46';
+const IMG_CACHE   = 'aes-img-v46';
 
 const STATIC_URLS = [
   '/',
