@@ -1,9 +1,9 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v46
+// Service Worker — ADITION ELECTRIC SOLUTION v47
 // Strategy: Cache-first for static UI · Network-first w/ cache fallback for API
-// v46: Remove revenue bar & returned tile, dispatch edit, hardened search
-const CACHE_VER   = 'aes-v46';
-const API_CACHE   = 'aes-api-v46';
-const IMG_CACHE   = 'aes-img-v46';
+// v47: Warranty brand filter+report, full offline sync, password send, speed boost
+const CACHE_VER   = 'aes-v47';
+const API_CACHE   = 'aes-api-v47';
+const IMG_CACHE   = 'aes-img-v47';
 
 const STATIC_URLS = [
   '/',
@@ -59,7 +59,7 @@ self.addEventListener('fetch', e => {
   }
 
   // 2. API read endpoints → network-first, cache fallback for offline
-  //    v43: Added /api/jobs/ detail endpoint caching for faster repeat loads
+  //    v47: Also cache /api/jobs/sync for complete offline mode
   if (url.pathname.startsWith('/api/')) {
     const cacheable = /^\/(api\/jobs|api\/analytics|api\/staff|api\/settings|api\/health)/.test(url.pathname);
     if (cacheable) {

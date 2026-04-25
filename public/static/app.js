@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v46                       ║
-// ║  v46: Remove revenue bar & returned tile, dispatch in edit mode,   ║
-// ║       hardened fuzzy search, max speed                             ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v47                       ║
+// ║  v47: Warranty brand filter + report, full offline sync,           ║
+// ║       password send, brand-wise download, speed boost              ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -30,6 +30,7 @@ const S = {
   fromDate: '',
   toDate  : '',
   myJobsOnly: false,
+  brandFilter: '', // v47: warranty brand filter
   audioStream  : null,
   audioRecorder: null,
   audioChunks  : [],
@@ -596,6 +597,34 @@ function _clientSideFilter(jobs, searchJob, searchName) {
   return scored.map(s => s.job);
 }
 
+// v47: FULL OFFLINE SYNC — background-fetch ALL jobs for complete offline cache
+let _fullSyncRunning = false;
+let _fullSyncLastTs  = localStorage.getItem('AES_SYNC_LAST') || '';
+async function _fullOfflineSync() {
+  if (_fullSyncRunning || _isOffline || !S.token) return;
+  _fullSyncRunning = true;
+  try {
+    const params = _fullSyncLastTs ? `?since=${encodeURIComponent(_fullSyncLastTs)}` : '';
+    const r = await API.get('/api/jobs/sync' + params);
+    const jobs = r.data || [];
+    if (jobs.length) {
+      const idMap = new Map(_allLoadedJobs.map((j, i) => [j.id, i]));
+      for (const j of jobs) {
+        const idx = idMap.get(j.id);
+        if (idx !== undefined) _allLoadedJobs[idx] = j;
+        else { _allLoadedJobs.push(j); idMap.set(j.id, _allLoadedJobs.length - 1); }
+      }
+      _allJobsFullyLoaded = true;
+      // Save ALL to IDB for offline
+      IDB.saveJobs('_sync_all', _allLoadedJobs);
+      IDB.bulkSaveDetails(_allLoadedJobs);
+    }
+    _fullSyncLastTs = new Date().toISOString();
+    localStorage.setItem('AES_SYNC_LAST', _fullSyncLastTs);
+  } catch {}
+  _fullSyncRunning = false;
+}
+
 // v41: Pre-populate master cache from IndexedDB on startup for instant first-search
 async function _warmupSearchCache() {
   try {
@@ -612,6 +641,8 @@ async function _warmupSearchCache() {
       if (allCached.length >= 50) _allJobsFullyLoaded = true;
     }
   } catch {}
+  // v47: Trigger full background sync after warmup
+  setTimeout(_fullOfflineSync, 2000);
 }
 
 // Toast
@@ -659,9 +690,11 @@ window.navigate = navigate;
 window.S = S;
 // Expose global helpers used in inline onclick attributes
 window.setFilter  = setFilter;
-window.filterAll       = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0; loadJobs(); };
-window.filterActive    = function() { setFilter('under_repair'); S.fromDate = ''; S.toDate = ''; loadJobs(); };
-window.filterDone      = function() { setFilter('delivered');    S.fromDate = ''; S.toDate = ''; loadJobs(); };
+window.filterAll       = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; _analyticsCacheTs = 0; loadJobs(); };
+window.filterActive    = function() { setFilter('under_repair'); S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; loadJobs(); };
+window.filterDone      = function() { setFilter('delivered');    S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; loadJobs(); };
+// v47: Brand filter — show only jobs with machines under warranty for a specific brand
+window.filterByBrand   = function(brand) { S.brandFilter = brand; setFilter(''); S.fromDate = ''; S.toDate = ''; loadJobs(); };
 window.filterByStatus  = function(st) { setFilter(st); S.fromDate = ''; S.toDate = ''; loadJobs(); };
 window.filterToday  = function() {
   const t = new Date().toISOString().split('T')[0];
@@ -1309,6 +1342,16 @@ function _applyChipCounts(d) {
         <div style="font-size:16px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
         <div style="font-size:8px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
       </div>`).join('');
+    // v47: Brand filter row below tiles — filter by warranty brand
+    const brands = ['IKONIC','HNK','MARC','AYTY Pro'];
+    const brandRow = document.createElement('div');
+    brandRow.style.cssText = 'display:flex;gap:5px;margin-top:6px;flex-wrap:nowrap;overflow-x:auto;padding:2px 0';
+    brandRow.innerHTML = `<div onclick="S.brandFilter='';loadJobs()" style="flex-shrink:0;padding:4px 10px;border-radius:16px;font-size:11px;font-weight:700;cursor:pointer;border:2px solid ${!S.brandFilter?'#1565C0':'#ddd'};background:${!S.brandFilter?'#E3F2FD':'#fff'};color:${!S.brandFilter?'#1565C0':'#666'}">All Brands</div>` +
+      brands.map(b => {
+        const active = S.brandFilter === b;
+        return `<div onclick="filterByBrand('${b}')" style="flex-shrink:0;padding:4px 10px;border-radius:16px;font-size:11px;font-weight:700;cursor:pointer;border:2px solid ${active?'#1565C0':'#ddd'};background:${active?'#E3F2FD':'#fff'};color:${active?'#1565C0':'#666'};transition:all .15s">${b}</div>`;
+      }).join('');
+    ownerDash.appendChild(brandRow);
   }
   // v46: Revenue bar removed per user request
 }
@@ -1322,7 +1365,7 @@ const JOBS_PER_PAGE = 100; // Higher batch = fewer API calls = faster perceived 
 
 // Build the IDB cache key for the current filter state
 function _idbFilterKey() {
-  if (S.search || S.searchJob || S.searchName || S.fromDate || S.toDate || S.myJobsOnly) return null;
+  if (S.search || S.searchJob || S.searchName || S.fromDate || S.toDate || S.myJobsOnly || S.brandFilter) return null;
   return 'f_' + (S.filter || '_all');
 }
 
@@ -1336,6 +1379,25 @@ async function loadJobs(append = false) {
     _jobsLoadId++;
     const cacheKey = _idbFilterKey();
 
+    // v47: BRAND FILTER — instant client-side filter by warranty brand
+    if (S.brandFilter && _allLoadedJobs.length) {
+      // This requires detail data with machines — filter from master cache
+      // Jobs that have at least one machine with warranty_brand matching
+      // Since list view doesn't include machine details, we filter from detail cache
+      const brandJobs = [];
+      for (const j of _allLoadedJobs) {
+        const detail = await IDB.loadDetail(j.id);
+        if (detail?.machines?.some(m => m.warranty_type === 'warranty' && m.warranty_brand === S.brandFilter)) {
+          brandJobs.push(j);
+        }
+      }
+      S.jobs = brandJobs;
+      renderVList(false);
+      bindDashboardEvents();
+      toast(`🔖 ${brandJobs.length} job${brandJobs.length!==1?'s':''} with ${S.brandFilter} warranty`, 'info');
+      _jobsLoading = false;
+      return;
+    }
     // v41: INSTANT CLIENT-SIDE FILTER — show results in <1ms from master cache
     // Works on very first keystroke because _allLoadedJobs is pre-warmed from IDB
     if (isSearching && _allLoadedJobs.length) {
@@ -4928,6 +4990,37 @@ function reportsHTML() {
   }
   return `
   <div class="view-pad">
+    <!-- v47: WARRANTY BRAND REPORT — filter by brand + date range, download xlsx -->
+    <div class="report-card" id="warranty-brand-card" style="border-left:4px solid #1565C0">
+      <div class="report-title"><i class="fas fa-shield-alt" style="color:#1565C0"></i> Warranty Brand Report</div>
+      <div class="report-desc">Download all machines repaired under warranty for a specific brand & date range</div>
+      <div class="form-group" style="margin-top:10px">
+        <label class="form-label">Brand</label>
+        <select id="wr-brand" class="form-input">
+          <option value="">— All Brands —</option>
+          <option value="IKONIC">IKONIC</option>
+          <option value="HNK">HNK</option>
+          <option value="MARC">MARC</option>
+          <option value="AYTY Pro">AYTY Pro</option>
+        </select>
+      </div>
+      <div class="form-row-2" style="margin-top:6px">
+        <div class="form-group"><label class="form-label">From</label>
+          <input id="wr-from" type="date" class="form-input"></div>
+        <div class="form-group"><label class="form-label">To</label>
+          <input id="wr-to" type="date" class="form-input"></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button id="btn-wr-preview" class="btn-sm" style="background:#1565C0;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer">
+          <i class="fas fa-eye"></i> Preview
+        </button>
+        <button id="btn-wr-download" class="btn-sm btn-green">
+          <i class="fas fa-download"></i> Download .xlsx
+        </button>
+      </div>
+      <div id="wr-preview" style="display:none;margin-top:10px;max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px"></div>
+    </div>
+
     <div class="report-card" id="customer-master-card">
       <div class="report-title"><i class="fas fa-address-book" style="color:#00897B"></i> Customer Master</div>
       <div class="report-desc">Search, view all customers and their job history</div>
@@ -5175,6 +5268,84 @@ function bindReports() {
   };
   document.getElementById('btn-ledger-a')?.addEventListener('click', () => dlLedger('A'));
   document.getElementById('btn-ledger-b')?.addEventListener('click', () => dlLedger('B'));
+
+  // ── v47: Warranty Brand Report — preview + download ─────────────────────
+  document.getElementById('btn-wr-preview')?.addEventListener('click', async () => {
+    const brand = document.getElementById('wr-brand')?.value || '';
+    const from  = document.getElementById('wr-from')?.value || '';
+    const to    = document.getElementById('wr-to')?.value   || '';
+    const previewEl = document.getElementById('wr-preview');
+    if (!previewEl) return;
+    previewEl.style.display = 'block';
+    previewEl.innerHTML = '<div class="loader-wrap"><i class="fas fa-spinner fa-spin"></i> Loading…</div>';
+    try {
+      const p = new URLSearchParams();
+      if (brand) p.set('brand', brand);
+      if (from)  p.set('from', from);
+      if (to)    p.set('to', to);
+      const r = await API.get('/api/reports/warranty-brand-summary?' + p);
+      const data = r.data || [];
+      if (!data.length) {
+        previewEl.innerHTML = '<p style="padding:16px;color:#888;text-align:center">No warranty machines found for this filter</p>';
+        return;
+      }
+      // Group by brand
+      const byBrand = {};
+      let grandTotal = 0, grandCount = 0;
+      for (const row of data) {
+        const b = row.brand || 'Unknown';
+        if (!byBrand[b]) byBrand[b] = { total: 0, count: 0, statuses: {} };
+        byBrand[b].count += row.cnt;
+        byBrand[b].total += row.total_charges || 0;
+        byBrand[b].statuses[row.status] = (byBrand[b].statuses[row.status] || 0) + row.cnt;
+        grandTotal += row.total_charges || 0;
+        grandCount += row.cnt;
+      }
+      const sl = (s) => (s||'').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+      let html = '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#E3F2FD;position:sticky;top:0">' +
+        '<th style="padding:8px 10px;text-align:left;font-weight:700">Brand</th>' +
+        '<th style="padding:8px 10px;text-align:center;font-weight:700">Machines</th>' +
+        '<th style="padding:8px 10px;text-align:right;font-weight:700">Charges</th>' +
+        '<th style="padding:8px 10px;text-align:left;font-weight:700">Status Breakdown</th></tr></thead><tbody>';
+      for (const [b, info] of Object.entries(byBrand)) {
+        const statusStr = Object.entries(info.statuses).map(([s,c]) => `${sl(s)}: ${c}`).join(', ');
+        html += `<tr style="border-bottom:1px solid #f0f0f0">
+          <td style="padding:8px 10px;font-weight:700;color:#1565C0">${b}</td>
+          <td style="padding:8px 10px;text-align:center;font-weight:700">${info.count}</td>
+          <td style="padding:8px 10px;text-align:right;font-weight:700">${fmtRs(info.total)}</td>
+          <td style="padding:8px 10px;font-size:12px;color:#666">${statusStr}</td></tr>`;
+      }
+      html += `<tr style="background:#E8F5E9;font-weight:700"><td style="padding:8px 10px">TOTAL</td>
+        <td style="padding:8px 10px;text-align:center">${grandCount}</td>
+        <td style="padding:8px 10px;text-align:right">${fmtRs(grandTotal)}</td><td></td></tr>`;
+      html += '</tbody></table>';
+      previewEl.innerHTML = html;
+      toast(`Found ${grandCount} warranty machines`, 'success');
+    } catch (_) {
+      previewEl.innerHTML = '<p style="padding:16px;color:#e53935;text-align:center">Failed to load preview</p>';
+      toast('Preview failed', 'error');
+    }
+  });
+  document.getElementById('btn-wr-download')?.addEventListener('click', async () => {
+    const brand = document.getElementById('wr-brand')?.value || '';
+    const from  = document.getElementById('wr-from')?.value || '';
+    const to    = document.getElementById('wr-to')?.value   || '';
+    const p = new URLSearchParams();
+    if (brand) p.set('brand', brand);
+    if (from)  p.set('from', from);
+    if (to)    p.set('to', to);
+    try {
+      toast('Preparing warranty report…', 'info');
+      const r = await API.get('/api/reports/warranty-brand?' + p, { responseType: 'blob' });
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `AES_warranty_${brand || 'all'}_${new Date().toISOString().slice(0,10)}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      toast('Warranty report downloaded ✅', 'success');
+    } catch (_) { toast('Export failed', 'error'); }
+  });
 
   // ── Customer Master search ──────────────────────────────────────────────
   const cmSearch = async () => {
@@ -5949,7 +6120,40 @@ async function loadAdminDash() {
           </tbody>
         </table>
       </div>
-    </div>` : ''}`;
+    </div>` : ''}
+
+    <!-- v47: Password Send — quick reset login password for any staff -->
+    <div class="card" style="margin-bottom:12px;border-left:4px solid #FF6F00">
+      <div style="font-size:13px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">🔑 Send Login Password</div>
+      <div class="form-group">
+        <label class="form-label">Select Staff</label>
+        <select id="adm-pass-staff" class="form-input">
+          <option value="">— Choose Staff —</option>
+          ${(S.staff||[]).map(s => '<option value="'+s.id+'">'+esc(s.name)+' ('+esc(s.email)+')</option>').join('')}
+        </select>
+      </div>
+      <div class="form-group" style="margin-top:6px">
+        <label class="form-label">New Password</label>
+        <input id="adm-pass-val" type="text" class="form-input" placeholder="Enter new password (min 4 chars)" autocomplete="off">
+      </div>
+      <button id="btn-adm-send-pass" class="btn-sm" style="margin-top:8px;background:#FF6F00;color:#fff;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;font-weight:700">
+        <i class="fas fa-paper-plane"></i> Update Password
+      </button>
+    </div>`;
+
+    // v47: Bind password send button
+    document.getElementById('btn-adm-send-pass')?.addEventListener('click', async () => {
+      const staffId = document.getElementById('adm-pass-staff')?.value;
+      const pass    = document.getElementById('adm-pass-val')?.value?.trim();
+      if (!staffId) { toast('Select a staff member', 'error'); return; }
+      if (!pass || pass.length < 4) { toast('Password must be at least 4 characters', 'error'); return; }
+      try {
+        const r = await API.post('/api/staff/' + staffId + '/send-password', { password: pass });
+        toast('Password updated for ' + (r.data?.email || 'staff'), 'success');
+        document.getElementById('adm-pass-val').value = '';
+      } catch (_) { toast('Failed to update password', 'error'); }
+    });
+
   } catch (e) {
     root.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Failed to load dashboard</p></div>`;
   }

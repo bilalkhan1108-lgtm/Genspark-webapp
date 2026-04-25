@@ -189,6 +189,8 @@ async function ensureDbSchema(db: D1Database) {
     // v33: composite index for mobile search speed
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_mobile2 ON jobs(snap_mobile2)`).run().catch(() => {})
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_cust_mobile ON customers(mobile)`).run().catch(() => {})
+    // v47: warranty brand index for brand-wise reports
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_warranty ON machines(warranty_type, warranty_brand)`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
@@ -1721,6 +1723,141 @@ app.get('/api/reports/ledger', authMiddleware, adminOnly, async (c) => {
       'Content-Disposition': `attachment; filename="${name}"`
     }
   })
+})
+
+// ── API: Warranty Brand Report ────────────────────────────────────────────────
+// v47: Download all machines repaired under warranty for a particular brand + date range
+app.get('/api/reports/warranty-brand', authMiddleware, adminOnly, async (c) => {
+  const brand = c.req.query('brand') || ''
+  const from  = c.req.query('from')  || ''
+  const to    = c.req.query('to')    || ''
+  const status = c.req.query('status') || ''
+
+  let q = `
+    SELECT j.id AS job_id, j.snap_name AS customer_name, j.snap_mobile AS phone,
+           j.snap_address AS address, j.status AS job_status,
+           m.product_name, m.product_complaint, m.work_done,
+           m.status AS machine_status, m.charges, m.quantity,
+           m.warranty_brand AS brand,
+           u.name AS assigned_staff,
+           DATE(m.created_at) AS date_added,
+           DATE(j.created_at) AS job_date
+    FROM machines m
+    JOIN jobs j ON m.job_id = j.id
+    LEFT JOIN users u ON m.assigned_staff_id = u.id
+    WHERE m.warranty_type = 'warranty'`
+  const ps: any[] = []
+  if (brand) { q += ' AND m.warranty_brand = ?'; ps.push(brand) }
+  if (from)  { q += ' AND DATE(m.created_at) >= ?'; ps.push(from) }
+  if (to)    { q += ' AND DATE(m.created_at) <= ?'; ps.push(to) }
+  if (status) { q += ' AND m.status = ?'; ps.push(status) }
+  q += ' ORDER BY m.created_at DESC'
+
+  const { results } = await c.env.DB.prepare(q).bind(...ps).all<any>()
+
+  // Build summary row
+  const totalMachines = results.length
+  const totalCharges = results.reduce((s: number, r: any) => s + ((parseFloat(r.charges) || 0) * (parseInt(r.quantity) || 1)), 0)
+
+  const wb = XLSX.utils.book_new()
+  const rows = results.map((r: any) => ({
+    'Job ID': r.job_id,
+    'Job Date': r.job_date,
+    'Customer': r.customer_name,
+    'Phone': r.phone,
+    'Address': r.address || '',
+    'Product': r.product_name,
+    'Complaint': r.product_complaint || '',
+    'Work Done': r.work_done || '',
+    'Brand': r.brand || '',
+    'Machine Status': r.machine_status,
+    'Charges': r.charges || 0,
+    'Qty': r.quantity || 1,
+    'Line Total': (parseFloat(r.charges) || 0) * (parseInt(r.quantity) || 1),
+    'Staff': r.assigned_staff || '',
+    'Date Added': r.date_added,
+  }))
+  // Add totals row
+  rows.push({ 'Job ID': 'TOTAL', 'Product': `${totalMachines} machines`, 'Line Total': totalCharges })
+  const brandLabel = brand || 'All Brands'
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), `Warranty - ${brandLabel}`.slice(0, 31))
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
+  const date = new Date().toISOString().slice(0, 10)
+  return new Response(buf, {
+    headers: {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="AES_warranty_${brandLabel.replace(/\s+/g,'_')}_${date}.xlsx"`
+    }
+  })
+})
+
+// v47: Warranty brand summary (JSON) for in-page preview
+app.get('/api/reports/warranty-brand-summary', authMiddleware, adminOnly, async (c) => {
+  const brand = c.req.query('brand') || ''
+  const from  = c.req.query('from')  || ''
+  const to    = c.req.query('to')    || ''
+
+  let q = `
+    SELECT m.warranty_brand AS brand, m.status,
+           COUNT(*) AS cnt,
+           SUM(m.charges * m.quantity) AS total_charges
+    FROM machines m
+    JOIN jobs j ON m.job_id = j.id
+    WHERE m.warranty_type = 'warranty'`
+  const ps: any[] = []
+  if (brand) { q += ' AND m.warranty_brand = ?'; ps.push(brand) }
+  if (from)  { q += ' AND DATE(m.created_at) >= ?'; ps.push(from) }
+  if (to)    { q += ' AND DATE(m.created_at) <= ?'; ps.push(to) }
+  q += ' GROUP BY m.warranty_brand, m.status ORDER BY m.warranty_brand, m.status'
+  const { results } = await c.env.DB.prepare(q).bind(...ps).all<any>()
+  return c.json(results)
+})
+
+// v47: Bulk sync — return ALL jobs (lightweight) for offline cache
+app.get('/api/jobs/sync', authMiddleware, async (c) => {
+  const since = c.req.query('since') || '' // ISO date: only jobs updated after this
+  const role  = c.get('userRole')
+  const isAdmin = roleLevel(role) >= 2
+  const userId  = c.get('userId')
+
+  let q = `
+    SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.dispatch_method,
+           j.received_amount, j.discount, j.created_at, j.updated_at,
+           COALESCE((SELECT SUM(quantity) FROM machines WHERE job_id=j.id), 0) AS machine_count,
+           COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'), 0) AS total_charges
+    FROM jobs j`
+  const conds: string[] = []
+  const ps: any[] = []
+  if (!isAdmin) {
+    conds.push("j.status != 'delivered'")
+  }
+  if (since) {
+    conds.push('j.updated_at > ?')
+    ps.push(since)
+  }
+  if (conds.length) q += ` WHERE ${conds.join(' AND ')}`
+  q += ' ORDER BY j.created_at DESC LIMIT 5000'
+  const { results } = await c.env.DB.prepare(q).bind(...ps).all<any>()
+  return c.json(results.map((r: any) => ({
+    ...r,
+    balance_due: Math.max(0, (r.total_charges || 0) - (r.discount || 0) - (r.received_amount || 0))
+  })))
+})
+
+// v47: Send login password to staff (admin only)
+app.post('/api/staff/:id/send-password', authMiddleware, adminOnly, async (c) => {
+  const staffId = c.req.param('id')
+  let body: any
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const { password } = body
+  if (!password || password.length < 4) return c.json({ error: 'Password must be at least 4 characters' }, 400)
+
+  const hash = await bcrypt.hash(password, 10)
+  await c.env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(hash, staffId).run()
+  const staff = await c.env.DB.prepare('SELECT name, email FROM users WHERE id=?').bind(staffId).first<any>()
+  if (!staff) return c.json({ error: 'Staff not found' }, 404)
+
+  return c.json({ ok: true, message: `Password updated for ${staff.name}`, email: staff.email })
 })
 
 // ── API: Cleanup ──────────────────────────────────────────────────────────────
