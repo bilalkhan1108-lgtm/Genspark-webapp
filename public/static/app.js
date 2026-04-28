@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v47                       ║
-// ║  v47: Warranty brand filter + report, full offline sync,           ║
-// ║       password send, brand-wise download, speed boost              ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v48                       ║
+// ║  v48: Custom categories, ledger name search, warranty purchase      ║
+// ║       fields, invoice image upload (R2 brand folders), speed boost  ║
 // ╚══════════════════════════════════════════════════════════════════════╝
 ;(function () {
 'use strict';
@@ -34,6 +34,7 @@ const S = {
   audioStream  : null,
   audioRecorder: null,
   audioChunks  : [],
+  customerCategories: ['Salon','Consumer','Retailer','N/A'], // v48: dynamic categories from settings
 };
 
 const CARD_H = 88;
@@ -1192,7 +1193,7 @@ function bindView() {
 
   switch (S.view) {
     case 'dashboard': loadJobs();                                               break;
-    case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) bindNewJob(); break;
+    case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) { loadCustomerCategories(); bindNewJob(); } break;
     case 'admindash': if (isDirector()) loadAdminDash();                        break;
     case 'detail':    loadDetail();                                             break;
     case 'staff':     if (S.user?.role === 'admin') loadStaff();                break;
@@ -1865,10 +1866,7 @@ function newJobHTML() {
       <div class="form-group">
         <label class="form-label">Customer Category</label>
         <select id="nj-category" class="form-input">
-          <option value="Salon" selected>Salon</option>
-          <option value="Consumer">Consumer</option>
-          <option value="Retailer">Retailer</option>
-          <option value="N/A">N/A</option>
+          ${categoryOptionsHTML('Salon')}
         </select>
       </div>
       <div class="form-group">
@@ -1973,6 +1971,36 @@ function newJobHTML() {
           <option value="AYTY Pro">AYTY Pro</option>
         </select>
       </div>
+      <!-- v48: Warranty Purchase Details (shown when under warranty) -->
+      <div id="nj-purchase-wrap" style="display:none">
+        <div class="form-group">
+          <label class="form-label"><i class="fas fa-store" style="color:#7B1FA2"></i> Purchased From</label>
+          <input id="nj-purchased-from" type="text" class="form-input" placeholder="Shop / dealer name">
+        </div>
+        <div class="form-row-2">
+          <div class="form-group">
+            <label class="form-label">Purchase Invoice No.</label>
+            <input id="nj-invoice-no" type="text" class="form-input" placeholder="INV-12345">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Purchase Date</label>
+            <input id="nj-purchase-date" type="date" class="form-input">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label"><i class="fas fa-file-invoice" style="color:#E65100"></i> Purchase Invoice Photo <span style="color:#999;font-size:12px">(optional)</span></label>
+          <div style="display:flex;gap:10px;align-items:center">
+            <label class="img-upload-label" style="flex:1">
+              <i class="fas fa-camera"></i> Take / Pick Invoice Photo
+              <input id="nj-invoice-img" type="file" accept="image/*" capture="environment" style="display:none">
+            </label>
+            <div id="nj-invoice-preview" style="display:none">
+              <img id="nj-invoice-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100">
+              <button id="nj-invoice-clear" style="margin-left:4px;background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <!-- 6. Repair Amount -->
       ${hasSuperRight('view_financials') ? `
@@ -2019,8 +2047,11 @@ function bindNewJob() {
 
   // Warranty dropdown toggle in New Job form
   document.getElementById('nj-warranty')?.addEventListener('change', e => {
+    const isWarranty = e.target.value === 'warranty';
     const wrap = document.getElementById('nj-brand-wrap');
-    if (wrap) wrap.style.display = e.target.value === 'warranty' ? 'block' : 'none';
+    if (wrap) wrap.style.display = isWarranty ? 'block' : 'none';
+    const purchaseWrap = document.getElementById('nj-purchase-wrap');
+    if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
   });
 
   // Dispatch method toggle — show courier name field when courier selected
@@ -2209,6 +2240,19 @@ function bindNewJob() {
     document.getElementById('nj-img-preview').style.display = 'none';
   });
 
+  // v48: Invoice image preview handlers
+  const invoiceInput = document.getElementById('nj-invoice-img');
+  invoiceInput?.addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return;
+    const blobUrl = URL.createObjectURL(file);
+    document.getElementById('nj-invoice-thumb').src = blobUrl;
+    document.getElementById('nj-invoice-preview').style.display = 'flex';
+  });
+  document.getElementById('nj-invoice-clear')?.addEventListener('click', () => {
+    if (invoiceInput) invoiceInput.value = '';
+    document.getElementById('nj-invoice-preview').style.display = 'none';
+  });
+
   // Voice Note recorder for first machine
   let _njAudioBlob = null, _njAudioMime = 'audio/webm';
   document.getElementById('nj-audio-rec')?.addEventListener('click', async () => {
@@ -2279,8 +2323,12 @@ function bindNewJob() {
       assigned_staff_id: hasSuperRight('manage_machines') ? (document.getElementById('nj-staff')?.value || null) : null,
       warranty_type:     njWarrantyType,
       warranty_brand:    njWarrantyBrand,
+      purchased_from:    njWarrantyType === 'warranty' ? (document.getElementById('nj-purchased-from')?.value.trim() || null) : null,
+      purchase_invoice_no: njWarrantyType === 'warranty' ? (document.getElementById('nj-invoice-no')?.value.trim() || null) : null,
+      purchase_date:     njWarrantyType === 'warranty' ? (document.getElementById('nj-purchase-date')?.value || null) : null,
     };
     const imgFile = document.getElementById('nj-img')?.files[0];
+    const invoiceFile = document.getElementById('nj-invoice-img')?.files[0];
     const audioBlob = _njAudioBlob;
     const audioMime = _njAudioMime;
 
@@ -2318,6 +2366,16 @@ function bindNewJob() {
                 const fd   = new FormData(); fd.append('audio', file);
                 await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
               } catch (_) { toast('Audio upload failed (job still created)', 'error'); }
+            })());
+          }
+          // v48: Upload invoice image if warranty product
+          if (invoiceFile && machId) {
+            uploads.push((async () => {
+              try {
+                const compressed = await compressImage(invoiceFile, 1080, 0.82);
+                const fd = new FormData(); fd.append('invoice', compressed);
+                await API.post(`/api/machines/${machId}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+              } catch (_) { toast('Invoice upload failed (job still created)', 'error'); }
             })());
           }
           if (uploads.length) await Promise.allSettled(uploads);
@@ -3245,10 +3303,7 @@ function showEditCustomerModal(j) {
     <div class="form-group">
       <label class="form-label">Customer Category</label>
       <select id="ec-category" class="form-input">
-        <option value="Salon" ${(j.snap_category||'Salon')==='Salon'?'selected':''}>Salon</option>
-        <option value="Consumer" ${j.snap_category==='Consumer'?'selected':''}>Consumer</option>
-        <option value="Retailer" ${j.snap_category==='Retailer'?'selected':''}>Retailer</option>
-        <option value="N/A" ${j.snap_category==='N/A'?'selected':''}>N/A</option>
+        ${categoryOptionsHTML(j.snap_category||'Salon')}
       </select>
     </div>
     <div class="form-group">
@@ -3679,6 +3734,36 @@ function showAddMachineModal(jobId) {
         <option value="AYTY Pro">AYTY Pro</option>
       </select>
     </div>
+    <!-- v48: Warranty Purchase Details (shown when under warranty) -->
+    <div id="am-purchase-wrap" style="display:none">
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-store" style="color:#7B1FA2"></i> Purchased From</label>
+        <input id="am-purchased-from" type="text" class="form-input" placeholder="Shop / dealer name">
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label class="form-label">Purchase Invoice No.</label>
+          <input id="am-invoice-no" type="text" class="form-input" placeholder="INV-12345">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Purchase Date</label>
+          <input id="am-purchase-date" type="date" class="form-input">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-file-invoice" style="color:#E65100"></i> Invoice Photo <span style="color:#999;font-size:12px">(optional)</span></label>
+        <div style="display:flex;gap:10px;align-items:center">
+          <label class="img-upload-label" style="flex:1">
+            <i class="fas fa-camera"></i> Take / Pick Invoice Photo
+            <input id="am-invoice-img" type="file" accept="image/*" capture="environment" style="display:none">
+          </label>
+          <div id="am-invoice-preview" style="display:none">
+            <img id="am-invoice-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100">
+            <button id="am-invoice-clear" style="margin-left:4px;background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- 6. Repair Amount -->
     ${isAdmin() ? `
@@ -3786,8 +3871,23 @@ function showAddMachineModal(jobId) {
 
   // Warranty dropdown toggle: show brand select when "warranty" is chosen
   document.getElementById('am-warranty')?.addEventListener('change', e => {
+    const isWarranty = e.target.value === 'warranty';
     const brandWrap = document.getElementById('am-brand-wrap');
-    if (brandWrap) brandWrap.style.display = e.target.value === 'warranty' ? 'block' : 'none';
+    if (brandWrap) brandWrap.style.display = isWarranty ? 'block' : 'none';
+    const purchaseWrap = document.getElementById('am-purchase-wrap');
+    if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
+  });
+
+  // v48: Invoice image preview handlers for add-machine
+  const amInvoiceInput = document.getElementById('am-invoice-img');
+  amInvoiceInput?.addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return;
+    document.getElementById('am-invoice-thumb').src = URL.createObjectURL(file);
+    document.getElementById('am-invoice-preview').style.display = 'flex';
+  });
+  document.getElementById('am-invoice-clear')?.addEventListener('click', () => {
+    if (amInvoiceInput) amInvoiceInput.value = '';
+    document.getElementById('am-invoice-preview').style.display = 'none';
   });
 
   // Smart product name input — filter suggestions + update complaint/amount tiles as user types
@@ -3869,8 +3969,13 @@ function showAddMachineModal(jobId) {
 
     // v45: Capture file references BEFORE closing modal (DOM will be destroyed)
     const imgFile = document.getElementById('am-img')?.files[0];
+    const amInvoiceFile = document.getElementById('am-invoice-img')?.files[0];
     const audioBlob = _amAudioBlob;
     const audioMime = _amAudioMime;
+    // v48: warranty purchase fields
+    const amPurchasedFrom = warrantyType === 'warranty' ? (document.getElementById('am-purchased-from')?.value.trim() || null) : null;
+    const amInvoiceNo = warrantyType === 'warranty' ? (document.getElementById('am-invoice-no')?.value.trim() || null) : null;
+    const amPurchaseDate = warrantyType === 'warranty' ? (document.getElementById('am-purchase-date')?.value || null) : null;
 
     // v45: INSTANT — close modal and show success BEFORE API call
     closeModal();
@@ -3893,6 +3998,7 @@ function showAddMachineModal(jobId) {
           product_name: prod, product_complaint: complaint,
           charges, quantity, assigned_staff_id: staffId,
           warranty_type: warrantyType, warranty_brand: warrantyBrand,
+          purchased_from: amPurchasedFrom, purchase_invoice_no: amInvoiceNo, purchase_date: amPurchaseDate,
         });
         const machId = machR.data.id;
         toast('Machine added ✅', 'success');
@@ -3916,6 +4022,16 @@ function showAddMachineModal(jobId) {
               const fd   = new FormData(); fd.append('audio', file);
               await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
             } catch (_) { toast('Audio upload failed', 'error'); }
+          })());
+        }
+        // v48: Upload invoice image if warranty product
+        if (amInvoiceFile && machId) {
+          uploads.push((async () => {
+            try {
+              const compressed = await compressImage(amInvoiceFile, 1080, 0.82);
+              const fd = new FormData(); fd.append('invoice', compressed);
+              await API.post(`/api/machines/${machId}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+            } catch (_) { toast('Invoice upload failed', 'error'); }
           })());
         }
         if (uploads.length) await Promise.allSettled(uploads);
@@ -4965,6 +5081,24 @@ async function loadStaffForSelects() {
   try { const r = await API.get('/api/staff'); S.staff = r.data; } catch (_) {}
 }
 
+// v48: Load customer categories from app_settings
+let _categoriesLoaded = false;
+async function loadCustomerCategories() {
+  if (_categoriesLoaded) return;
+  try {
+    const r = await API.get('/api/settings');
+    if (r.data?.customer_categories) {
+      S.customerCategories = r.data.customer_categories.split(',').map(c => c.trim()).filter(Boolean);
+    }
+    _categoriesLoaded = true;
+  } catch (_) {}
+}
+function categoryOptionsHTML(selected) {
+  return S.customerCategories.map(c =>
+    `<option value="${esc(c)}"${c === selected ? ' selected' : ''}>${esc(c)}</option>`
+  ).join('');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // REPORTS (admin: full reports; staff: my jobs export)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5080,9 +5214,9 @@ function reportsHTML() {
       <div class="report-title"><i class="fas fa-book" style="color:#00897B"></i> Customer Ledger</div>
       <div class="report-desc">View & export full job history for a customer</div>
       <div class="form-group" style="margin-top:10px">
-        <label class="form-label">Customer Mobile <span class="req">*</span></label>
+        <label class="form-label">Search by Name or Mobile <span class="req">*</span></label>
         <div style="display:flex;gap:8px">
-          <input id="ledger-mobile" type="tel" class="form-input" placeholder="9876543210" inputmode="numeric" style="flex:1">
+          <input id="ledger-mobile" type="text" class="form-input" placeholder="Name or mobile number…" style="flex:1">
           <button id="btn-ledger-search" class="btn-sm" style="background:#00897B;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;white-space:nowrap"><i class="fas fa-search"></i> Load</button>
         </div>
       </div>
@@ -5188,13 +5322,16 @@ function bindReports() {
 
   // ── Customer Ledger in-page view ──────────────────────────────────────────────
   const loadLedger = async () => {
-    const mobile = document.getElementById('ledger-mobile')?.value.trim();
-    if (!mobile) { toast('Enter customer mobile', 'error'); return; }
+    const searchVal = document.getElementById('ledger-mobile')?.value.trim();
+    if (!searchVal) { toast('Enter customer name or mobile', 'error'); return; }
     const from   = document.getElementById('ledger-from')?.value || '';
     const to     = document.getElementById('ledger-to')?.value   || '';
     try {
       toast('Loading ledger…', 'info');
-      const p = new URLSearchParams({ mobile });
+      // v48: detect if input is mobile (digits only) or name
+      const isNumeric = /^\d+$/.test(searchVal);
+      const p = new URLSearchParams();
+      if (isNumeric) { p.set('mobile', searchVal); } else { p.set('name', searchVal); }
       if (from) p.set('from', from);
       if (to)   p.set('to',   to);
       const r = await API.get('/api/customers/history?' + p);
@@ -5204,7 +5341,7 @@ function bindReports() {
       const totDiv = document.getElementById('ledger-totals');
       if (resDiv) resDiv.style.display = 'block';
       if (!jobs.length) {
-        if (tblDiv) tblDiv.innerHTML = `<p style="padding:16px;color:#888;text-align:center">No jobs found for this mobile number</p>`;
+        if (tblDiv) tblDiv.innerHTML = `<p style="padding:16px;color:#888;text-align:center">No jobs found for "${esc(searchVal)}"</p>`;
         if (totDiv) totDiv.textContent = '';
         return;
       }
@@ -5249,18 +5386,20 @@ function bindReports() {
   document.getElementById('ledger-mobile')?.addEventListener('keypress', e => { if (e.key === 'Enter') loadLedger(); });
 
   const dlLedger = async (mode) => {
-    const mobile = document.getElementById('ledger-mobile')?.value.trim();
-    if (!mobile) { toast('Enter customer mobile first', 'error'); return; }
+    const searchVal = document.getElementById('ledger-mobile')?.value.trim();
+    if (!searchVal) { toast('Enter customer name or mobile first', 'error'); return; }
     const from = document.getElementById('ledger-from')?.value || '';
     const to   = document.getElementById('ledger-to')?.value   || '';
-    const p    = new URLSearchParams({ mobile, mode });
+    const isNumeric = /^\d+$/.test(searchVal);
+    const p = new URLSearchParams({ mode });
+    if (isNumeric) { p.set('mobile', searchVal); } else { p.set('name', searchVal); }
     if (from) p.set('from', from);
     if (to)   p.set('to',   to);
     try {
       const resp = await API.get('/api/reports/ledger?' + p, { responseType: 'blob' });
       const url  = URL.createObjectURL(resp.data);
       const a    = document.createElement('a'); a.href = url;
-      a.download = `AES_ledger_${mobile}_${mode}.xlsx`;
+      a.download = `AES_ledger_${searchVal}_${mode}.xlsx`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 2000);
       toast('Ledger downloaded ✅', 'success');
@@ -5496,6 +5635,16 @@ function settingsHTML() {
       <div style="font-size:12px;color:#888;margin:4px 0 8px">Preview: <b id="prefix-preview">—</b></div>
       <button id="btn-save-prefix" class="btn-sm btn-blue"><i class="fas fa-save"></i> Save Format</button>
     </div>
+    <!-- v48: Customer Category Management -->
+    <div class="card" style="margin-bottom:12px" id="category-card">
+      <div class="section-title"><i class="fas fa-tags" style="color:#7B1FA2"></i> Customer Categories</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Add or remove customer categories used in job creation</div>
+      <div id="cat-list" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px">
+        <input id="cat-new" type="text" class="form-input" placeholder="New category name…" style="flex:1" maxlength="30">
+        <button id="btn-cat-add" class="btn-sm btn-blue" style="white-space:nowrap"><i class="fas fa-plus"></i> Add</button>
+      </div>
+    </div>
     <div class="settings-item" id="set-cleanup">
       <div>
         <div class="settings-label"><i class="fas fa-broom settings-icon" style="color:#FB8C00"></i> Cleanup Old Records</div>
@@ -5541,7 +5690,7 @@ function settingsHTML() {
       <i class="fas fa-chevron-right" style="color:#ccc"></i>
     </div>
     <div style="text-align:center;margin-top:24px;color:#bbb;font-size:13px">
-      ✨ adition™ since 1984 · v39.0<br>
+      ✨ adition™ since 1984 · v48.0<br>
       Gheekanta, Ahmedabad 380001
     </div>
   </div>`;
@@ -5590,7 +5739,53 @@ function bindSettings() {
       }
       pfx?.addEventListener('input', updatePreview);
       dig?.addEventListener('input', updatePreview);
+
+      // v48: Load and render customer categories
+      if (d.customer_categories) {
+        S.customerCategories = d.customer_categories.split(',').map(c => c.trim()).filter(Boolean);
+        _categoriesLoaded = true;
+      }
+      renderCategoryChips();
     }).catch(() => {});
+
+    // v48: Category management functions
+    function renderCategoryChips() {
+      const listEl = document.getElementById('cat-list');
+      if (!listEl) return;
+      listEl.innerHTML = S.customerCategories.map(c => `
+        <span style="display:inline-flex;align-items:center;gap:4px;background:#E8EAF6;color:#3949AB;border-radius:20px;padding:6px 12px;font-size:13px;font-weight:700">
+          ${esc(c)}
+          <button data-cat="${esc(c)}" class="cat-del-btn" style="background:none;border:none;color:#E53935;cursor:pointer;font-size:14px;padding:0 2px;line-height:1" title="Remove ${esc(c)}"><i class="fas fa-times-circle"></i></button>
+        </span>`).join('');
+      listEl.querySelectorAll('.cat-del-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const cat = btn.dataset.cat;
+          if (S.customerCategories.length <= 1) { toast('Must have at least one category', 'error'); return; }
+          if (!confirm(`Remove category "${cat}"?`)) return;
+          S.customerCategories = S.customerCategories.filter(c => c !== cat);
+          await saveCategoriesAndRefresh();
+        });
+      });
+    }
+    async function saveCategoriesAndRefresh() {
+      try {
+        await API.put('/api/settings', { customer_categories: S.customerCategories.join(',') });
+        renderCategoryChips();
+        toast('Categories updated ✅', 'success');
+      } catch (_) { toast('Failed to save categories', 'error'); }
+    }
+    document.getElementById('btn-cat-add')?.addEventListener('click', async () => {
+      const inp = document.getElementById('cat-new');
+      const val = inp?.value.trim();
+      if (!val) { toast('Enter category name', 'error'); return; }
+      if (S.customerCategories.includes(val)) { toast('Category already exists', 'error'); return; }
+      S.customerCategories.push(val);
+      inp.value = '';
+      await saveCategoriesAndRefresh();
+    });
+    document.getElementById('cat-new')?.addEventListener('keypress', e => {
+      if (e.key === 'Enter') document.getElementById('btn-cat-add')?.click();
+    });
 
     document.getElementById('btn-save-prefix')?.addEventListener('click', async () => {
       const prefix = document.getElementById('set-prefix')?.value.trim().toUpperCase();
@@ -6122,38 +6317,7 @@ async function loadAdminDash() {
       </div>
     </div>` : ''}
 
-    <!-- v47: Password Send — quick reset login password for any staff -->
-    <div class="card" style="margin-bottom:12px;border-left:4px solid #FF6F00">
-      <div style="font-size:13px;font-weight:800;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px">🔑 Send Login Password</div>
-      <div class="form-group">
-        <label class="form-label">Select Staff</label>
-        <select id="adm-pass-staff" class="form-input">
-          <option value="">— Choose Staff —</option>
-          ${(S.staff||[]).map(s => '<option value="'+s.id+'">'+esc(s.name)+' ('+esc(s.email)+')</option>').join('')}
-        </select>
-      </div>
-      <div class="form-group" style="margin-top:6px">
-        <label class="form-label">New Password</label>
-        <input id="adm-pass-val" type="text" class="form-input" placeholder="Enter new password (min 4 chars)" autocomplete="off">
-      </div>
-      <button id="btn-adm-send-pass" class="btn-sm" style="margin-top:8px;background:#FF6F00;color:#fff;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;font-weight:700">
-        <i class="fas fa-paper-plane"></i> Update Password
-      </button>
-    </div>`;
-
-    // v47: Bind password send button
-    document.getElementById('btn-adm-send-pass')?.addEventListener('click', async () => {
-      const staffId = document.getElementById('adm-pass-staff')?.value;
-      const pass    = document.getElementById('adm-pass-val')?.value?.trim();
-      if (!staffId) { toast('Select a staff member', 'error'); return; }
-      if (!pass || pass.length < 4) { toast('Password must be at least 4 characters', 'error'); return; }
-      try {
-        const r = await API.post('/api/staff/' + staffId + '/send-password', { password: pass });
-        toast('Password updated for ' + (r.data?.email || 'staff'), 'success');
-        document.getElementById('adm-pass-val').value = '';
-      } catch (_) { toast('Failed to update password', 'error'); }
-    });
-
+    </div>` : ''}`;
   } catch (e) {
     root.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Failed to load dashboard</p></div>`;
   }

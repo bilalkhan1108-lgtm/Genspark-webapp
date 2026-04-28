@@ -191,6 +191,16 @@ async function ensureDbSchema(db: D1Database) {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_cust_mobile ON customers(mobile)`).run().catch(() => {})
     // v47: warranty brand index for brand-wise reports
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_warranty ON machines(warranty_type, warranty_brand)`).run().catch(() => {})
+    // v48: warranty purchase fields on machines
+    await db.prepare(`ALTER TABLE machines ADD COLUMN purchased_from TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN purchase_invoice_no TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN purchase_date TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN invoice_image_key TEXT`).run().catch(() => {})
+    await db.prepare(`ALTER TABLE machines ADD COLUMN invoice_image_url TEXT`).run().catch(() => {})
+    // v48: default customer_categories setting
+    await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('customer_categories','Salon,Consumer,Retailer,N/A')").run().catch(() => {})
+    // v48: index for customer name search in ledger
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_snap_name ON jobs(snap_name)`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
@@ -770,16 +780,21 @@ app.post('/api/jobs/:id/machines', authMiddleware, async (c) => {
   const qty = parseInt(body.quantity) || 1
   const warrantyType = body.warranty_type || 'out_warranty'
   const warrantyBrand = warrantyType === 'warranty' ? (body.warranty_brand || null) : null
+  // v48: warranty purchase fields
+  const purchasedFrom = warrantyType === 'warranty' ? (body.purchased_from || null) : null
+  const purchaseInvoiceNo = warrantyType === 'warranty' ? (body.purchase_invoice_no || null) : null
+  const purchaseDate = warrantyType === 'warranty' ? (body.purchase_date || null) : null
   // v45: INSERT is the only blocking query — return machineId ASAP
   const result = await c.env.DB.prepare(
-    `INSERT INTO machines(job_id,product_name,product_complaint,charges,quantity,assigned_staff_id,status,warranty_type,warranty_brand)
-     VALUES(?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO machines(job_id,product_name,product_complaint,charges,quantity,assigned_staff_id,status,warranty_type,warranty_brand,purchased_from,purchase_invoice_no,purchase_date)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     jobId, body.product_name, body.product_complaint || null,
     charges, qty,
     body.assigned_staff_id || null,
     'under_repair',
-    warrantyType, warrantyBrand
+    warrantyType, warrantyBrand,
+    purchasedFrom, purchaseInvoiceNo, purchaseDate
   ).run()
   const machineId = result.meta.last_row_id
   // v45: Return IMMEDIATELY — defer status update + history to background
@@ -992,6 +1007,36 @@ app.post('/api/machines/:id/images', authMiddleware, async (c) => {
   await c.env.DB.prepare(
     'INSERT INTO machine_images(machine_id,r2_object_key,url) VALUES(?,?,?)'
   ).bind(machineId, key, url).run()
+  return c.json({ url, key }, 201)
+})
+
+// v48: Upload warranty invoice image — stored in R2 under brand-named folders
+app.post('/api/machines/:id/invoice-image', authMiddleware, async (c) => {
+  const machineId = c.req.param('id')
+  const machine = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(machineId).first<any>()
+  if (!machine) return c.json({ error: 'Machine not found' }, 404)
+  const role = c.get('userRole')
+  const isAdm = roleLevel(role) >= 2
+  if (!isAdm && machine.assigned_staff_id !== c.get('userId'))
+    return c.json({ error: 'Not assigned to this machine' }, 403)
+  const formData = await c.req.formData()
+  const file = formData.get('invoice') as File | null
+  if (!file) return c.json({ error: 'No invoice field' }, 400)
+  // Delete old invoice if exists
+  if (machine.invoice_image_key) {
+    try { await c.env.PRODUCT_IMAGES.delete(machine.invoice_image_key) } catch (_) {}
+  }
+  // Store under brand-named folder: invoices/{brand_lowercase}/{machineId}/{timestamp}-{filename}
+  const brand = (machine.warranty_brand || 'other').toLowerCase().replace(/[^a-z0-9]/g, '_')
+  const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+  const key = `invoices/${brand}/${machineId}/${Date.now()}-${safeFilename}`
+  await c.env.PRODUCT_IMAGES.put(key, await file.arrayBuffer(), {
+    httpMetadata: { contentType: file.type || 'image/jpeg' }
+  })
+  const url = `/api/images/${key}`
+  await c.env.DB.prepare(
+    `UPDATE machines SET invoice_image_key=?, invoice_image_url=?, updated_at=datetime('now') WHERE id=?`
+  ).bind(key, url, machineId).run()
   return c.json({ url, key }, 201)
 })
 
@@ -1494,7 +1539,7 @@ app.get('/api/settings', authMiddleware, adminOnly, async (c) => {
 app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
-  const allowed = ['job_prefix', 'job_seq_digits']
+  const allowed = ['job_prefix', 'job_seq_digits', 'customer_categories']
   for (const k of allowed) {
     if (k in body) {
       await c.env.DB.prepare(
@@ -1629,34 +1674,54 @@ app.get('/api/customers', authMiddleware, async (c) => {
   return c.json(results)
 })
 
-// ── API: Customer History (all jobs by phone) ─────────────────────────────────
+// ── API: Customer History (all jobs by phone OR name) ─────────────────────────
+// v48: supports search by name or mobile — ledger search enhancement
 app.get('/api/customers/history', authMiddleware, async (c) => {
   const mobile = c.req.query('mobile') || ''
-  if (!mobile) return c.json({ error: 'mobile required' }, 400)
-  const { results } = await c.env.DB.prepare(`
+  const name   = c.req.query('name')   || ''
+  if (!mobile && !name) return c.json({ error: 'mobile or name required' }, 400)
+  let q = `
     SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.created_at,
            j.received_amount,
            (SELECT SUM(CASE WHEN status != 'returned' THEN charges * quantity ELSE 0 END) FROM machines WHERE job_id=j.id) AS total_charges,
            (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
            (SELECT GROUP_CONCAT(product_name,', ') FROM machines WHERE job_id=j.id) AS products
-    FROM jobs j
-    WHERE j.snap_mobile=? OR j.snap_mobile2=?
-    ORDER BY j.created_at DESC
-    LIMIT 100
-  `).bind(mobile, mobile).all<any>()
+    FROM jobs j WHERE `
+  const params: any[] = []
+  if (mobile) {
+    q += `(j.snap_mobile=? OR j.snap_mobile2=?)`
+    params.push(mobile, mobile)
+  } else {
+    q += `j.snap_name LIKE ?`
+    params.push(`%${name}%`)
+  }
+  const from = c.req.query('from') || ''
+  const to   = c.req.query('to')   || ''
+  if (from) { q += ` AND DATE(j.created_at)>=?`; params.push(from) }
+  if (to)   { q += ` AND DATE(j.created_at)<=?`; params.push(to) }
+  q += ` ORDER BY j.created_at DESC LIMIT 200`
+  const { results } = await c.env.DB.prepare(q).bind(...params).all<any>()
   return c.json(results)
 })
 
 // ── API: Customer Ledger Export ───────────────────────────────────────────────
 app.get('/api/reports/ledger', authMiddleware, adminOnly, async (c) => {
   const mobile = c.req.query('mobile') || ''
+  const name   = c.req.query('name')   || ''
   const from   = c.req.query('from')   || ''
   const to     = c.req.query('to')     || ''
   const mode   = c.req.query('mode')   || 'A'  // A=summary, B=with machines
-  if (!mobile) return c.json({ error: 'mobile required' }, 400)
+  if (!mobile && !name) return c.json({ error: 'mobile or name required' }, 400)
 
-  let jConds = `WHERE (j.snap_mobile=? OR j.snap_mobile2=?)`
-  const jParams: any[] = [mobile, mobile]
+  let jConds = ''
+  const jParams: any[] = []
+  if (mobile) {
+    jConds = `WHERE (j.snap_mobile=? OR j.snap_mobile2=?)`
+    jParams.push(mobile, mobile)
+  } else {
+    jConds = `WHERE j.snap_name LIKE ?`
+    jParams.push(`%${name}%`)
+  }
   if (from) { jConds += ` AND DATE(j.created_at)>=?`; jParams.push(from) }
   if (to)   { jConds += ` AND DATE(j.created_at)<=?`; jParams.push(to) }
 
@@ -1716,11 +1781,11 @@ app.get('/api/reports/ledger', authMiddleware, adminOnly, async (c) => {
   }
 
   const buf  = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
-  const name = `AES_ledger_${mobile}_${new Date().toISOString().slice(0,10)}.xlsx`
+  const fname = `AES_ledger_${mobile || name}_${new Date().toISOString().slice(0,10)}.xlsx`
   return new Response(buf, {
     headers: {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="${name}"`
+      'Content-Disposition': `attachment; filename="${fname}"`
     }
   })
 })
