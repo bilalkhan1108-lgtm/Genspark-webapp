@@ -1,10 +1,9 @@
-// Service Worker — ADITION ELECTRIC SOLUTION v48
+// Service Worker — ADITION ELECTRIC SOLUTION v49
 // Strategy: Cache-first for static UI · Network-first w/ cache fallback for API
-// v48: Custom categories, ledger name search, warranty purchase fields,
-//      invoice image upload (R2 brand folders), speed boost
-const CACHE_VER   = 'aes-v48';
-const API_CACHE   = 'aes-api-v48';
-const IMG_CACHE   = 'aes-img-v48';
+// v49: Critical crash fix, global error guard, all v48 features
+const CACHE_VER   = 'aes-v49';
+const API_CACHE   = 'aes-api-v49';
+const IMG_CACHE   = 'aes-img-v49';
 
 const STATIC_URLS = [
   '/',

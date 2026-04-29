@@ -1,8 +1,28 @@
 // ╔══════════════════════════════════════════════════════════════════════╗
-// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v48                       ║
-// ║  v48: Custom categories, ledger name search, warranty purchase      ║
-// ║       fields, invoice image upload (R2 brand folders), speed boost  ║
+// ║  ADITION ELECTRIC SOLUTION — PWA Frontend v49                       ║
+// ║  v49: Critical crash fix, global error guard, all v48 features      ║
 // ╚══════════════════════════════════════════════════════════════════════╝
+
+// ── GLOBAL ERROR GUARD ── Prevents blank-screen crashes ──────────────
+window.onerror = function(msg, src, line, col, err) {
+  console.error('[AES] Unhandled error:', msg, 'at', src, line + ':' + col, err);
+  try {
+    var root = document.getElementById('app') || document.body;
+    if (root && (!root.innerHTML || root.innerHTML.trim().length < 20)) {
+      root.innerHTML = '<div style="padding:40px 20px;text-align:center;font-family:system-ui,sans-serif">' +
+        '<div style="font-size:48px;margin-bottom:16px">⚠️</div>' +
+        '<h2 style="color:#E53935;margin-bottom:12px">Something went wrong</h2>' +
+        '<p style="color:#666;margin-bottom:20px;font-size:14px">An error occurred while loading. Please try refreshing.</p>' +
+        '<button onclick="location.reload()" style="background:#1565C0;color:#fff;border:none;padding:12px 32px;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer">Reload App</button>' +
+        '<p style="color:#aaa;font-size:11px;margin-top:16px">' + (msg || 'Unknown error') + '</p></div>';
+    }
+  } catch(e) { /* last-resort: do nothing to avoid infinite loop */ }
+};
+window.addEventListener('unhandledrejection', function(ev) {
+  console.error('[AES] Unhandled promise rejection:', ev.reason);
+});
+// ─────────────────────────────────────────────────────────────────────
+
 ;(function () {
 'use strict';
 
@@ -6317,7 +6337,7 @@ async function loadAdminDash() {
       </div>
     </div>` : ''}
 
-    </div>` : ''}`;
+    `;
   } catch (e) {
     root.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle fa-2x" style="color:#e53935"></i><p>Failed to load dashboard</p></div>`;
   }
