@@ -2743,6 +2743,8 @@ function machineCardHTML(m, currentUserId) {
         ${m.work_done ? `<div style="font-size:12px;color:#2E7D32;margin-top:2px;line-height:1.3">✅ Work: ${esc(m.work_done)}</div>` : ''}
         ${m.return_reason ? `<div style="font-size:12px;color:#E65100;margin-top:2px;line-height:1.3">↩ ${esc(m.return_reason)}</div>` : ''}
         ${m.warranty_type === 'warranty' && m.warranty_brand ? `<div style="font-size:12px;color:#1565C0;margin-top:2px;line-height:1.3;font-weight:700"><i class="fas fa-shield-alt"></i> Warranty: ${esc(m.warranty_brand)}</div>` : ''}
+        ${m.warranty_type === 'warranty' && (m.purchased_from || m.purchase_invoice_no || m.purchase_date) ? `<div style="font-size:11px;color:#7B1FA2;margin-top:2px;line-height:1.4">${m.purchased_from ? `<i class="fas fa-store" style="width:14px"></i> ${esc(m.purchased_from)}` : ''}${m.purchase_invoice_no ? `${m.purchased_from ? ' · ' : ''}<i class="fas fa-file-invoice" style="width:14px"></i> ${esc(m.purchase_invoice_no)}` : ''}${m.purchase_date ? `${(m.purchased_from || m.purchase_invoice_no) ? ' · ' : ''}<i class="fas fa-calendar" style="width:14px"></i> ${m.purchase_date}` : ''}</div>` : ''}
+        ${m.warranty_type === 'warranty' && m.invoice_image_url ? `<div style="margin-top:3px"><img data-auth-src="${m.invoice_image_url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:2px solid #E65100;cursor:pointer" onclick="openImageViewer('${m.invoice_image_url}')" alt="Invoice"></div>` : ''}
         ${m.warranty_type === 'out_warranty' ? `<div style="font-size:11px;color:#999;margin-top:2px"><i class="fas fa-shield-alt" style="opacity:.5"></i> Out of Warranty</div>` : ''}
         ${m.staff_name ? `<div class="machine-staff" style="font-size:12px;color:#888;margin-top:2px"><i class="fas fa-user-cog"></i> ${esc(m.staff_name)}</div>` : ''}
         ${m.status === 'delivered' ? `<div style="font-size:12px;color:#1E88E5;margin-top:3px;font-weight:700"><i class="fas fa-check-double"></i> Delivered ${m.delivery_method === 'courier' ? '📮 Courier' : '🤝 In Person'}${m.delivery_receiver_name ? ' to ' + esc(m.delivery_receiver_name) : ''}${m.delivery_courier_name ? ' via ' + esc(m.delivery_courier_name) : ''}</div>` : ''}
@@ -4070,6 +4072,10 @@ function showAddMachineModal(jobId) {
 function showEditMachineModal(m) {
   const curWarranty = m.warranty_type || 'out_warranty';
   const curBrand = m.warranty_brand || '';
+  const curPurchasedFrom = m.purchased_from || '';
+  const curInvoiceNo = m.purchase_invoice_no || '';
+  const curPurchaseDate = m.purchase_date || '';
+  const hasExistingInvoice = !!(m.invoice_image_url);
   showModal(`
     <h3 class="modal-title"><i class="fas fa-edit" style="color:#FB8C00"></i> Edit Machine</h3>
     <div class="form-group">
@@ -4097,6 +4103,36 @@ function showEditMachineModal(m) {
         <option value="AYTY Pro" ${curBrand==='AYTY Pro'?'selected':''}>AYTY Pro</option>
       </select>
     </div>
+    <!-- v49: Warranty Purchase Details for Edit modal -->
+    <div id="em-purchase-wrap" style="display:${curWarranty==='warranty'?'block':'none'}">
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-store" style="color:#7B1FA2"></i> Purchased From</label>
+        <input id="em-purchased-from" type="text" class="form-input" placeholder="Shop / dealer name" value="${esc(curPurchasedFrom)}">
+      </div>
+      <div class="form-row-2">
+        <div class="form-group">
+          <label class="form-label">Purchase Invoice No.</label>
+          <input id="em-invoice-no" type="text" class="form-input" placeholder="INV-12345" value="${esc(curInvoiceNo)}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Purchase Date</label>
+          <input id="em-purchase-date" type="date" class="form-input" value="${esc(curPurchaseDate)}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label"><i class="fas fa-file-invoice" style="color:#E65100"></i> Invoice Photo <span style="color:#999;font-size:12px">(optional)</span></label>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <label class="img-upload-label" style="flex:1;min-width:160px">
+            <i class="fas fa-camera"></i> ${hasExistingInvoice ? 'Replace' : 'Take / Pick'} Invoice Photo
+            <input id="em-invoice-img" type="file" accept="image/*" capture="environment" style="display:none">
+          </label>
+          <div id="em-invoice-preview" style="display:${hasExistingInvoice ? 'flex' : 'none'};align-items:center;gap:4px">
+            ${hasExistingInvoice ? `<img id="em-invoice-thumb" data-auth-src="${m.invoice_image_url}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100;cursor:pointer" onclick="openImageViewer('${m.invoice_image_url}')">` : `<img id="em-invoice-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100">`}
+            <button id="em-invoice-clear" style="background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
     ${hasSuperRight('view_financials') ? `
     <div class="form-group">
       <label class="form-label">Repair Amount (₹)</label>
@@ -4122,29 +4158,70 @@ function showEditMachineModal(m) {
       <button id="em-save" class="btn-primary">Update</button>
     </div>`);
 
-  // Warranty dropdown toggle
+  // v49: Warranty dropdown toggle — show/hide brand AND purchase fields
   document.getElementById('em-warranty')?.addEventListener('change', e => {
-    const wrap = document.getElementById('em-brand-wrap');
-    if (wrap) wrap.style.display = e.target.value === 'warranty' ? 'block' : 'none';
+    const isWarranty = e.target.value === 'warranty';
+    const brandWrap = document.getElementById('em-brand-wrap');
+    if (brandWrap) brandWrap.style.display = isWarranty ? 'block' : 'none';
+    const purchaseWrap = document.getElementById('em-purchase-wrap');
+    if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
   });
+
+  // v49: Invoice image preview handlers for edit-machine
+  const emInvoiceInput = document.getElementById('em-invoice-img');
+  let emInvoiceNewFile = null;
+  emInvoiceInput?.addEventListener('change', e => {
+    const file = e.target.files[0]; if (!file) return;
+    emInvoiceNewFile = file;
+    const thumb = document.getElementById('em-invoice-thumb');
+    if (thumb) { thumb.src = URL.createObjectURL(file); thumb.removeAttribute('data-auth-src'); thumb.onclick = null; }
+    document.getElementById('em-invoice-preview').style.display = 'flex';
+  });
+  document.getElementById('em-invoice-clear')?.addEventListener('click', () => {
+    if (emInvoiceInput) emInvoiceInput.value = '';
+    emInvoiceNewFile = null;
+    document.getElementById('em-invoice-preview').style.display = 'none';
+  });
+
+  // Load existing invoice thumbnail if present
+  if (hasExistingInvoice) {
+    const thumb = document.getElementById('em-invoice-thumb');
+    if (thumb && thumb.dataset.authSrc) loadAuthMedia(thumb.dataset.authSrc, thumb, 'src');
+  }
 
   document.getElementById('em-save')?.addEventListener('click', async () => {
     const prod = document.getElementById('em-prod')?.value.trim();
     if (!prod) { toast('Product name required', 'error'); return; }
+    const btn = document.getElementById('em-save');
+    if (btn) btn.disabled = true;
     const warrantyType = document.getElementById('em-warranty')?.value || 'out_warranty';
     const warrantyBrand = warrantyType === 'warranty' ? (document.getElementById('em-brand')?.value || null) : null;
+    const purchasedFrom = warrantyType === 'warranty' ? (document.getElementById('em-purchased-from')?.value.trim() || null) : null;
+    const invoiceNo = warrantyType === 'warranty' ? (document.getElementById('em-invoice-no')?.value.trim() || null) : null;
+    const purchaseDate = warrantyType === 'warranty' ? (document.getElementById('em-purchase-date')?.value || null) : null;
     try {
       await API.put(`/api/machines/${m.id}`, {
         product_name:      prod,
         product_complaint: document.getElementById('em-comp')?.value.trim() || null,
         warranty_type: warrantyType,
         warranty_brand: warrantyBrand,
+        purchased_from: purchasedFrom,
+        purchase_invoice_no: invoiceNo,
+        purchase_date: purchaseDate,
         ...(hasSuperRight('view_financials') ? { charges: parseFloat(document.getElementById('em-chg')?.value) || 0 } : {}),
         quantity:          parseInt(document.getElementById('em-qty')?.value) || 1,
         ...(hasSuperRight('manage_machines') ? { assigned_staff_id: document.getElementById('em-staff')?.value || null } : {}),
       });
+      // v49: Upload invoice image if a new file was selected
+      if (emInvoiceNewFile && warrantyType === 'warranty') {
+        try {
+          const fd = new FormData();
+          fd.append('image', emInvoiceNewFile);
+          await API.post(`/api/machines/${m.id}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        } catch (_) { toast('Invoice photo upload failed', 'error'); }
+      }
       closeModal(); toast('Machine updated', 'success'); await loadDetail();
-    } catch (_) { toast('Update failed', 'error'); }
+    } catch (_) { toast('Update failed', 'error'); if (btn) btn.disabled = false; }
   });
 }
 
@@ -4355,6 +4432,13 @@ function jobCardPrintHTML(j) {
           ${m.work_done ? `<div style="font-size:18px;color:#2E7D32;font-weight:600">✅ ${esc(m.work_done)}</div>` : ''}
           ${m.return_reason ? `<div style="font-size:18px;color:#E65100;font-weight:600">↩ ${esc(m.return_reason)}</div>` : ''}
           ${m.warranty_type === 'warranty' && m.warranty_brand ? `<div style="font-size:16px;color:#1565C0;font-weight:700;margin-top:2px"><i class="fas fa-shield-alt"></i> Warranty: ${esc(m.warranty_brand)}</div>` : ''}
+          ${m.warranty_type === 'warranty' && (m.purchased_from || m.purchase_invoice_no || m.purchase_date) ? `
+          <div style="margin-top:4px;background:linear-gradient(135deg,#E3F2FD,#BBDEFB);border-radius:8px;padding:8px 10px;border:1px solid #90CAF9">
+            <div style="font-size:11px;font-weight:800;color:#1565C0;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">📋 Purchase Details</div>
+            ${m.purchased_from ? `<div style="font-size:14px;color:#1a1a2e;line-height:1.4"><span style="color:#7B1FA2;font-weight:700">From:</span> ${esc(m.purchased_from)}</div>` : ''}
+            ${m.purchase_invoice_no ? `<div style="font-size:14px;color:#1a1a2e;line-height:1.4"><span style="color:#7B1FA2;font-weight:700">Invoice:</span> ${esc(m.purchase_invoice_no)}</div>` : ''}
+            ${m.purchase_date ? `<div style="font-size:14px;color:#1a1a2e;line-height:1.4"><span style="color:#7B1FA2;font-weight:700">Date:</span> ${m.purchase_date}</div>` : ''}
+          </div>` : ''}
           <div style="margin-top:3px;font-size:26px;font-weight:800;color:${isReturned?'#aaa':'#1a1a2e'}${isReturned?';text-decoration:line-through':''}">
             ${m.warranty_type === 'warranty' && m.warranty_brand ? `<span style="color:#1565C0;font-size:18px;font-weight:700;margin-right:8px">[${esc(m.warranty_brand)}]</span>` : ''}${fmtRs(lineAmt)}${m.quantity>1?` <span style="color:#999;font-size:18px;font-weight:600">(${fmtRs(m.charges||0)} x ${m.quantity})</span>`:''}
           </div>

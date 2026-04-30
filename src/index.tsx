@@ -938,9 +938,15 @@ app.put('/api/machines/:id', authMiddleware, async (c) => {
 
   const fields: string[] = []
   const vals: any[] = []
-  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges','work_done','return_reason','warranty_type','warranty_brand','delivery_method','delivery_receiver_name','delivery_courier_name']
+  const allowed = ['product_name','product_complaint','quantity','assigned_staff_id','status','charges','work_done','return_reason','warranty_type','warranty_brand','purchased_from','purchase_invoice_no','purchase_date','delivery_method','delivery_receiver_name','delivery_courier_name']
   for (const k of allowed) {
     if (k in body) { fields.push(`${k}=?`); vals.push(body[k]) }
+  }
+  // v49: Clear purchase fields when switching to out_warranty
+  if (body.warranty_type === 'out_warranty') {
+    if (!fields.some(f => f.startsWith('purchased_from'))) { fields.push('purchased_from=?'); vals.push(null) }
+    if (!fields.some(f => f.startsWith('purchase_invoice_no'))) { fields.push('purchase_invoice_no=?'); vals.push(null) }
+    if (!fields.some(f => f.startsWith('purchase_date'))) { fields.push('purchase_date=?'); vals.push(null) }
   }
   if (!fields.length) return c.json({ error: 'Nothing to update' }, 400)
   // v34: set delivered_at timestamp for machine-level delivery
