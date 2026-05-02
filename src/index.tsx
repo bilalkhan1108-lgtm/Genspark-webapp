@@ -1046,6 +1046,24 @@ app.post('/api/machines/:id/invoice-image', authMiddleware, async (c) => {
   return c.json({ url, key }, 201)
 })
 
+// v49.3: Delete warranty invoice image
+app.delete('/api/machines/:id/invoice-image', authMiddleware, async (c) => {
+  const machineId = c.req.param('id')
+  const machine = await c.env.DB.prepare('SELECT * FROM machines WHERE id=?').bind(machineId).first<any>()
+  if (!machine) return c.json({ error: 'Machine not found' }, 404)
+  const role = c.get('userRole')
+  const isAdm = roleLevel(role) >= 2
+  if (!isAdm && machine.assigned_staff_id !== c.get('userId'))
+    return c.json({ error: 'Not assigned to this machine' }, 403)
+  if (machine.invoice_image_key) {
+    try { await c.env.PRODUCT_IMAGES.delete(machine.invoice_image_key) } catch (_) {}
+  }
+  await c.env.DB.prepare(
+    `UPDATE machines SET invoice_image_key=NULL, invoice_image_url=NULL, updated_at=datetime('now') WHERE id=?`
+  ).bind(machineId).run()
+  return c.json({ ok: true })
+})
+
 // Serve image from R2 — authenticated, CORS headers for html2canvas
 app.get('/api/images/*', authMiddleware, async (c) => {
   const key = c.req.path.slice('/api/images/'.length)
@@ -1810,6 +1828,8 @@ app.get('/api/reports/warranty-brand', authMiddleware, adminOnly, async (c) => {
            m.product_name, m.product_complaint, m.work_done,
            m.status AS machine_status, m.charges, m.quantity,
            m.warranty_brand AS brand,
+           m.purchased_from, m.purchase_invoice_no, m.purchase_date,
+           m.invoice_image_url,
            u.name AS assigned_staff,
            DATE(m.created_at) AS date_added,
            DATE(j.created_at) AS job_date
@@ -1841,6 +1861,10 @@ app.get('/api/reports/warranty-brand', authMiddleware, adminOnly, async (c) => {
     'Complaint': r.product_complaint || '',
     'Work Done': r.work_done || '',
     'Brand': r.brand || '',
+    'Purchased From': r.purchased_from || '',
+    'Invoice No.': r.purchase_invoice_no || '',
+    'Purchase Date': r.purchase_date || '',
+    'Invoice Image': r.invoice_image_url ? `${c.req.url.split('/api/')[0]}${r.invoice_image_url}` : '',
     'Machine Status': r.machine_status,
     'Charges': r.charges || 0,
     'Qty': r.quantity || 1,

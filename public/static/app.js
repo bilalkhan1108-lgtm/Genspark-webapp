@@ -3267,7 +3267,7 @@ function bindDetail(j) {
   // WhatsApp Reminder (admin only)
   document.getElementById('btn-wa-reminder')?.addEventListener('click', () => {
     const phone   = (j.snap_mobile || '').replace(/\D/g, '');
-    const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+    const waPhone = _waNum(phone);
     const balance = Math.max(0, (j.total_charges||0) - (j.discount||0) - (j.received_amount||0));
     const products = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
     const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(waPhone.replace(/^91/, ''))}`;
@@ -3523,7 +3523,7 @@ async function showJobHistory(j) {
   // Share history via WhatsApp
   document.getElementById('jh-share-btn')?.addEventListener('click', () => {
     const phone = (j.snap_mobile || '').replace(/\D/g, '');
-    const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+    const waPhone = _waNum(phone);
     let histText = `⚡ *ADITION ELECTRIC*\n*Job #${j.id} History*\n\n`;
     const el = document.getElementById('jh-list');
     if (el) {
@@ -4171,6 +4171,7 @@ function showEditMachineModal(m) {
   // v49: Invoice image preview handlers for edit-machine
   const emInvoiceInput = document.getElementById('em-invoice-img');
   let emInvoiceNewFile = null;
+  let emInvoiceDeleted = false;
   emInvoiceInput?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
     emInvoiceNewFile = file;
@@ -4181,6 +4182,7 @@ function showEditMachineModal(m) {
   document.getElementById('em-invoice-clear')?.addEventListener('click', () => {
     if (emInvoiceInput) emInvoiceInput.value = '';
     emInvoiceNewFile = null;
+    emInvoiceDeleted = true;
     document.getElementById('em-invoice-preview').style.display = 'none';
   });
 
@@ -4220,6 +4222,11 @@ function showEditMachineModal(m) {
           fd.append('image', emInvoiceNewFile);
           await API.post(`/api/machines/${m.id}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
         } catch (_) { toast('Invoice photo upload failed', 'error'); }
+      } else if (emInvoiceDeleted && !emInvoiceNewFile) {
+        // User clicked clear on existing invoice — delete it from server
+        try {
+          await API.delete(`/api/machines/${m.id}/invoice-image`);
+        } catch (_) { /* silent */ }
       }
       closeModal(); toast('Machine updated', 'success'); await loadDetail();
     } catch (_) { toast('Update failed', 'error'); if (btn) btn.disabled = false; }
@@ -4798,7 +4805,7 @@ async function generateAndShareJobCard(j, shareMode) {
     const jobFileName = `Job_${j.id}.jpg`;
     const text    = shareText(j, false);
     const phone   = (j.snap_mobile || '').replace(/\D/g, '');
-    const waPhone = phone.startsWith('91') ? phone : (phone ? '91' + phone : '');
+    const waPhone = _waNum(phone);
     const waText  = encodeURIComponent(text);
     const waUrl   = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
