@@ -2649,6 +2649,9 @@ function renderDetail() {
       <button id="btn-del-job" class="action-btn" style="background:#E53935">
         <i class="fas fa-trash"></i><span>Delete</span>
       </button>` : ''}
+      <button id="btn-job-logs" class="action-btn" style="background:#7B1FA2">
+        <i class="fas fa-clipboard-list"></i><span>Job Logs</span>
+      </button>
     </div>
 
     <!-- Machines List -->
@@ -3076,7 +3079,8 @@ function bindDetail(j) {
   // WhatsApp share (admin only)
   document.getElementById('btn-share')?.addEventListener('click', () => generateAndShareJobCard(j, true));
 
-  // v43: Job History button removed from UI — function still available via showJobHistory(j) for modals
+  // v49.4: Job Logs button — shows full job lifecycle timeline
+  document.getElementById('btn-job-logs')?.addEventListener('click', () => showJobHistory(j));
 
   // Print Address Label (admin only)
   document.getElementById('btn-print-addr')?.addEventListener('click', () => printAddressLabel(j));
@@ -4245,7 +4249,7 @@ function showDeliveryModal(j) {
     </div>
     <div class="form-group">
       <label class="form-label">Receiver Name <span style="color:#999;font-size:12px">(optional)</span></label>
-      <input id="dm-rname" type="text" class="form-input" placeholder="Person who collected the device">
+      <input id="dm-rname" type="text" class="form-input" value="Self" placeholder="Person who collected the device">
     </div>
     <div class="form-group">
       <label class="form-label">Receiver Mobile <span style="color:#999;font-size:12px">(optional)</span></label>
@@ -4253,7 +4257,7 @@ function showDeliveryModal(j) {
     </div>
     <div class="form-group" id="courier-name-wrap">
       <label class="form-label">Courier Name <span style="color:#999;font-size:12px">(optional)</span></label>
-      <input id="dm-courier" type="text" class="form-input" placeholder="e.g. DTDC, BlueDart">
+      <input id="dm-courier" type="text" class="form-input" value="" placeholder="e.g. DTDC, BlueDart">
     </div>
     <div class="form-group" id="courier-track-wrap">
       <label class="form-label">Tracking ID <span style="color:#999;font-size:12px">(optional)</span></label>
@@ -4288,15 +4292,26 @@ function showDeliveryModal(j) {
     </div>`);
 
   // Show/hide courier-specific optional fields based on method selection
+  // v49.4: Set default values — "Self" for in-person receiver, "MARK" for courier name
   const toggleCourierFields = (method) => {
     const show = method === 'courier';
     ['courier-name-wrap','courier-track-wrap','courier-addr-wrap'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.opacity = show ? '1' : '0.5';
     });
+    // Set defaults only if user hasn't manually edited them
+    const rnameEl = document.getElementById('dm-rname');
+    const courierEl = document.getElementById('dm-courier');
+    if (method === 'in_person') {
+      if (rnameEl && (!rnameEl.value || rnameEl.value === '')) rnameEl.value = 'Self';
+      if (courierEl && courierEl.value === 'MARK') courierEl.value = '';
+    } else {
+      if (courierEl && (!courierEl.value || courierEl.value === '')) courierEl.value = 'MARK';
+      if (rnameEl && rnameEl.value === 'Self') rnameEl.value = '';
+    }
   };
   document.getElementById('dm-method')?.addEventListener('change', e => toggleCourierFields(e.target.value));
-  toggleCourierFields('in_person'); // default dim courier fields
+  toggleCourierFields('in_person'); // default dim courier fields + set "Self"
 
   document.getElementById('dm-confirm')?.addEventListener('click', async () => {
     const rname = document.getElementById('dm-rname')?.value.trim() || null;
@@ -5762,6 +5777,39 @@ function settingsHTML() {
         <button id="btn-cat-add" class="btn-sm btn-blue" style="white-space:nowrap"><i class="fas fa-plus"></i> Add</button>
       </div>
     </div>
+    <!-- v49.4: Add Customer Manually -->
+    <div class="card" style="margin-bottom:12px" id="add-customer-card">
+      <div class="section-title"><i class="fas fa-user-plus" style="color:#43A047"></i> Add Customer</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Add a new customer without creating a job</div>
+      <div class="form-group">
+        <label class="form-label">Mobile No. <span class="req">*</span></label>
+        <input id="ac-mobile" type="tel" class="form-input" placeholder="10-digit mobile number" inputmode="numeric" maxlength="15">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Alternate Mobile</label>
+        <input id="ac-mobile2" type="tel" class="form-input" placeholder="Alternate number (optional)" inputmode="numeric" maxlength="15">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Name <span class="req">*</span></label>
+        <input id="ac-name" type="text" class="form-input" placeholder="Customer name" maxlength="100">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Address</label>
+        <textarea id="ac-address" class="form-input" rows="2" placeholder="Address (optional)"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Category</label>
+        <select id="ac-category" class="form-input">
+          ${(S.customerCategories||['Salon','Consumer','Retailer','N/A']).map(c => '<option value="'+esc(c)+'">'+esc(c)+'</option>').join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Note</label>
+        <textarea id="ac-note" class="form-input" rows="2" placeholder="Any notes about this customer (optional)"></textarea>
+      </div>
+      <button id="btn-ac-save" class="btn-sm btn-blue" style="width:100%;padding:10px;font-size:14px"><i class="fas fa-save"></i> Save Customer</button>
+      <div id="ac-result" style="display:none;margin-top:10px;padding:10px;border-radius:8px;font-size:13px"></div>
+    </div>
     <div class="settings-item" id="set-cleanup">
       <div>
         <div class="settings-label"><i class="fas fa-broom settings-icon" style="color:#FB8C00"></i> Cleanup Old Records</div>
@@ -5902,6 +5950,49 @@ function bindSettings() {
     });
     document.getElementById('cat-new')?.addEventListener('keypress', e => {
       if (e.key === 'Enter') document.getElementById('btn-cat-add')?.click();
+    });
+
+    // v49.4: Add Customer manually
+    document.getElementById('btn-ac-save')?.addEventListener('click', async () => {
+      const mobile = (document.getElementById('ac-mobile')?.value || '').replace(/\D/g, '').trim();
+      const name = (document.getElementById('ac-name')?.value || '').trim();
+      if (!mobile || mobile.length < 10) { toast('Enter a valid 10-digit mobile number', 'error'); return; }
+      if (!name) { toast('Customer name is required', 'error'); return; }
+      const btn = document.getElementById('btn-ac-save');
+      if (btn) btn.disabled = true;
+      try {
+        const r = await API.post('/api/customers', {
+          mobile,
+          mobile2: (document.getElementById('ac-mobile2')?.value || '').replace(/\D/g, '').trim() || null,
+          name,
+          address: document.getElementById('ac-address')?.value.trim() || null,
+          category: document.getElementById('ac-category')?.value || 'Salon',
+          note: document.getElementById('ac-note')?.value.trim() || null,
+        });
+        const resEl = document.getElementById('ac-result');
+        if (resEl) {
+          resEl.style.display = 'block';
+          resEl.style.background = '#E8F5E9';
+          resEl.style.color = '#2E7D32';
+          resEl.innerHTML = `<i class="fas fa-check-circle"></i> Customer <b>${esc(name)}</b> (${mobile}) saved successfully!`;
+        }
+        // Clear form
+        ['ac-mobile','ac-mobile2','ac-name','ac-address','ac-note'].forEach(id => {
+          const el = document.getElementById(id); if (el) el.value = '';
+        });
+        const catSel = document.getElementById('ac-category'); if (catSel) catSel.selectedIndex = 0;
+        toast('Customer added ✅', 'success');
+      } catch (e) {
+        const msg = e?.response?.data?.error || 'Failed to save customer';
+        toast(msg, 'error');
+        const resEl = document.getElementById('ac-result');
+        if (resEl) {
+          resEl.style.display = 'block';
+          resEl.style.background = '#FFEBEE';
+          resEl.style.color = '#C62828';
+          resEl.innerHTML = `<i class="fas fa-exclamation-circle"></i> ${esc(msg)}`;
+        }
+      } finally { if (btn) btn.disabled = false; }
     });
 
     document.getElementById('btn-save-prefix')?.addEventListener('click', async () => {

@@ -201,6 +201,8 @@ async function ensureDbSchema(db: D1Database) {
     await db.prepare("INSERT OR IGNORE INTO app_settings(key,value) VALUES('customer_categories','Salon,Consumer,Retailer,N/A')").run().catch(() => {})
     // v48: index for customer name search in ledger
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_snap_name ON jobs(snap_name)`).run().catch(() => {})
+    // v49.4: note column on customers for manual customer entry
+    await db.prepare(`ALTER TABLE customers ADD COLUMN note TEXT`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
@@ -333,6 +335,32 @@ app.get('/api/customers/by-mobile', authMiddleware, async (c) => {
     'SELECT * FROM customers WHERE mobile=?'
   ).bind(mobile).first<any>()
   return c.json(cust || null)
+})
+
+// v49.4: Manual customer creation from Settings
+app.post('/api/customers', authMiddleware, adminOnly, async (c) => {
+  let body: any
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const mobile = (body.mobile || '').replace(/\D/g, '').trim()
+  const name = (body.name || '').trim()
+  if (!mobile || mobile.length < 10) return c.json({ error: 'Valid mobile number required (min 10 digits)' }, 400)
+  if (!name) return c.json({ error: 'Customer name required' }, 400)
+  const mobile2 = (body.mobile2 || '').replace(/\D/g, '').trim() || null
+  const address = (body.address || '').trim() || null
+  const category = (body.category || 'Salon').trim()
+  const note = (body.note || '').trim() || null
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO customers(name, mobile, mobile2, address, category, note) VALUES(?,?,?,?,?,?)
+       ON CONFLICT(mobile) DO UPDATE SET
+         name=excluded.name, mobile2=excluded.mobile2,
+         address=excluded.address, category=excluded.category, note=excluded.note, updated_at=datetime('now')`
+    ).bind(name, mobile, mobile2, address, category, note).run()
+    const cust = await c.env.DB.prepare('SELECT * FROM customers WHERE mobile=?').bind(mobile).first<any>()
+    return c.json(cust, 201)
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Failed to create customer' }, 500)
+  }
 })
 
 // ── API: Dashboard Analytics ──────────────────────────────────────────────────
