@@ -853,6 +853,80 @@ function compressImage(file, maxW = 1080, quality = 0.82) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// v49.5: AI AUTO-ANALYZE — Gemini-powered product & invoice recognition
+// ─────────────────────────────────────────────────────────────────────────────
+async function aiAnalyzeProduct(file, productInputId) {
+  const inp = document.getElementById(productInputId);
+  if (!inp || !file) return;
+  // Show analyzing indicator
+  const origPlaceholder = inp.placeholder;
+  inp.placeholder = '🤖 AI analyzing image…';
+  inp.style.borderColor = '#7C4DFF';
+  try {
+    const compressed = await compressImage(file, 800, 0.75);
+    const fd = new FormData();
+    fd.append('image', compressed);
+    const r = await API.post('/api/ai/analyze-product', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const d = r.data;
+    if (d.product_name && d.confidence >= 0.6 && !inp.value.trim()) {
+      inp.value = d.product_name;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      toast(`🤖 AI: ${d.product_name} (${Math.round(d.confidence * 100)}%)`, 'success');
+    } else if (d.product_name && d.confidence >= 0.6 && inp.value.trim()) {
+      // Field already has a value — show suggestion but don't overwrite
+      toast(`🤖 AI suggests: ${d.product_name}`, 'info');
+    } else if (d.error) {
+      console.warn('AI analyze-product:', d.error);
+    }
+  } catch (e) {
+    // Silent fail — AI is optional
+    console.warn('AI product analysis failed:', e?.response?.data?.error || e.message);
+  } finally {
+    inp.placeholder = origPlaceholder;
+    inp.style.borderColor = '';
+  }
+}
+
+async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDateId) {
+  const pfEl = document.getElementById(purchasedFromId);
+  const inEl = document.getElementById(invoiceNoId);
+  const pdEl = document.getElementById(purchaseDateId);
+  if (!file || (!pfEl && !inEl && !pdEl)) return;
+  // Show indicator on first available field
+  const indicator = pfEl || inEl || pdEl;
+  const origPlaceholder = indicator.placeholder;
+  indicator.placeholder = '🤖 AI reading invoice…';
+  indicator.style.borderColor = '#7C4DFF';
+  try {
+    const compressed = await compressImage(file, 800, 0.75);
+    const fd = new FormData();
+    fd.append('image', compressed);
+    const r = await API.post('/api/ai/analyze-invoice', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const d = r.data;
+    let filled = [];
+    if (d.purchased_from && pfEl && !pfEl.value.trim()) { pfEl.value = d.purchased_from; filled.push('Seller'); }
+    if (d.invoice_no && inEl && !inEl.value.trim()) { inEl.value = d.invoice_no; filled.push('Invoice No'); }
+    if (d.purchase_date && pdEl && !pdEl.value) { pdEl.value = d.purchase_date; filled.push('Date'); }
+    if (filled.length) {
+      toast(`🤖 AI extracted: ${filled.join(', ')}`, 'success');
+    } else if (d.error) {
+      console.warn('AI analyze-invoice:', d.error);
+    }
+  } catch (e) {
+    console.warn('AI invoice analysis failed:', e?.response?.data?.error || e.message);
+  } finally {
+    indicator.placeholder = origPlaceholder;
+    indicator.style.borderColor = '';
+  }
+}
+
+// AI learn — send user corrections after save
+function aiLearnProduct(productName, complaint, charges, brand, model, category) {
+  if (!productName) return;
+  API.post('/api/ai/learn', { product_name: productName, product_complaint: complaint, charges: charges, brand: brand, model: model, category: category }).catch(() => {});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AUDIO RECORDER (hardware-accelerated Web Audio API)
 // ─────────────────────────────────────────────────────────────────────────────
 async function startAudioRecorder(onData) {
@@ -2248,26 +2322,30 @@ function bindNewJob() {
     njUpdateCTags(val);
   }, 150));
 
-  // Image preview (instant blob URL)
+  // Image preview (instant blob URL) + v49.5 AI auto-analyze
   const imgInput = document.getElementById('nj-img');
   imgInput?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
     const blobUrl = URL.createObjectURL(file);
     document.getElementById('nj-img-thumb').src = blobUrl;
     document.getElementById('nj-img-preview').style.display = 'flex';
+    // v49.5: AI auto-analyze product image
+    aiAnalyzeProduct(file, 'nj-product');
   });
   document.getElementById('nj-img-clear')?.addEventListener('click', () => {
     if (imgInput) imgInput.value = '';
     document.getElementById('nj-img-preview').style.display = 'none';
   });
 
-  // v48: Invoice image preview handlers
+  // v48: Invoice image preview handlers + v49.5 AI auto-read
   const invoiceInput = document.getElementById('nj-invoice-img');
   invoiceInput?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
     const blobUrl = URL.createObjectURL(file);
     document.getElementById('nj-invoice-thumb').src = blobUrl;
     document.getElementById('nj-invoice-preview').style.display = 'flex';
+    // v49.5: AI auto-read invoice fields
+    aiAnalyzeInvoice(file, 'nj-purchased-from', 'nj-invoice-no', 'nj-purchase-date');
   });
   document.getElementById('nj-invoice-clear')?.addEventListener('click', () => {
     if (invoiceInput) invoiceInput.value = '';
@@ -2400,6 +2478,8 @@ function bindNewJob() {
             })());
           }
           if (uploads.length) await Promise.allSettled(uploads);
+          // v49.5: AI learning — store product data for future predictions
+          aiLearnProduct(machData.product_name, machData.product_complaint, machData.charges, machData.warranty_brand, null, null);
           // Silently refresh detail if still on this job
           if (S.jobId === jid && S.view === 'detail') loadDetail();
         } catch (_) {
@@ -2511,7 +2591,8 @@ function renderDetail() {
       <div class="info-row">
         <i class="fas fa-user info-icon" style="color:${color}"></i>
         <span class="info-val fw-bold">${esc(j.snap_name)}</span>
-        ${j.snap_category ? `<span style="background:#E8EAF6;color:#3949AB;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;margin-left:8px">${esc(j.snap_category)}</span>` : ''}
+        <button id="btn-save-contact" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:#1E88E5;border-radius:50%;color:#fff;border:none;cursor:pointer;font-size:12px;margin-left:6px;flex-shrink:0;box-shadow:0 2px 6px rgba(30,136,229,.4)" title="Save to Contacts"><i class="fas fa-address-book"></i></button>
+        ${j.snap_category ? `<span style="background:#E8EAF6;color:#3949AB;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;margin-left:4px">${esc(j.snap_category)}</span>` : ''}
       </div>
       ${hasSuperRight('view_jobs') ? `
       <div class="info-row" style="flex-wrap:wrap;gap:6px">
@@ -3087,6 +3168,30 @@ function bindDetail(j) {
 
   // Customer History (admin only)
   document.getElementById('btn-cust-history')?.addEventListener('click', () => showCustomerHistory(j.snap_mobile, j.snap_name));
+
+  // v49.5: Save Contact — generates vCard with name, mobiles, address, category as group
+  document.getElementById('btn-save-contact')?.addEventListener('click', () => {
+    const name = j.snap_name || 'Customer';
+    const mob  = (j.snap_mobile || '').replace(/\D/g, '');
+    const mob2 = (j.snap_mobile2 || '').replace(/\D/g, '');
+    const addr = j.snap_address || '';
+    const cat  = j.snap_category || '';
+    const telMob = mob.length === 10 ? '+91' + mob : (mob.startsWith('91') && mob.length === 12 ? '+' + mob : '+91' + mob);
+    const telMob2 = mob2 ? (mob2.length === 10 ? '+91' + mob2 : (mob2.startsWith('91') && mob2.length === 12 ? '+' + mob2 : '+91' + mob2)) : '';
+    let vcard = `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\nN:${name};;;;\r\n`;
+    vcard += `TEL;TYPE=CELL:${telMob}\r\n`;
+    if (telMob2) vcard += `TEL;TYPE=CELL:${telMob2}\r\n`;
+    if (addr) vcard += `ADR;TYPE=HOME:;;${addr.replace(/\n/g, ' ')};;;;\r\n`;
+    if (cat) vcard += `CATEGORIES:${cat}\r\nX-GOOGLE-LABEL:${cat}\r\nX-ADDRESSBOOKSERVER-GROUP:${cat}\r\n`;
+    vcard += `ORG:AES - ${cat || 'Customer'}\r\nNOTE:Added from ADITION ELECTRIC SOLUTION\r\nEND:VCARD`;
+    const blob = new Blob([vcard], { type: 'text/vcard;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${name.replace(/[^a-zA-Z0-9 ]/g, '_')}.vcf`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast('Contact file downloaded — open to save to phone', 'success');
+  });
 
   // Edit Customer (admin only)
   document.getElementById('btn-edit-customer')?.addEventListener('click', () => showEditCustomerModal(j));
@@ -3905,12 +4010,14 @@ function showAddMachineModal(jobId) {
     if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
   });
 
-  // v48: Invoice image preview handlers for add-machine
+  // v48: Invoice image preview handlers for add-machine + v49.5 AI auto-read
   const amInvoiceInput = document.getElementById('am-invoice-img');
   amInvoiceInput?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
     document.getElementById('am-invoice-thumb').src = URL.createObjectURL(file);
     document.getElementById('am-invoice-preview').style.display = 'flex';
+    // v49.5: AI auto-read invoice fields
+    aiAnalyzeInvoice(file, 'am-purchased-from', 'am-invoice-no', 'am-purchase-date');
   });
   document.getElementById('am-invoice-clear')?.addEventListener('click', () => {
     if (amInvoiceInput) amInvoiceInput.value = '';
@@ -3933,12 +4040,14 @@ function showAddMachineModal(jobId) {
     updateAmountTiles(val);
   }, 150));
 
-  // Image preview (instant)
+  // Image preview (instant) + v49.5 AI auto-analyze
   document.getElementById('am-img')?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
     const blobUrl = URL.createObjectURL(file);
     document.getElementById('am-img-thumb').src = blobUrl;
     document.getElementById('am-img-preview').style.display = 'flex';
+    // v49.5: AI auto-analyze product image
+    aiAnalyzeProduct(file, 'am-prod');
   });
   document.getElementById('am-img-clear')?.addEventListener('click', () => {
     const inp = document.getElementById('am-img'); if (inp) inp.value = '';
@@ -4062,6 +4171,8 @@ function showAddMachineModal(jobId) {
           })());
         }
         if (uploads.length) await Promise.allSettled(uploads);
+        // v49.5: AI learning — store product data for future predictions
+        aiLearnProduct(prod, complaint, charges, warrantyBrand, null, null);
         // Refresh detail to show real data
         if (S.jobId === jobId && S.view === 'detail') loadDetail();
       } catch (_) {
@@ -4172,7 +4283,7 @@ function showEditMachineModal(m) {
     if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
   });
 
-  // v49: Invoice image preview handlers for edit-machine
+  // v49: Invoice image preview handlers for edit-machine + v49.5 AI auto-read
   const emInvoiceInput = document.getElementById('em-invoice-img');
   let emInvoiceNewFile = null;
   let emInvoiceDeleted = false;
@@ -4182,6 +4293,8 @@ function showEditMachineModal(m) {
     const thumb = document.getElementById('em-invoice-thumb');
     if (thumb) { thumb.src = URL.createObjectURL(file); thumb.removeAttribute('data-auth-src'); thumb.onclick = null; }
     document.getElementById('em-invoice-preview').style.display = 'flex';
+    // v49.5: AI auto-read invoice fields
+    aiAnalyzeInvoice(file, 'em-purchased-from', 'em-invoice-no', 'em-purchase-date');
   });
   document.getElementById('em-invoice-clear')?.addEventListener('click', () => {
     if (emInvoiceInput) emInvoiceInput.value = '';
@@ -4232,6 +4345,8 @@ function showEditMachineModal(m) {
           await API.delete(`/api/machines/${m.id}/invoice-image`);
         } catch (_) { /* silent */ }
       }
+      // v49.5: AI learning — store product data for future predictions
+      aiLearnProduct(prod, document.getElementById('em-comp')?.value.trim(), document.getElementById('em-chg')?.value, warrantyBrand, null, null);
       closeModal(); toast('Machine updated', 'success'); await loadDetail();
     } catch (_) { toast('Update failed', 'error'); if (btn) btn.disabled = false; }
   });
@@ -4292,25 +4407,42 @@ function showDeliveryModal(j) {
     </div>`);
 
   // Show/hide courier-specific optional fields based on method selection
-  // v49.4: Set default values — "Self" for in-person receiver, "MARK" for courier name
+  // v49.5: Default values with auto-clear on focus — "Self" for receiver, "MARK" for courier
+  let _dmRnameEdited = false, _dmCourierEdited = false;
   const toggleCourierFields = (method) => {
     const show = method === 'courier';
     ['courier-name-wrap','courier-track-wrap','courier-addr-wrap'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.opacity = show ? '1' : '0.5';
     });
-    // Set defaults only if user hasn't manually edited them
     const rnameEl = document.getElementById('dm-rname');
     const courierEl = document.getElementById('dm-courier');
     if (method === 'in_person') {
-      if (rnameEl && (!rnameEl.value || rnameEl.value === '')) rnameEl.value = 'Self';
-      if (courierEl && courierEl.value === 'MARK') courierEl.value = '';
+      if (rnameEl && !_dmRnameEdited) { rnameEl.value = 'Self'; rnameEl.style.color = '#999'; }
+      if (courierEl && !_dmCourierEdited) { courierEl.value = ''; }
     } else {
-      if (courierEl && (!courierEl.value || courierEl.value === '')) courierEl.value = 'MARK';
-      if (rnameEl && rnameEl.value === 'Self') rnameEl.value = '';
+      if (courierEl && !_dmCourierEdited) { courierEl.value = 'MARK'; courierEl.style.color = '#999'; }
+      if (rnameEl && !_dmRnameEdited) { rnameEl.value = ''; }
     }
   };
-  document.getElementById('dm-method')?.addEventListener('change', e => toggleCourierFields(e.target.value));
+  // Auto-clear default on first focus, let user type freely
+  const rnameEl = document.getElementById('dm-rname');
+  const courierEl = document.getElementById('dm-courier');
+  rnameEl?.addEventListener('focus', () => {
+    if (!_dmRnameEdited && rnameEl.value === 'Self') { rnameEl.value = ''; rnameEl.style.color = ''; }
+  });
+  rnameEl?.addEventListener('blur', () => {
+    if (!rnameEl.value.trim()) { _dmRnameEdited = false; rnameEl.value = 'Self'; rnameEl.style.color = '#999'; }
+  });
+  rnameEl?.addEventListener('input', () => { _dmRnameEdited = true; rnameEl.style.color = ''; });
+  courierEl?.addEventListener('focus', () => {
+    if (!_dmCourierEdited && courierEl.value === 'MARK') { courierEl.value = ''; courierEl.style.color = ''; }
+  });
+  courierEl?.addEventListener('blur', () => {
+    if (!courierEl.value.trim()) { _dmCourierEdited = false; courierEl.value = 'MARK'; courierEl.style.color = '#999'; }
+  });
+  courierEl?.addEventListener('input', () => { _dmCourierEdited = true; courierEl.style.color = ''; });
+  document.getElementById('dm-method')?.addEventListener('change', e => { _dmRnameEdited = false; _dmCourierEdited = false; toggleCourierFields(e.target.value); });
   toggleCourierFields('in_person'); // default dim courier fields + set "Self"
 
   document.getElementById('dm-confirm')?.addEventListener('click', async () => {
@@ -5810,6 +5942,23 @@ function settingsHTML() {
       <button id="btn-ac-save" class="btn-sm btn-blue" style="width:100%;padding:10px;font-size:14px"><i class="fas fa-save"></i> Save Customer</button>
       <div id="ac-result" style="display:none;margin-top:10px;padding:10px;border-radius:8px;font-size:13px"></div>
     </div>
+    <!-- v49.5: Gemini AI Configuration -->
+    <div class="card" style="margin-bottom:12px" id="ai-config-card">
+      <div class="section-title"><i class="fas fa-robot" style="color:#7C4DFF"></i> AI Product Recognition</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Gemini AI auto-identifies products from photos and reads invoice details. Get a free API key from <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#1E88E5">Google AI Studio</a>.</div>
+      <div class="form-group">
+        <label class="form-label">Gemini API Key</label>
+        <div style="display:flex;gap:8px">
+          <input id="ai-gemini-key" type="password" class="form-input" placeholder="AIzaSy…" style="flex:1;font-family:monospace;font-size:13px" autocomplete="off">
+          <button id="btn-ai-key-toggle" type="button" style="background:none;border:1px solid #ddd;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:14px;color:#888" title="Show/hide key"><i class="fas fa-eye"></i></button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="btn-ai-key-save" class="btn-sm btn-blue" style="flex:1"><i class="fas fa-save"></i> Save Key</button>
+        <button id="btn-ai-key-test" class="btn-sm" style="flex:1;background:#43A047;color:#fff;border:none;border-radius:8px;cursor:pointer"><i class="fas fa-flask"></i> Test</button>
+      </div>
+      <div id="ai-key-status" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:12px"></div>
+    </div>
     <div class="settings-item" id="set-cleanup">
       <div>
         <div class="settings-label"><i class="fas fa-broom settings-icon" style="color:#FB8C00"></i> Cleanup Old Records</div>
@@ -6004,6 +6153,66 @@ function bindSettings() {
         await API.put('/api/settings', { job_prefix: prefix, job_seq_digits: String(digits) });
         toast(`Format saved: ${prefix}-${String(1).padStart(digits, '0')} ✅`, 'success');
       } catch (_) { toast('Failed to save', 'error'); }
+    });
+
+    // v49.5: Gemini AI Key management
+    // Load existing key (masked)
+    API.get('/api/settings').then(r => {
+      const key = r.data?.gemini_api_key;
+      if (key) {
+        const inp = document.getElementById('ai-gemini-key');
+        if (inp) inp.value = key.slice(0, 6) + '•'.repeat(Math.max(0, key.length - 10)) + key.slice(-4);
+        const st = document.getElementById('ai-key-status');
+        if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> API key configured'; }
+      }
+    }).catch(() => {});
+
+    // Toggle show/hide
+    document.getElementById('btn-ai-key-toggle')?.addEventListener('click', () => {
+      const inp = document.getElementById('ai-gemini-key');
+      if (!inp) return;
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+      document.querySelector('#btn-ai-key-toggle i').className = inp.type === 'password' ? 'fas fa-eye' : 'fas fa-eye-slash';
+    });
+
+    // Clear masked value on focus so user can paste new key
+    document.getElementById('ai-gemini-key')?.addEventListener('focus', function() {
+      if (this.value.includes('•')) this.value = '';
+    });
+
+    // Save key
+    document.getElementById('btn-ai-key-save')?.addEventListener('click', async () => {
+      const key = document.getElementById('ai-gemini-key')?.value.trim();
+      if (!key || key.includes('•')) { toast('Paste your Gemini API key', 'error'); return; }
+      if (!key.startsWith('AIza')) { toast('Invalid key format — should start with AIza…', 'error'); return; }
+      try {
+        await API.put('/api/settings', { gemini_api_key: key });
+        toast('Gemini API key saved ✅', 'success');
+        const st = document.getElementById('ai-key-status');
+        if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> API key saved successfully'; }
+        // Mask the displayed key
+        const inp = document.getElementById('ai-gemini-key');
+        if (inp) { inp.type = 'password'; inp.value = key.slice(0, 6) + '•'.repeat(Math.max(0, key.length - 10)) + key.slice(-4); }
+      } catch (_) { toast('Failed to save API key', 'error'); }
+    });
+
+    // Test key
+    document.getElementById('btn-ai-key-test')?.addEventListener('click', async () => {
+      const st = document.getElementById('ai-key-status');
+      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing API key…'; }
+      try {
+        // Create a tiny 1x1 test image
+        const c = document.createElement('canvas'); c.width = 1; c.height = 1;
+        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg'));
+        const fd = new FormData(); fd.append('image', blob, 'test.jpg');
+        const r = await API.post('/api/ai/analyze-product', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> API key is working! AI features enabled.'; }
+        toast('Gemini API key works ✅', 'success');
+      } catch (e) {
+        const msg = e?.response?.data?.error || 'API key test failed';
+        if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + esc(msg); }
+        toast(msg, 'error');
+      }
     });
   }
 

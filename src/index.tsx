@@ -203,6 +203,21 @@ async function ensureDbSchema(db: D1Database) {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_snap_name ON jobs(snap_name)`).run().catch(() => {})
     // v49.4: note column on customers for manual customer entry
     await db.prepare(`ALTER TABLE customers ADD COLUMN note TEXT`).run().catch(() => {})
+    // v49.5: AI learning table — stores user corrections so AI improves over time
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS ai_learning (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_hash TEXT,
+        product_name TEXT,
+        product_complaint TEXT,
+        charges REAL,
+        brand TEXT,
+        model TEXT,
+        category TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `).run().catch(() => {})
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_ai_brand ON ai_learning(brand)`).run().catch(() => {})
     _dbInited = true
   } catch (_) {}
 }
@@ -1591,7 +1606,7 @@ app.get('/api/settings', authMiddleware, adminOnly, async (c) => {
 app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
-  const allowed = ['job_prefix', 'job_seq_digits', 'customer_categories']
+  const allowed = ['job_prefix', 'job_seq_digits', 'customer_categories', 'gemini_api_key']
   for (const k of allowed) {
     if (k in body) {
       await c.env.DB.prepare(
@@ -1600,6 +1615,133 @@ app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
     }
   }
   return c.json({ ok: true })
+})
+
+// ── API: AI — Gemini-powered product and invoice analysis ────────────────────
+// v49.5: Analyze product image using Gemini 1.5 Flash
+app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
+  const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
+  if (!geminiKey) return c.json({ error: 'Gemini API key not configured. Ask admin to set it in Settings.' }, 400)
+  const formData = await c.req.formData()
+  const file = formData.get('image') as File | null
+  if (!file) return c.json({ error: 'No image provided' }, 400)
+  try {
+    const buf = await file.arrayBuffer()
+    const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
+    const mimeType = file.type || 'image/jpeg'
+    // Fetch past learnings for context
+    const { results: learnings } = await c.env.DB.prepare(
+      'SELECT product_name, product_complaint, charges, brand, model, category FROM ai_learning ORDER BY id DESC LIMIT 30'
+    ).all<any>()
+    let learningCtx = ''
+    if (learnings.length) {
+      learningCtx = '\n\nHere are previous product identifications from this repair shop for reference:\n' +
+        learnings.map((l: any) => `- ${l.product_name || ''}${l.brand ? ' (Brand: '+l.brand+')' : ''}${l.model ? ' Model: '+l.model : ''}${l.category ? ' Cat: '+l.category : ''}${l.product_complaint ? ' Complaint: '+l.product_complaint : ''}${l.charges ? ' Charges: ₹'+l.charges : ''}`).join('\n')
+    }
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inlineData: { mimeType, data: base64 } },
+            { text: `You are an expert at identifying salon/barbershop electrical products. Analyze this product image and identify:
+1. Brand Name (e.g., Ikonic, Wahl, HNK, Chaoba, Nova, Philips, MARC, AYTY Pro)
+2. Model Number/Name (e.g., Pro 2500, Designer, Super Taper)
+3. Category (Hair Dryer, Clipper, Trimmer, Straightener, Curler, Crimper, or other)
+
+Return ONLY a JSON object: {"brand":"...","model":"...","category":"...","product_name":"...","confidence":0.0-1.0}
+- product_name: Format as "[Brand] [Model] [Category]" using only what you can identify.
+- If you only find the Category, just use that (e.g., "Hair Dryer").
+- If Brand + Category, use both (e.g., "Ikonic Hair Dryer").
+- If all three found: "Ikonic Pro 2500 Hair Dryer".
+- Set confidence 0.0-1.0. If below 0.6, set product_name to empty string.
+- Fields you cannot identify should be empty strings.
+${learningCtx}
+
+Return ONLY valid JSON, no markdown, no explanation.` }
+          ]
+        }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 256 }
+      })
+    })
+    if (!resp.ok) { const t = await resp.text(); return c.json({ error: 'Gemini API error: ' + t.slice(0, 200) }, 502) }
+    const data = await resp.json() as any
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return c.json({ product_name: '', brand: '', model: '', category: '', confidence: 0 })
+    const parsed = JSON.parse(jsonMatch[0])
+    return c.json({
+      product_name: parsed.product_name || '',
+      brand: parsed.brand || '',
+      model: parsed.model || '',
+      category: parsed.category || '',
+      confidence: parsed.confidence || 0,
+    })
+  } catch (e: any) { return c.json({ error: e.message || 'AI analysis failed' }, 500) }
+})
+
+// v49.5: Analyze invoice image using Gemini
+app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
+  const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
+  if (!geminiKey) return c.json({ error: 'Gemini API key not configured' }, 400)
+  const formData = await c.req.formData()
+  const file = formData.get('image') as File | null
+  if (!file) return c.json({ error: 'No image provided' }, 400)
+  try {
+    const buf = await file.arrayBuffer()
+    const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
+    const mimeType = file.type || 'image/jpeg'
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { inlineData: { mimeType, data: base64 } },
+            { text: `Analyze this purchase invoice/bill image and extract:
+1. purchased_from: The shop/dealer/seller name
+2. invoice_no: The invoice/bill number
+3. purchase_date: The date on the invoice (format: YYYY-MM-DD)
+
+Return ONLY a JSON object: {"purchased_from":"...","invoice_no":"...","purchase_date":"...","confidence":0.0-1.0}
+- Fields you cannot read should be empty strings.
+- For date, convert to YYYY-MM-DD format if possible.
+- confidence: overall confidence 0.0-1.0.
+
+Return ONLY valid JSON, no markdown, no explanation.` }
+          ]
+        }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 256 }
+      })
+    })
+    if (!resp.ok) return c.json({ error: 'Gemini API error' }, 502)
+    const data = await resp.json() as any
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return c.json({ purchased_from: '', invoice_no: '', purchase_date: '', confidence: 0 })
+    const parsed = JSON.parse(jsonMatch[0])
+    return c.json({
+      purchased_from: parsed.purchased_from || '',
+      invoice_no: parsed.invoice_no || '',
+      purchase_date: parsed.purchase_date || '',
+      confidence: parsed.confidence || 0,
+    })
+  } catch (e: any) { return c.json({ error: e.message || 'AI analysis failed' }, 500) }
+})
+
+// v49.5: AI learning — store user corrections to improve future predictions
+app.post('/api/ai/learn', authMiddleware, async (c) => {
+  let body: any
+  try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
+  const { product_name, product_complaint, charges, brand, model, category, image_hash } = body
+  if (!product_name) return c.json({ error: 'product_name required' }, 400)
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO ai_learning(image_hash, product_name, product_complaint, charges, brand, model, category) VALUES(?,?,?,?,?,?,?)`
+    ).bind(image_hash || null, product_name, product_complaint || null, charges || null, brand || null, model || null, category || null).run()
+    return c.json({ ok: true })
+  } catch (e: any) { return c.json({ error: e.message }, 500) }
 })
 
 // ── API: Customer Data Export ─────────────────────────────────────────────────
