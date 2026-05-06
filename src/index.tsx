@@ -1618,7 +1618,36 @@ app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
 })
 
 // ── API: AI — Gemini-powered product and invoice analysis ────────────────────
-// v49.5: Analyze product image using Gemini 1.5 Flash
+// v49.6: Smart model fallback — tries latest Gemini models in order
+const GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash',
+]
+async function callGemini(apiKey: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string}> {
+  for (const model of GEMINI_MODELS) {
+    try {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents, generationConfig: genConfig || { temperature: 0.1, maxOutputTokens: 256 } })
+      })
+      if (resp.ok) {
+        const data = await resp.json() as any
+        return { ok: true, data }
+      }
+      const errText = await resp.text()
+      // 404 = model not found → try next; other errors → stop
+      if (resp.status === 404) continue
+      return { ok: false, error: `Gemini (${model}): ${errText.slice(0, 150)}` }
+    } catch (e: any) {
+      continue // network error → try next model
+    }
+  }
+  return { ok: false, error: 'No compatible Gemini model found. Check your API key permissions.' }
+}
+
 app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
   const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
   if (!geminiKey) return c.json({ error: 'Gemini API key not configured. Ask admin to set it in Settings.' }, 400)
@@ -1638,14 +1667,10 @@ app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
       learningCtx = '\n\nHere are previous product identifications from this repair shop for reference:\n' +
         learnings.map((l: any) => `- ${l.product_name || ''}${l.brand ? ' (Brand: '+l.brand+')' : ''}${l.model ? ' Model: '+l.model : ''}${l.category ? ' Cat: '+l.category : ''}${l.product_complaint ? ' Complaint: '+l.product_complaint : ''}${l.charges ? ' Charges: ₹'+l.charges : ''}`).join('\n')
     }
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inlineData: { mimeType, data: base64 } },
-            { text: `You are an expert at identifying salon/barbershop electrical products. Analyze this product image and identify:
+    const result = await callGemini(geminiKey, [{
+      parts: [
+        { inlineData: { mimeType, data: base64 } },
+        { text: `You are an expert at identifying salon/barbershop electrical products. Analyze this product image and identify:
 1. Brand Name (e.g., Ikonic, Wahl, HNK, Chaoba, Nova, Philips, MARC, AYTY Pro)
 2. Model Number/Name (e.g., Pro 2500, Designer, Super Taper)
 3. Category (Hair Dryer, Clipper, Trimmer, Straightener, Curler, Crimper, or other)
@@ -1660,14 +1685,10 @@ Return ONLY a JSON object: {"brand":"...","model":"...","category":"...","produc
 ${learningCtx}
 
 Return ONLY valid JSON, no markdown, no explanation.` }
-          ]
-        }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 256 }
-      })
-    })
-    if (!resp.ok) { const t = await resp.text(); return c.json({ error: 'Gemini API error: ' + t.slice(0, 200) }, 502) }
-    const data = await resp.json() as any
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      ]
+    }])
+    if (!result.ok) return c.json({ error: result.error }, 502)
+    const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return c.json({ product_name: '', brand: '', model: '', category: '', confidence: 0 })
     const parsed = JSON.parse(jsonMatch[0])
@@ -1681,7 +1702,7 @@ Return ONLY valid JSON, no markdown, no explanation.` }
   } catch (e: any) { return c.json({ error: e.message || 'AI analysis failed' }, 500) }
 })
 
-// v49.5: Analyze invoice image using Gemini
+// v49.6: Analyze invoice image using smart Gemini model fallback
 app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
   const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
   if (!geminiKey) return c.json({ error: 'Gemini API key not configured' }, 400)
@@ -1692,14 +1713,10 @@ app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
     const buf = await file.arrayBuffer()
     const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
     const mimeType = file.type || 'image/jpeg'
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { inlineData: { mimeType, data: base64 } },
-            { text: `Analyze this purchase invoice/bill image and extract:
+    const result = await callGemini(geminiKey, [{
+      parts: [
+        { inlineData: { mimeType, data: base64 } },
+        { text: `Analyze this purchase invoice/bill image and extract:
 1. purchased_from: The shop/dealer/seller name
 2. invoice_no: The invoice/bill number
 3. purchase_date: The date on the invoice (format: YYYY-MM-DD)
@@ -1710,14 +1727,10 @@ Return ONLY a JSON object: {"purchased_from":"...","invoice_no":"...","purchase_
 - confidence: overall confidence 0.0-1.0.
 
 Return ONLY valid JSON, no markdown, no explanation.` }
-          ]
-        }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 256 }
-      })
-    })
-    if (!resp.ok) return c.json({ error: 'Gemini API error' }, 502)
-    const data = await resp.json() as any
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      ]
+    }])
+    if (!result.ok) return c.json({ error: result.error }, 502)
+    const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return c.json({ purchased_from: '', invoice_no: '', purchase_date: '', confidence: 0 })
     const parsed = JSON.parse(jsonMatch[0])
@@ -1742,6 +1755,36 @@ app.post('/api/ai/learn', authMiddleware, async (c) => {
     ).bind(image_hash || null, product_name, product_complaint || null, charges || null, brand || null, model || null, category || null).run()
     return c.json({ ok: true })
   } catch (e: any) { return c.json({ error: e.message }, 500) }
+})
+
+// v49.6: Download ALL customers as vCard (.vcf) — saveable directly to phone contacts
+app.get('/api/customers/vcf', authMiddleware, adminOnly, async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT c.name, c.mobile, c.mobile2, c.address, c.category, c.note FROM customers c ORDER BY c.name`
+  ).all<any>()
+  let vcf = ''
+  for (const r of results) {
+    const name = (r.name || 'Unknown').trim()
+    const parts = name.split(/\s+/)
+    const firstName = parts[0] || name
+    const lastName = parts.slice(1).join(' ') || ''
+    vcf += 'BEGIN:VCARD\r\nVERSION:3.0\r\n'
+    vcf += `FN:${name}\r\n`
+    vcf += `N:${lastName};${firstName};;;\r\n`
+    if (r.mobile) vcf += `TEL;TYPE=CELL:+91${r.mobile.replace(/\D/g, '').replace(/^91/, '')}\r\n`
+    if (r.mobile2) vcf += `TEL;TYPE=CELL:+91${r.mobile2.replace(/\D/g, '').replace(/^91/, '')}\r\n`
+    if (r.address) vcf += `ADR;TYPE=HOME:;;${r.address.replace(/\n/g, ' ')};;;;\r\n`
+    if (r.category) vcf += `CATEGORIES:${r.category}\r\n`
+    if (r.note) vcf += `NOTE:${r.note.replace(/\n/g, '\\n')}\r\n`
+    vcf += `ORG:AES - ${r.category || 'Customer'}\r\n`
+    vcf += 'END:VCARD\r\n'
+  }
+  return new Response(vcf, {
+    headers: {
+      'Content-Type': 'text/vcard; charset=utf-8',
+      'Content-Disposition': `attachment; filename="AES_Contacts_${new Date().toISOString().slice(0,10)}.vcf"`,
+    }
+  })
 })
 
 // ── API: Customer Data Export ─────────────────────────────────────────────────

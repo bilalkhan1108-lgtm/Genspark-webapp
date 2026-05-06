@@ -1288,7 +1288,7 @@ function bindView() {
 
   switch (S.view) {
     case 'dashboard': loadJobs();                                               break;
-    case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) { loadCustomerCategories(); bindNewJob(); } break;
+    case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) { loadCustomerCategories(true); bindNewJob(); } break;
     case 'admindash': if (isDirector()) loadAdminDash();                        break;
     case 'detail':    loadDetail();                                             break;
     case 'staff':     if (S.user?.role === 'admin') loadStaff();                break;
@@ -4332,11 +4332,12 @@ function showEditMachineModal(m) {
         quantity:          parseInt(document.getElementById('em-qty')?.value) || 1,
         ...(hasSuperRight('manage_machines') ? { assigned_staff_id: document.getElementById('em-staff')?.value || null } : {}),
       });
-      // v49: Upload invoice image if a new file was selected
+      // v49.6: Upload invoice image if a new file was selected (fixed: field='invoice', with compression)
       if (emInvoiceNewFile && warrantyType === 'warranty') {
         try {
+          const compressed = await compressImage(emInvoiceNewFile, 1080, 0.82);
           const fd = new FormData();
-          fd.append('image', emInvoiceNewFile);
+          fd.append('invoice', compressed);
           await API.post(`/api/machines/${m.id}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
         } catch (_) { toast('Invoice photo upload failed', 'error'); }
       } else if (emInvoiceDeleted && !emInvoiceNewFile) {
@@ -5345,16 +5346,18 @@ async function loadStaffForSelects() {
   try { const r = await API.get('/api/staff'); S.staff = r.data; } catch (_) {}
 }
 
-// v48: Load customer categories from app_settings
-let _categoriesLoaded = false;
-async function loadCustomerCategories() {
-  if (_categoriesLoaded) return;
+// v49.6: Load customer categories from app_settings — always fetch fresh (no stale cache)
+let _categoriesLastLoad = 0;
+async function loadCustomerCategories(force) {
+  // Re-fetch if forced, or if older than 30 seconds
+  const now = Date.now();
+  if (!force && _categoriesLastLoad && (now - _categoriesLastLoad < 30000)) return;
   try {
     const r = await API.get('/api/settings');
     if (r.data?.customer_categories) {
       S.customerCategories = r.data.customer_categories.split(',').map(c => c.trim()).filter(Boolean);
     }
-    _categoriesLoaded = true;
+    _categoriesLastLoad = now;
   } catch (_) {}
 }
 function categoryOptionsHTML(selected) {
@@ -5942,6 +5945,13 @@ function settingsHTML() {
       <button id="btn-ac-save" class="btn-sm btn-blue" style="width:100%;padding:10px;font-size:14px"><i class="fas fa-save"></i> Save Customer</button>
       <div id="ac-result" style="display:none;margin-top:10px;padding:10px;border-radius:8px;font-size:13px"></div>
     </div>
+    <!-- v49.6: Download All Contacts -->
+    <div class="card" style="margin-bottom:12px" id="download-contacts-card">
+      <div class="section-title"><i class="fas fa-address-book" style="color:#0288D1"></i> Download All Contacts</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Download all customer contacts as a .vcf file. Open it on your phone to save all contacts at once — they will be grouped by category.</div>
+      <button id="btn-download-contacts" class="btn-sm" style="width:100%;padding:10px;font-size:14px;background:#0288D1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700"><i class="fas fa-download"></i> Download Contacts (.vcf)</button>
+      <div id="contacts-dl-status" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:12px;text-align:center"></div>
+    </div>
     <!-- v49.5: Gemini AI Configuration -->
     <div class="card" style="margin-bottom:12px" id="ai-config-card">
       <div class="section-title"><i class="fas fa-robot" style="color:#7C4DFF"></i> AI Product Recognition</div>
@@ -6054,10 +6064,10 @@ function bindSettings() {
       pfx?.addEventListener('input', updatePreview);
       dig?.addEventListener('input', updatePreview);
 
-      // v48: Load and render customer categories
+      // v49.6: Load and render customer categories (always fresh from API)
       if (d.customer_categories) {
         S.customerCategories = d.customer_categories.split(',').map(c => c.trim()).filter(Boolean);
-        _categoriesLoaded = true;
+        _categoriesLastLoad = Date.now();
       }
       renderCategoryChips();
     }).catch(() => {});
@@ -6144,6 +6154,33 @@ function bindSettings() {
       } finally { if (btn) btn.disabled = false; }
     });
 
+    // v49.6: Download All Contacts as vCard
+    document.getElementById('btn-download-contacts')?.addEventListener('click', async () => {
+      const btn = document.getElementById('btn-download-contacts');
+      const st = document.getElementById('contacts-dl-status');
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing contacts…'; }
+      if (st) { st.style.display = 'block'; st.style.background = '#E3F2FD'; st.style.color = '#1565C0'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Downloading…'; }
+      try {
+        const r = await API.get('/api/customers/vcf', { responseType: 'blob' });
+        const blob = new Blob([r.data], { type: 'text/vcard' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `AES_Contacts_${new Date().toISOString().slice(0,10)}.vcf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        toast('Contacts downloaded! Open the .vcf file to save to your phone.', 'success');
+        if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> Downloaded! Open the file to import contacts.'; }
+      } catch (e) {
+        toast('Failed to download contacts', 'error');
+        if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> Download failed'; }
+      } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-download"></i> Download Contacts (.vcf)'; }
+      }
+    });
+
     document.getElementById('btn-save-prefix')?.addEventListener('click', async () => {
       const prefix = document.getElementById('set-prefix')?.value.trim().toUpperCase();
       const digits = parseInt(document.getElementById('set-digits')?.value || '3');
@@ -6155,7 +6192,7 @@ function bindSettings() {
       } catch (_) { toast('Failed to save', 'error'); }
     });
 
-    // v49.5: Gemini AI Key management
+    // v49.6: Gemini AI Key management
     // Load existing key (masked)
     API.get('/api/settings').then(r => {
       const key = r.data?.gemini_api_key;
