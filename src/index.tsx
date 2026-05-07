@@ -491,6 +491,10 @@ app.get('/api/jobs', authMiddleware, async (c) => {
     // Show jobs dispatched via courier that are NOT yet delivered
     conds.push("j.dispatch_method='courier'")
     conds.push("j.status != 'delivered'")
+  } else if (status === 'urgent') {
+    // v49.7: Active jobs older than 25 days — server-side filter
+    conds.push("j.status IN ('under_repair','repaired')")
+    conds.push("j.created_at <= datetime('now','-25 days')")
   } else if (status) {
     conds.push('j.status=?'); params.push(status)
   }
@@ -1618,35 +1622,92 @@ app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
 })
 
 // ── API: AI — Gemini-powered product and invoice analysis ────────────────────
-// v49.6: Smart model fallback — tries latest Gemini models in order
+// v49.8: Smart model fallback — tries Gemini models, handles 400/403/404/429/503
 const GEMINI_MODELS = [
-  'gemini-2.5-flash',
   'gemini-2.0-flash',
   'gemini-2.0-flash-lite',
   'gemini-1.5-flash',
 ]
-async function callGemini(apiKey: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string}> {
+// Safe base64 encoding for large ArrayBuffers (spread operator crashes on large arrays)
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  const chunkSize = 8192
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
+    for (let j = 0; j < chunk.length; j++) binary += String.fromCharCode(chunk[j])
+  }
+  return btoa(binary)
+}
+
+async function callGemini(apiKey: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string, model?: string}> {
+  let lastError = ''
   for (const model of GEMINI_MODELS) {
     try {
       const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents, generationConfig: genConfig || { temperature: 0.1, maxOutputTokens: 256 } })
+        body: JSON.stringify({ contents, generationConfig: genConfig || { temperature: 0.1, maxOutputTokens: 512 } })
       })
       if (resp.ok) {
         const data = await resp.json() as any
-        return { ok: true, data }
+        // Check for blocked/empty responses
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+        if (!text && data?.candidates?.[0]?.finishReason === 'SAFETY') {
+          lastError = `Gemini (${model}): Content blocked by safety filters`
+          continue
+        }
+        return { ok: true, data, model }
       }
       const errText = await resp.text()
-      // 404 = model not found → try next; other errors → stop
-      if (resp.status === 404) continue
-      return { ok: false, error: `Gemini (${model}): ${errText.slice(0, 150)}` }
+      lastError = `Gemini (${model}) ${resp.status}: ${errText.slice(0, 200)}`
+      // Retryable errors → try next model
+      if ([404, 429, 503, 500].includes(resp.status)) continue
+      // 400 may mean model doesn't support the request format → try next
+      if (resp.status === 400 && (errText.includes('not found') || errText.includes('not supported') || errText.includes('deprecated'))) continue
+      // 403 with API key issue → stop immediately (wrong key)
+      if (resp.status === 403) return { ok: false, error: `API key error: ${errText.slice(0, 150)}. Check your Gemini API key.` }
+      // Other 400 errors → could be image issue, try next model
+      if (resp.status === 400) continue
+      return { ok: false, error: lastError }
     } catch (e: any) {
-      continue // network error → try next model
+      lastError = `Network error (${model}): ${e.message || 'unknown'}`
+      continue
     }
   }
-  return { ok: false, error: 'No compatible Gemini model found. Check your API key permissions.' }
+  return { ok: false, error: lastError || 'No compatible Gemini model found. Check your API key permissions.' }
 }
+
+// v49.8: Dedicated API key test endpoint — validates key without needing an image
+app.post('/api/ai/test-key', authMiddleware, adminOnly, async (c) => {
+  const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
+  if (!geminiKey) return c.json({ error: 'No API key configured' }, 400)
+  try {
+    // Use a simple text-only request to validate the key works
+    for (const model of GEMINI_MODELS) {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: 'Reply with exactly: OK' }] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 10 }
+        })
+      })
+      if (resp.ok) {
+        return c.json({ ok: true, model, message: `API key works! Using ${model}` })
+      }
+      if (resp.status === 403) {
+        const t = await resp.text()
+        return c.json({ error: `Invalid API key: ${t.slice(0, 100)}` }, 400)
+      }
+      if (resp.status === 404 || resp.status === 400) continue
+      if (resp.status === 429) return c.json({ error: 'Rate limited — try again in a minute' }, 429)
+    }
+    return c.json({ error: 'No compatible Gemini model found for this API key' }, 400)
+  } catch (e: any) {
+    return c.json({ error: `Connection error: ${e.message}` }, 500)
+  }
+})
 
 app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
   const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
@@ -1656,7 +1717,7 @@ app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
   if (!file) return c.json({ error: 'No image provided' }, 400)
   try {
     const buf = await file.arrayBuffer()
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
+    const base64 = arrayBufferToBase64(buf)
     const mimeType = file.type || 'image/jpeg'
     // Fetch past learnings for context
     const { results: learnings } = await c.env.DB.prepare(
@@ -1711,7 +1772,7 @@ app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
   if (!file) return c.json({ error: 'No image provided' }, 400)
   try {
     const buf = await file.arrayBuffer()
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
+    const base64 = arrayBufferToBase64(buf)
     const mimeType = file.type || 'image/jpeg'
     const result = await callGemini(geminiKey, [{
       parts: [
@@ -1757,10 +1818,11 @@ app.post('/api/ai/learn', authMiddleware, async (c) => {
   } catch (e: any) { return c.json({ error: e.message }, 500) }
 })
 
-// v49.6: Download ALL customers as vCard (.vcf) — saveable directly to phone contacts
+// v49.8: Download ALL customers as vCard (.vcf) — Google Contacts compatible with groups
 app.get('/api/customers/vcf', authMiddleware, adminOnly, async (c) => {
+  const account = c.req.query('account') || 'aditionelectricworks@gmail.com'
   const { results } = await c.env.DB.prepare(
-    `SELECT c.name, c.mobile, c.mobile2, c.address, c.category, c.note FROM customers c ORDER BY c.name`
+    `SELECT c.name, c.mobile, c.mobile2, c.address, c.category, c.note FROM customers c ORDER BY c.category, c.name`
   ).all<any>()
   let vcf = ''
   for (const r of results) {
@@ -1768,21 +1830,34 @@ app.get('/api/customers/vcf', authMiddleware, adminOnly, async (c) => {
     const parts = name.split(/\s+/)
     const firstName = parts[0] || name
     const lastName = parts.slice(1).join(' ') || ''
+    const category = r.category || 'Customer'
+    // Clean phone numbers: strip non-digits, remove leading 91 country code if present
+    const cleanPhone = (p: string) => {
+      if (!p) return ''
+      let d = p.replace(/\D/g, '')
+      if (d.length > 10 && d.startsWith('91')) d = d.slice(2)
+      return d.length >= 10 ? `+91${d}` : ''
+    }
+    const phone1 = cleanPhone(r.mobile)
+    const phone2 = cleanPhone(r.mobile2)
     vcf += 'BEGIN:VCARD\r\nVERSION:3.0\r\n'
     vcf += `FN:${name}\r\n`
     vcf += `N:${lastName};${firstName};;;\r\n`
-    if (r.mobile) vcf += `TEL;TYPE=CELL:+91${r.mobile.replace(/\D/g, '').replace(/^91/, '')}\r\n`
-    if (r.mobile2) vcf += `TEL;TYPE=CELL:+91${r.mobile2.replace(/\D/g, '').replace(/^91/, '')}\r\n`
-    if (r.address) vcf += `ADR;TYPE=HOME:;;${r.address.replace(/\n/g, ' ')};;;;\r\n`
-    if (r.category) vcf += `CATEGORIES:${r.category}\r\n`
-    if (r.note) vcf += `NOTE:${r.note.replace(/\n/g, '\\n')}\r\n`
-    vcf += `ORG:AES - ${r.category || 'Customer'}\r\n`
+    if (phone1) vcf += `TEL;TYPE=CELL:${phone1}\r\n`
+    if (phone2) vcf += `TEL;TYPE=CELL;TYPE=HOME:${phone2}\r\n`
+    if (r.address) vcf += `ADR;TYPE=HOME:;;${r.address.replace(/[\r\n]+/g, ', ')};;;;\r\n`
+    // Google Contacts uses CATEGORIES for group labels (auto-creates groups on import)
+    vcf += `CATEGORIES:${category}\r\n`
+    vcf += `ORG:AES - ${category}\r\n`
+    const noteText = [`Category: ${category}`, r.note ? r.note.replace(/[\r\n]+/g, ' ') : ''].filter(Boolean).join(' | ')
+    vcf += `NOTE:${noteText}\r\n`
     vcf += 'END:VCARD\r\n'
   }
+  const filename = `AES_Contacts_${new Date().toISOString().slice(0,10)}.vcf`
   return new Response(vcf, {
     headers: {
       'Content-Type': 'text/vcard; charset=utf-8',
-      'Content-Disposition': `attachment; filename="AES_Contacts_${new Date().toISOString().slice(0,10)}.vcf"`,
+      'Content-Disposition': `attachment; filename="${filename}"`,
     }
   })
 })

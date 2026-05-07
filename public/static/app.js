@@ -524,9 +524,9 @@ const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 // v49.2: Format phone number for WhatsApp (strip non-digits, add 91 prefix if needed)
 // Fix: 10-digit numbers starting with 91 (e.g. 9106550194) must get 91 prefix — only skip prefix if already 12+ digits starting with 91
 const _waNum  = p => { const d = (p || '').replace(/\D/g, ''); if (d.length === 10) return '91' + d; if (d.length >= 12 && d.startsWith('91')) return d; if (d.length === 11 && d.startsWith('0')) return '91' + d.slice(1); return d.length > 10 && d.startsWith('91') ? d : '91' + d; };
-const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5', active_only:'#2E7D32', courier_pending:'#7B1FA2' };
-const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD', active_only:'#E8F5E9', courier_pending:'#F3E5F5' };
-const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered', active_only:'Active Only', courier_pending:'Courier Pending' };
+const STATUS_COLOR = { under_repair:'#E53935', repaired:'#43A047', returned:'#B8860B', partial_delivered:'#FF6F00', delivered:'#1E88E5', active_only:'#2E7D32', courier_pending:'#7B1FA2', urgent:'#C62828' };
+const STATUS_BG    = { under_repair:'#FFEBEE', repaired:'#E8F5E9', returned:'#FFF8E1', partial_delivered:'#FFF3E0', delivered:'#E3F2FD', active_only:'#E8F5E9', courier_pending:'#F3E5F5', urgent:'#FFCDD2' };
+const STATUS_LABEL = { under_repair:'Under Repair', repaired:'Repaired', returned:'Returned', partial_delivered:'Partial Delivered', delivered:'Delivered', active_only:'Active Only', courier_pending:'Courier Pending', urgent:'Urgent >25d' };
 const sc = s => STATUS_COLOR[s] || '#888';
 const sb = s => STATUS_BG[s]    || '#f5f5f5';
 const sl = s => STATUS_LABEL[s] || s;
@@ -736,22 +736,9 @@ window.filterActiveOnly = function() {
 window.filterCourierPending = function() {
   setFilter('courier_pending'); S.fromDate = ''; S.toDate = ''; loadJobs();
 };
-// v41: Urgent: show active jobs older than 25 days — filter client-side from master cache
+// v49.7: Urgent: show active jobs older than 25 days — server-side query (not client cache)
 window.filterUrgent = function() {
-  const cutoff = Date.now() - 25 * 86400000;
-  const urgentJobs = _allLoadedJobs.filter(j => {
-    const isActive = j.status === 'under_repair' || j.status === 'repaired';
-    const created = new Date(j.created_at).getTime();
-    return isActive && created <= cutoff;
-  });
-  if (urgentJobs.length) {
-    S.jobs = urgentJobs.sort((a,b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-    S.filter = ''; S.fromDate = ''; S.toDate = '';
-    renderVList(false);
-    toast(`🚨 ${urgentJobs.length} urgent job${urgentJobs.length>1?'s':''} (>25 days)`, 'error');
-  } else {
-    toast('No urgent jobs — all active jobs are under 25 days! 🎉', 'success');
-  }
+  setFilter('urgent'); S.fromDate = ''; S.toDate = ''; loadJobs();
 };
 
 function setFilter(s) {
@@ -858,7 +845,6 @@ function compressImage(file, maxW = 1080, quality = 0.82) {
 async function aiAnalyzeProduct(file, productInputId) {
   const inp = document.getElementById(productInputId);
   if (!inp || !file) return;
-  // Show analyzing indicator
   const origPlaceholder = inp.placeholder;
   inp.placeholder = '🤖 AI analyzing image…';
   inp.style.borderColor = '#7C4DFF';
@@ -866,20 +852,19 @@ async function aiAnalyzeProduct(file, productInputId) {
     const compressed = await compressImage(file, 800, 0.75);
     const fd = new FormData();
     fd.append('image', compressed);
-    const r = await API.post('/api/ai/analyze-product', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    // Don't set Content-Type manually — let browser set multipart boundary
+    const r = await API.post('/api/ai/analyze-product', fd);
     const d = r.data;
     if (d.product_name && d.confidence >= 0.6 && !inp.value.trim()) {
       inp.value = d.product_name;
       inp.dispatchEvent(new Event('input', { bubbles: true }));
       toast(`🤖 AI: ${d.product_name} (${Math.round(d.confidence * 100)}%)`, 'success');
     } else if (d.product_name && d.confidence >= 0.6 && inp.value.trim()) {
-      // Field already has a value — show suggestion but don't overwrite
       toast(`🤖 AI suggests: ${d.product_name}`, 'info');
     } else if (d.error) {
       console.warn('AI analyze-product:', d.error);
     }
   } catch (e) {
-    // Silent fail — AI is optional
     console.warn('AI product analysis failed:', e?.response?.data?.error || e.message);
   } finally {
     inp.placeholder = origPlaceholder;
@@ -892,7 +877,6 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
   const inEl = document.getElementById(invoiceNoId);
   const pdEl = document.getElementById(purchaseDateId);
   if (!file || (!pfEl && !inEl && !pdEl)) return;
-  // Show indicator on first available field
   const indicator = pfEl || inEl || pdEl;
   const origPlaceholder = indicator.placeholder;
   indicator.placeholder = '🤖 AI reading invoice…';
@@ -901,7 +885,7 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
     const compressed = await compressImage(file, 800, 0.75);
     const fd = new FormData();
     fd.append('image', compressed);
-    const r = await API.post('/api/ai/analyze-invoice', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const r = await API.post('/api/ai/analyze-invoice', fd);
     const d = r.data;
     let filled = [];
     if (d.purchased_from && pfEl && !pfEl.value.trim()) { pfEl.value = d.purchased_from; filled.push('Seller'); }
@@ -1288,13 +1272,13 @@ function bindView() {
 
   switch (S.view) {
     case 'dashboard': loadJobs();                                               break;
-    case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) { loadCustomerCategories(true); bindNewJob(); } break;
+    case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) { loadCustomerCategories(true).then(() => bindNewJob()); } break;
     case 'admindash': if (isDirector()) loadAdminDash();                        break;
     case 'detail':    loadDetail();                                             break;
     case 'staff':     if (S.user?.role === 'admin') loadStaff();                break;
     case 'reports':   if (S.user?.role === 'admin') loadStaffForSelects(); bindReports(); break;
     case 'requests':  if (S.user?.role === 'admin') loadRequests();             break;
-    case 'settings':  bindSettings();                                          break;
+    case 'settings':  loadCustomerCategories(true).then(() => bindSettings());  break;
     case 'track':     bindTrack();                                             break;
   }
 }
@@ -2453,7 +2437,7 @@ function bindNewJob() {
               try {
                 const compressed = await compressImage(imgFile, 1080, 0.82);
                 const fd = new FormData(); fd.append('image', compressed);
-                await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+                await API.post(`/api/machines/${machId}/images`, fd);
               } catch (_) { toast('Image upload failed (job still created)', 'error'); }
             })());
           }
@@ -2463,7 +2447,7 @@ function bindNewJob() {
                 const ext  = audioMime.includes('ogg') ? '.ogg' : '.webm';
                 const file = new File([audioBlob], `voice_note${ext}`, { type: audioMime });
                 const fd   = new FormData(); fd.append('audio', file);
-                await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+                await API.post(`/api/machines/${machId}/audio`, fd);
               } catch (_) { toast('Audio upload failed (job still created)', 'error'); }
             })());
           }
@@ -2473,7 +2457,7 @@ function bindNewJob() {
               try {
                 const compressed = await compressImage(invoiceFile, 1080, 0.82);
                 const fd = new FormData(); fd.append('invoice', compressed);
-                await API.post(`/api/machines/${machId}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+                await API.post(`/api/machines/${machId}/invoice-image`, fd);
               } catch (_) { toast('Invoice upload failed (job still created)', 'error'); }
             })());
           }
@@ -3033,9 +3017,7 @@ function bindDetail(j) {
             const compressed = await compressImage(raw, 1080, 0.82);
             const fd = new FormData();
             fd.append('image', compressed);
-            await API.post(`/api/machines/${mid}/images`, fd, {
-              headers: { 'Content-Type': 'multipart/form-data' }
-            });
+            await API.post(`/api/machines/${mid}/images`, fd);
             toast('Image saved ✅', 'success');
             URL.revokeObjectURL(previewUrl);
             await loadDetail(); // Refresh to show real image from R2
@@ -3048,9 +3030,7 @@ function bindDetail(j) {
               const compressed2 = await compressImage(raw, 800, 0.75);
               const fd2 = new FormData();
               fd2.append('image', compressed2);
-              await API.post(`/api/machines/${mid}/images`, fd2, {
-                headers: { 'Content-Type': 'multipart/form-data' }
-              });
+              await API.post(`/api/machines/${mid}/images`, fd2);
               toast('Image saved ✅', 'success');
               await loadDetail();
             } catch (_2) {
@@ -3066,9 +3046,7 @@ function bindDetail(j) {
           const fd = new FormData();
           fd.append('image', compressed);
           toast('Uploading…', 'info');
-          await API.post(`/api/machines/${mid}/images`, fd, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
+          await API.post(`/api/machines/${mid}/images`, fd);
           toast('Image saved', 'success');
           await loadDetail();
         } catch (_) { toast('Upload failed', 'error'); }
@@ -3737,9 +3715,7 @@ function showAudioRecorderModal(machineId) {
       const file = new File([audioBlob], `voice_note${ext}`, { type: audioMime });
       const fd   = new FormData();
       fd.append('audio', file);
-      await API.post(`/api/machines/${machineId}/audio`, fd, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
+      await API.post(`/api/machines/${machineId}/audio`, fd);
       closeModal();
       toast('Voice note saved', 'success');
       await loadDetail();
@@ -4146,7 +4122,7 @@ function showAddMachineModal(jobId) {
             try {
               const compressed = await compressImage(imgFile, 1080, 0.82);
               const fd = new FormData(); fd.append('image', compressed);
-              await API.post(`/api/machines/${machId}/images`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+              await API.post(`/api/machines/${machId}/images`, fd);
             } catch (_) { toast('Image upload failed', 'error'); }
           })());
         }
@@ -4156,7 +4132,7 @@ function showAddMachineModal(jobId) {
               const ext  = audioMime.includes('ogg') ? '.ogg' : '.webm';
               const file = new File([audioBlob], `voice_note${ext}`, { type: audioMime });
               const fd   = new FormData(); fd.append('audio', file);
-              await API.post(`/api/machines/${machId}/audio`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+              await API.post(`/api/machines/${machId}/audio`, fd);
             } catch (_) { toast('Audio upload failed', 'error'); }
           })());
         }
@@ -4166,7 +4142,7 @@ function showAddMachineModal(jobId) {
             try {
               const compressed = await compressImage(amInvoiceFile, 1080, 0.82);
               const fd = new FormData(); fd.append('invoice', compressed);
-              await API.post(`/api/machines/${machId}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+              await API.post(`/api/machines/${machId}/invoice-image`, fd);
             } catch (_) { toast('Invoice upload failed', 'error'); }
           })());
         }
@@ -4338,7 +4314,7 @@ function showEditMachineModal(m) {
           const compressed = await compressImage(emInvoiceNewFile, 1080, 0.82);
           const fd = new FormData();
           fd.append('invoice', compressed);
-          await API.post(`/api/machines/${m.id}/invoice-image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+          await API.post(`/api/machines/${m.id}/invoice-image`, fd);
         } catch (_) { toast('Invoice photo upload failed', 'error'); }
       } else if (emInvoiceDeleted && !emInvoiceNewFile) {
         // User clicked clear on existing invoice — delete it from server
@@ -5346,12 +5322,12 @@ async function loadStaffForSelects() {
   try { const r = await API.get('/api/staff'); S.staff = r.data; } catch (_) {}
 }
 
-// v49.6: Load customer categories from app_settings — always fetch fresh (no stale cache)
+// v49.8: Load customer categories — always fetch fresh on page navigation
 let _categoriesLastLoad = 0;
 async function loadCustomerCategories(force) {
-  // Re-fetch if forced, or if older than 30 seconds
+  // Always fresh on force (page nav), or if older than 5 seconds for rapid re-calls
   const now = Date.now();
-  if (!force && _categoriesLastLoad && (now - _categoriesLastLoad < 30000)) return;
+  if (!force && _categoriesLastLoad && (now - _categoriesLastLoad < 5000)) return;
   try {
     const r = await API.get('/api/settings');
     if (r.data?.customer_categories) {
@@ -5554,7 +5530,7 @@ function bindReports() {
     const fd = new FormData(); fd.append('file', file);
     try {
       toast('Importing…', 'info');
-      const r = await API.post('/api/backup/import', fd, { headers: { 'Content-Type': 'multipart/form-data' }});
+      const r = await API.post('/api/backup/import', fd);
       toast(`Restored: ${r.data.restored.jobs} jobs`, 'success');
     } catch (_) { toast('Import failed', 'error'); }
   });
@@ -5935,7 +5911,7 @@ function settingsHTML() {
       <div class="form-group">
         <label class="form-label">Category</label>
         <select id="ac-category" class="form-input">
-          ${(S.customerCategories||['Salon','Consumer','Retailer','N/A']).map(c => '<option value="'+esc(c)+'">'+esc(c)+'</option>').join('')}
+          ${categoryOptionsHTML('Salon')}
         </select>
       </div>
       <div class="form-group">
@@ -5945,10 +5921,17 @@ function settingsHTML() {
       <button id="btn-ac-save" class="btn-sm btn-blue" style="width:100%;padding:10px;font-size:14px"><i class="fas fa-save"></i> Save Customer</button>
       <div id="ac-result" style="display:none;margin-top:10px;padding:10px;border-radius:8px;font-size:13px"></div>
     </div>
-    <!-- v49.6: Download All Contacts -->
+    <!-- v49.7: Download All Contacts to Gmail -->
     <div class="card" style="margin-bottom:12px" id="download-contacts-card">
       <div class="section-title"><i class="fas fa-address-book" style="color:#0288D1"></i> Download All Contacts</div>
-      <div style="font-size:13px;color:#888;margin-bottom:10px">Download all customer contacts as a .vcf file. Open it on your phone to save all contacts at once — they will be grouped by category.</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Download all customers as a .vcf file. Import into your Gmail contacts — contacts will be grouped by their category (Salon, Consumer, Retailer, etc.).</div>
+      <div class="form-group" style="margin-bottom:8px">
+        <label class="form-label"><i class="fab fa-google" style="color:#EA4335"></i> Gmail Account</label>
+        <input id="vcf-gmail" type="email" class="form-input" value="aditionelectricworks@gmail.com" placeholder="yourname@gmail.com">
+      </div>
+      <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.4">
+        <b>How to import:</b> Download → Open Google Contacts (contacts.google.com) → Import → Select the .vcf file → Choose this Gmail account. Contacts will auto-group by category.
+      </div>
       <button id="btn-download-contacts" class="btn-sm" style="width:100%;padding:10px;font-size:14px;background:#0288D1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700"><i class="fas fa-download"></i> Download Contacts (.vcf)</button>
       <div id="contacts-dl-status" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:12px;text-align:center"></div>
     </div>
@@ -6094,7 +6077,11 @@ function bindSettings() {
     async function saveCategoriesAndRefresh() {
       try {
         await API.put('/api/settings', { customer_categories: S.customerCategories.join(',') });
+        _categoriesLastLoad = 0; // invalidate cache so next page load fetches fresh
         renderCategoryChips();
+        // Also update the Add Customer dropdown dynamically
+        const acCatEl = document.getElementById('ac-category');
+        if (acCatEl) acCatEl.innerHTML = categoryOptionsHTML('Salon');
         toast('Categories updated ✅', 'success');
       } catch (_) { toast('Failed to save categories', 'error'); }
     }
@@ -6233,22 +6220,23 @@ function bindSettings() {
       } catch (_) { toast('Failed to save API key', 'error'); }
     });
 
-    // Test key
+    // Test key — uses dedicated text-only endpoint (no image needed, faster & reliable)
     document.getElementById('btn-ai-key-test')?.addEventListener('click', async () => {
       const st = document.getElementById('ai-key-status');
-      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing API key…'; }
+      const btn = document.getElementById('btn-ai-key-test');
+      if (btn) btn.disabled = true;
+      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing API key with Gemini…'; }
       try {
-        // Create a tiny 1x1 test image
-        const c = document.createElement('canvas'); c.width = 1; c.height = 1;
-        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg'));
-        const fd = new FormData(); fd.append('image', blob, 'test.jpg');
-        const r = await API.post('/api/ai/analyze-product', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-        if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> API key is working! AI features enabled.'; }
-        toast('Gemini API key works ✅', 'success');
+        const r = await API.post('/api/ai/test-key');
+        const model = r.data?.model || 'Gemini';
+        if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> API key works! Using <b>${esc(model)}</b>. AI features enabled.`; }
+        toast(`Gemini API key works ✅ (${model})`, 'success');
       } catch (e) {
-        const msg = e?.response?.data?.error || 'API key test failed';
+        const msg = e?.response?.data?.error || 'API key test failed — check your key';
         if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + esc(msg); }
         toast(msg, 'error');
+      } finally {
+        if (btn) btn.disabled = false;
       }
     });
   }
