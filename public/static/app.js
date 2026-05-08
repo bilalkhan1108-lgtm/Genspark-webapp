@@ -852,7 +852,6 @@ async function aiAnalyzeProduct(file, productInputId) {
     const compressed = await compressImage(file, 800, 0.75);
     const fd = new FormData();
     fd.append('image', compressed);
-    // Don't set Content-Type manually — let browser set multipart boundary
     const r = await API.post('/api/ai/analyze-product', fd);
     const d = r.data;
     if (d.product_name && d.confidence >= 0.6 && !inp.value.trim()) {
@@ -861,11 +860,19 @@ async function aiAnalyzeProduct(file, productInputId) {
       toast(`🤖 AI: ${d.product_name} (${Math.round(d.confidence * 100)}%)`, 'success');
     } else if (d.product_name && d.confidence >= 0.6 && inp.value.trim()) {
       toast(`🤖 AI suggests: ${d.product_name}`, 'info');
+    } else if (d.suggestions && d.suggestions.length && !inp.value.trim()) {
+      // v49.9: DB fallback — show top suggestions from learning history
+      const top = d.suggestions[0];
+      toast(`🤖 AI couldn't identify. Try: ${top.name}`, 'info');
+    } else if (d.ai_error) {
+      toast(`🤖 ${d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : 'AI could not identify product'}`, 'warning');
     } else if (d.error) {
-      console.warn('AI analyze-product:', d.error);
+      toast(`🤖 ${d.error}`, 'error');
     }
   } catch (e) {
-    console.warn('AI product analysis failed:', e?.response?.data?.error || e.message);
+    const msg = e?.response?.data?.error || '';
+    if (msg) toast(`🤖 ${msg}`, 'error');
+    else console.warn('AI product analysis failed:', e.message);
   } finally {
     inp.placeholder = origPlaceholder;
     inp.style.borderColor = '';
@@ -893,11 +900,18 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
     if (d.purchase_date && pdEl && !pdEl.value) { pdEl.value = d.purchase_date; filled.push('Date'); }
     if (filled.length) {
       toast(`🤖 AI extracted: ${filled.join(', ')}`, 'success');
+    } else if (d.seller_suggestions && d.seller_suggestions.length && pfEl && !pfEl.value.trim()) {
+      // v49.9: DB fallback — show known sellers
+      toast(`🤖 AI couldn't read. Known sellers: ${d.seller_suggestions.slice(0,3).join(', ')}`, 'info');
+    } else if (d.ai_error) {
+      toast(`🤖 ${d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : 'AI could not read invoice'}`, 'warning');
     } else if (d.error) {
-      console.warn('AI analyze-invoice:', d.error);
+      toast(`🤖 ${d.error}`, 'error');
     }
   } catch (e) {
-    console.warn('AI invoice analysis failed:', e?.response?.data?.error || e.message);
+    const msg = e?.response?.data?.error || '';
+    if (msg) toast(`🤖 ${msg}`, 'error');
+    else console.warn('AI invoice analysis failed:', e.message);
   } finally {
     indicator.placeholder = origPlaceholder;
     indicator.style.borderColor = '';
@@ -4330,14 +4344,22 @@ function showEditMachineModal(m) {
 }
 
 function showDeliveryModal(j) {
+  // v49.9: Default delivery date = today (editable)
+  const today = new Date().toISOString().slice(0, 10);
   showModal(`
     <h3 class="modal-title"><i class="fas fa-check-double" style="color:#1E88E5"></i> Mark as Delivered</h3>
-    <div class="form-group">
-      <label class="form-label">Delivery Method <span class="req">*</span></label>
-      <select id="dm-method" class="form-input">
-        <option value="in_person">In Person</option>
-        <option value="courier">Courier</option>
-      </select>
+    <div class="form-row-2">
+      <div class="form-group">
+        <label class="form-label">Delivery Method <span class="req">*</span></label>
+        <select id="dm-method" class="form-input">
+          <option value="in_person">In Person</option>
+          <option value="courier">Courier</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Delivery Date</label>
+        <input id="dm-date" type="date" class="form-input" value="${today}" max="${today}">
+      </div>
     </div>
     <div class="form-group">
       <label class="form-label">Receiver Name <span style="color:#999;font-size:12px">(optional)</span></label>
@@ -4384,7 +4406,6 @@ function showDeliveryModal(j) {
     </div>`);
 
   // Show/hide courier-specific optional fields based on method selection
-  // v49.5: Default values with auto-clear on focus — "Self" for receiver, "MARK" for courier
   let _dmRnameEdited = false, _dmCourierEdited = false;
   const toggleCourierFields = (method) => {
     const show = method === 'courier';
@@ -4402,7 +4423,6 @@ function showDeliveryModal(j) {
       if (rnameEl && !_dmRnameEdited) { rnameEl.value = ''; }
     }
   };
-  // Auto-clear default on first focus, let user type freely
   const rnameEl = document.getElementById('dm-rname');
   const courierEl = document.getElementById('dm-courier');
   rnameEl?.addEventListener('focus', () => {
@@ -4420,13 +4440,17 @@ function showDeliveryModal(j) {
   });
   courierEl?.addEventListener('input', () => { _dmCourierEdited = true; courierEl.style.color = ''; });
   document.getElementById('dm-method')?.addEventListener('change', e => { _dmRnameEdited = false; _dmCourierEdited = false; toggleCourierFields(e.target.value); });
-  toggleCourierFields('in_person'); // default dim courier fields + set "Self"
+  toggleCourierFields('in_person');
 
   document.getElementById('dm-confirm')?.addEventListener('click', async () => {
     const rname = document.getElementById('dm-rname')?.value.trim() || null;
+    const deliveryDate = document.getElementById('dm-date')?.value || null;
+    // v49.9: Send custom delivery date (or null for server-side 'now')
+    const deliveredAt = deliveryDate ? deliveryDate + 'T12:00:00' : null;
     try {
       await API.put(`/api/jobs/${j.id}`, {
         status:                   'delivered',
+        delivered_at:             deliveredAt,
         delivery_receiver_name:   rname,
         delivery_receiver_mobile: document.getElementById('dm-rmob')?.value.trim() || null,
         delivery_method:          document.getElementById('dm-method')?.value || 'in_person',
@@ -4440,10 +4464,9 @@ function showDeliveryModal(j) {
         } : {}),
       });
       closeModal(); toast('Job marked as delivered ✅', 'success');
-      // Log delivery to history
       API.post(`/api/jobs/${j.id}/history`, {
         action: 'Delivered',
-        detail: `Delivered to: ${rname || 'Customer'}${document.getElementById('dm-method')?.value === 'courier' ? ' via courier' : ' in person'}`
+        detail: `Delivered to: ${rname || 'Customer'}${document.getElementById('dm-method')?.value === 'courier' ? ' via courier' : ' in person'}${deliveryDate && deliveryDate !== today ? ' on ' + deliveryDate : ''}`
       }).catch(() => {});
       await loadDetail();
       // Auto-download delivered job card (once, no duplicate prompt)
@@ -6506,10 +6529,21 @@ async function printAddressLabel(j) {
     ctx.font = '500 36px "Segoe UI", Arial, sans-serif';    // was 26 → +10pt = 36
     const fromAddr = ['Opp. Metropolitan Court Gate 2, Gheekanta', 'Ahmedabad 380001 | M: 7801990001'];
     fromAddr.forEach(line => {
-      // Wrap from-address lines that exceed 95mm
       const wrapped = wrapText(ctx, line, maxTextW);
       wrapped.forEach(wl => { ctx.fillText(wl, padX, fy); fy += 40; });
     });
+
+    // v49.9: Job number watermark — bottom-right corner, readable but subtle
+    const jobNum = j.id || '';
+    if (jobNum) {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = '#1565C0';
+      ctx.font = 'bold 38px "Segoe UI", Arial, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(jobNum, W - padX, H - 24);
+      ctx.restore();
+    }
 
     // Convert to blob & share/download
     const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', 0.95));

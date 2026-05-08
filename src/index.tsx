@@ -762,7 +762,14 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
   for (const k of allowed) {
     if (k in body) { fields.push(`${k}=?`); vals.push(body[k]) }
   }
-  if (body.status === 'delivered' || body.status === 'partial_delivered') fields.push(`delivered_at=datetime('now')`)
+  // v49.9: Support custom delivery date — use provided date or default to now
+  if (body.status === 'delivered' || body.status === 'partial_delivered') {
+    if (body.delivered_at) {
+      fields.push(`delivered_at=?`); vals.push(body.delivered_at)
+    } else {
+      fields.push(`delivered_at=datetime('now')`)
+    }
+  }
   if (!fields.length) return c.json({ error: 'No fields to update' }, 400)
   fields.push(`updated_at=datetime('now')`)
   vals.push(id)
@@ -1622,13 +1629,9 @@ app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
 })
 
 // ── API: AI — Gemini-powered product and invoice analysis ────────────────────
-// v49.8: Smart model fallback — tries Gemini models, handles 400/403/404/429/503
-const GEMINI_MODELS = [
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-]
-// Safe base64 encoding for large ArrayBuffers (spread operator crashes on large arrays)
+// v49.9: Single model call (no chain = no rate limit burn), with DB fallback
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash']
+
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer)
   let binary = ''
@@ -1640,78 +1643,74 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary)
 }
 
-async function callGemini(apiKey: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string, model?: string}> {
-  let lastError = ''
-  for (const model of GEMINI_MODELS) {
+// v49.9: Find the best working model ONCE and cache it in KV/memory
+let _cachedModel: string | null = null
+async function pickModel(apiKey: string): Promise<string> {
+  if (_cachedModel) return _cachedModel
+  // Quick probe with text-only — doesn't burn image quota
+  for (const m of GEMINI_MODELS) {
     try {
-      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents, generationConfig: genConfig || { temperature: 0.1, maxOutputTokens: 512 } })
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: 'Reply OK' }] }], generationConfig: { maxOutputTokens: 5 } })
       })
-      if (resp.ok) {
-        const data = await resp.json() as any
-        // Check for blocked/empty responses
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
-        if (!text && data?.candidates?.[0]?.finishReason === 'SAFETY') {
-          lastError = `Gemini (${model}): Content blocked by safety filters`
-          continue
-        }
-        return { ok: true, data, model }
-      }
-      const errText = await resp.text()
-      lastError = `Gemini (${model}) ${resp.status}: ${errText.slice(0, 200)}`
-      // Retryable errors → try next model
-      if ([404, 429, 503, 500].includes(resp.status)) continue
-      // 400 may mean model doesn't support the request format → try next
-      if (resp.status === 400 && (errText.includes('not found') || errText.includes('not supported') || errText.includes('deprecated'))) continue
-      // 403 with API key issue → stop immediately (wrong key)
-      if (resp.status === 403) return { ok: false, error: `API key error: ${errText.slice(0, 150)}. Check your Gemini API key.` }
-      // Other 400 errors → could be image issue, try next model
-      if (resp.status === 400) continue
-      return { ok: false, error: lastError }
-    } catch (e: any) {
-      lastError = `Network error (${model}): ${e.message || 'unknown'}`
-      continue
-    }
+      if (r.ok) { _cachedModel = m; return m }
+      if (r.status === 403) break  // bad key — no point trying more
+    } catch (_) {}
   }
-  return { ok: false, error: lastError || 'No compatible Gemini model found. Check your API key permissions.' }
+  return GEMINI_MODELS[0]  // fallback default
 }
 
-// v49.8: Dedicated API key test endpoint — validates key without needing an image
+async function callGemini(apiKey: string, model: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string}> {
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents, generationConfig: genConfig || { temperature: 0.1, maxOutputTokens: 512 } })
+  })
+  if (resp.ok) {
+    const data = await resp.json() as any
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!text && data?.candidates?.[0]?.finishReason === 'SAFETY') {
+      return { ok: false, error: 'Content blocked by safety filters' }
+    }
+    return { ok: true, data }
+  }
+  const errText = await resp.text()
+  if (resp.status === 429) return { ok: false, error: 'RATE_LIMITED' }
+  if (resp.status === 403) return { ok: false, error: `Invalid API key. Check Settings.` }
+  return { ok: false, error: `Gemini ${resp.status}: ${errText.slice(0, 120)}` }
+}
+
+// v49.9: Dedicated API key test — uses listModels (1 call, no generateContent)
 app.post('/api/ai/test-key', authMiddleware, adminOnly, async (c) => {
   const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
   if (!geminiKey) return c.json({ error: 'No API key configured' }, 400)
   try {
-    // Use a simple text-only request to validate the key works
-    for (const model of GEMINI_MODELS) {
-      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: 'Reply with exactly: OK' }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 10 }
-        })
-      })
-      if (resp.ok) {
-        return c.json({ ok: true, model, message: `API key works! Using ${model}` })
-      }
-      if (resp.status === 403) {
-        const t = await resp.text()
-        return c.json({ error: `Invalid API key: ${t.slice(0, 100)}` }, 400)
-      }
-      if (resp.status === 404 || resp.status === 400) continue
-      if (resp.status === 429) return c.json({ error: 'Rate limited — try again in a minute' }, 429)
+    // listModels is a lightweight GET that validates the key without using RPM quota
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}&pageSize=5`)
+    if (resp.ok) {
+      const data = await resp.json() as any
+      const models = (data.models || []).map((m: any) => m.name?.replace('models/', '')).filter(Boolean)
+      const flash = models.find((n: string) => n.includes('flash')) || models[0] || 'gemini-2.0-flash'
+      _cachedModel = flash  // cache it
+      return c.json({ ok: true, model: flash, message: `API key works! Best model: ${flash}` })
     }
-    return c.json({ error: 'No compatible Gemini model found for this API key' }, 400)
+    if (resp.status === 400 || resp.status === 403) {
+      return c.json({ error: 'Invalid API key — please check and re-enter' }, 400)
+    }
+    if (resp.status === 429) {
+      return c.json({ error: 'Rate limited — wait 60 seconds and try again' }, 429)
+    }
+    return c.json({ error: `Unexpected error (${resp.status})` }, 400)
   } catch (e: any) {
     return c.json({ error: `Connection error: ${e.message}` }, 500)
   }
 })
 
+// v49.9: Analyze product image — Gemini + DB fallback
 app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
   const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
-  if (!geminiKey) return c.json({ error: 'Gemini API key not configured. Ask admin to set it in Settings.' }, 400)
+  if (!geminiKey) return c.json({ error: 'Gemini API key not configured. Set it in Settings.' }, 400)
   const formData = await c.req.formData()
   const file = formData.get('image') as File | null
   if (!file) return c.json({ error: 'No image provided' }, 400)
@@ -1719,51 +1718,79 @@ app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
     const buf = await file.arrayBuffer()
     const base64 = arrayBufferToBase64(buf)
     const mimeType = file.type || 'image/jpeg'
-    // Fetch past learnings for context
+    // Fetch past learnings for context (helps Gemini match known products)
     const { results: learnings } = await c.env.DB.prepare(
-      'SELECT product_name, product_complaint, charges, brand, model, category FROM ai_learning ORDER BY id DESC LIMIT 30'
+      'SELECT product_name, product_complaint, charges, brand, model, category FROM ai_learning ORDER BY id DESC LIMIT 50'
     ).all<any>()
     let learningCtx = ''
     if (learnings.length) {
-      learningCtx = '\n\nHere are previous product identifications from this repair shop for reference:\n' +
-        learnings.map((l: any) => `- ${l.product_name || ''}${l.brand ? ' (Brand: '+l.brand+')' : ''}${l.model ? ' Model: '+l.model : ''}${l.category ? ' Cat: '+l.category : ''}${l.product_complaint ? ' Complaint: '+l.product_complaint : ''}${l.charges ? ' Charges: ₹'+l.charges : ''}`).join('\n')
+      learningCtx = '\n\nPrevious products from this repair shop (use as reference):\n' +
+        learnings.map((l: any) => `- ${l.product_name || ''}${l.brand ? ' | Brand:'+l.brand : ''}${l.model ? ' | Model:'+l.model : ''}${l.category ? ' | Cat:'+l.category : ''}${l.product_complaint ? ' | Issue:'+l.product_complaint : ''}`).join('\n')
     }
-    const result = await callGemini(geminiKey, [{
+    const model = await pickModel(geminiKey)
+    const result = await callGemini(geminiKey, model, [{
       parts: [
         { inlineData: { mimeType, data: base64 } },
-        { text: `You are an expert at identifying salon/barbershop electrical products. Analyze this product image and identify:
-1. Brand Name (e.g., Ikonic, Wahl, HNK, Chaoba, Nova, Philips, MARC, AYTY Pro)
-2. Model Number/Name (e.g., Pro 2500, Designer, Super Taper)
-3. Category (Hair Dryer, Clipper, Trimmer, Straightener, Curler, Crimper, or other)
+        { text: `You are an expert at identifying electrical products used in salons and barbershops. Look at this product image carefully.
 
-Return ONLY a JSON object: {"brand":"...","model":"...","category":"...","product_name":"...","confidence":0.0-1.0}
-- product_name: Format as "[Brand] [Model] [Category]" using only what you can identify.
-- If you only find the Category, just use that (e.g., "Hair Dryer").
-- If Brand + Category, use both (e.g., "Ikonic Hair Dryer").
-- If all three found: "Ikonic Pro 2500 Hair Dryer".
-- Set confidence 0.0-1.0. If below 0.6, set product_name to empty string.
-- Fields you cannot identify should be empty strings.
+Identify:
+1. Brand Name (common brands: Ikonic, Wahl, HNK, Chaoba, Nova, Philips, MARC, AYTY Pro, Kemei, VGR, Babyliss)
+2. Model Number/Name
+3. Category (Hair Dryer, Clipper, Trimmer, Straightener, Curler, Crimper, Steamer, Massager, or other)
+
+IMPORTANT: Even if the image is blurry or partial, try your best to identify at least the Category.
+If you can see ANY text or logo on the product, extract it.
 ${learningCtx}
 
-Return ONLY valid JSON, no markdown, no explanation.` }
+Return ONLY a JSON object: {"brand":"...","model":"...","category":"...","product_name":"Brand Model Category","confidence":0.0-1.0}
+- product_name = combine what you found: "Brand Model Category" or just "Category" if brand unknown
+- confidence: your certainty (0.0-1.0). Set to at least 0.6 if you can identify the category.
+- Empty string for fields you truly cannot identify.
+Return ONLY valid JSON, no markdown.` }
       ]
     }])
-    if (!result.ok) return c.json({ error: result.error }, 502)
-    const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return c.json({ product_name: '', brand: '', model: '', category: '', confidence: 0 })
-    const parsed = JSON.parse(jsonMatch[0])
-    return c.json({
-      product_name: parsed.product_name || '',
-      brand: parsed.brand || '',
-      model: parsed.model || '',
-      category: parsed.category || '',
-      confidence: parsed.confidence || 0,
-    })
+    // If Gemini succeeded, return results
+    if (result.ok) {
+      const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      const jsonMatch = text.match(/\{[\s\S]*?\}/)
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0])
+          if (parsed.product_name || parsed.brand || parsed.category) {
+            return c.json({
+              product_name: parsed.product_name || '', brand: parsed.brand || '',
+              model: parsed.model || '', category: parsed.category || '',
+              confidence: parsed.confidence || 0, source: 'gemini'
+            })
+          }
+        } catch (_) {}
+      }
+    }
+    // v49.9: FALLBACK — if Gemini fails or returns nothing, suggest from ai_learning DB
+    if (learnings.length) {
+      // Return the most common recent product as a suggestion
+      const freq: Record<string, {count: number, brand: string, category: string}> = {}
+      for (const l of learnings) {
+        const key = l.product_name || ''
+        if (!key) continue
+        if (!freq[key]) freq[key] = { count: 0, brand: l.brand || '', category: l.category || '' }
+        freq[key].count++
+      }
+      const sorted = Object.entries(freq).sort((a, b) => b[1].count - a[1].count)
+      if (sorted.length) {
+        return c.json({
+          product_name: '', brand: sorted[0][1].brand, model: '',
+          category: sorted[0][1].category, confidence: 0,
+          suggestions: sorted.slice(0, 5).map(([name, d]) => ({ name, brand: d.brand, category: d.category, count: d.count })),
+          source: 'learning_db', ai_error: result.error || 'AI could not identify'
+        })
+      }
+    }
+    return c.json({ product_name: '', brand: '', model: '', category: '', confidence: 0, ai_error: result.error || 'Analysis failed' })
   } catch (e: any) { return c.json({ error: e.message || 'AI analysis failed' }, 500) }
 })
 
-// v49.6: Analyze invoice image using smart Gemini model fallback
+// v49.9: Analyze invoice image — Gemini + DB fallback
 app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
   const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
   if (!geminiKey) return c.json({ error: 'Gemini API key not configured' }, 400)
@@ -1774,33 +1801,58 @@ app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
     const buf = await file.arrayBuffer()
     const base64 = arrayBufferToBase64(buf)
     const mimeType = file.type || 'image/jpeg'
-    const result = await callGemini(geminiKey, [{
+    // Fetch recent invoice data from machines table for context
+    const { results: invoiceHistory } = await c.env.DB.prepare(
+      `SELECT purchased_from, purchase_invoice_no, purchase_date FROM machines 
+       WHERE warranty_type='warranty' AND purchased_from IS NOT NULL 
+       ORDER BY ROWID DESC LIMIT 20`
+    ).all<any>()
+    let invoiceCtx = ''
+    if (invoiceHistory.length) {
+      const sellers = [...new Set(invoiceHistory.map((i: any) => i.purchased_from).filter(Boolean))]
+      invoiceCtx = `\n\nKnown sellers/dealers from this shop's records: ${sellers.join(', ')}`
+    }
+    const model = await pickModel(geminiKey)
+    const result = await callGemini(geminiKey, model, [{
       parts: [
         { inlineData: { mimeType, data: base64 } },
-        { text: `Analyze this purchase invoice/bill image and extract:
-1. purchased_from: The shop/dealer/seller name
-2. invoice_no: The invoice/bill number
-3. purchase_date: The date on the invoice (format: YYYY-MM-DD)
+        { text: `Extract information from this purchase invoice/bill image:
+1. purchased_from: The shop/dealer/seller name (look for company name, letterhead, stamp)
+2. invoice_no: The invoice/bill/receipt number
+3. purchase_date: The date (convert to YYYY-MM-DD)
+
+IMPORTANT: Look carefully at ALL text in the image. Even faint or small text.
+${invoiceCtx}
 
 Return ONLY a JSON object: {"purchased_from":"...","invoice_no":"...","purchase_date":"...","confidence":0.0-1.0}
-- Fields you cannot read should be empty strings.
-- For date, convert to YYYY-MM-DD format if possible.
-- confidence: overall confidence 0.0-1.0.
-
-Return ONLY valid JSON, no markdown, no explanation.` }
+- Fields you cannot read: empty strings. 
+- Date must be YYYY-MM-DD format.
+Return ONLY valid JSON, no markdown.` }
       ]
     }])
-    if (!result.ok) return c.json({ error: result.error }, 502)
-    const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return c.json({ purchased_from: '', invoice_no: '', purchase_date: '', confidence: 0 })
-    const parsed = JSON.parse(jsonMatch[0])
-    return c.json({
-      purchased_from: parsed.purchased_from || '',
-      invoice_no: parsed.invoice_no || '',
-      purchase_date: parsed.purchase_date || '',
-      confidence: parsed.confidence || 0,
-    })
+    if (result.ok) {
+      const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      const jsonMatch = text.match(/\{[\s\S]*?\}/)
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0])
+          return c.json({
+            purchased_from: parsed.purchased_from || '', invoice_no: parsed.invoice_no || '',
+            purchase_date: parsed.purchase_date || '', confidence: parsed.confidence || 0, source: 'gemini'
+          })
+        } catch (_) {}
+      }
+    }
+    // v49.9: FALLBACK — suggest from known invoice data
+    if (invoiceHistory.length) {
+      const sellers = [...new Set(invoiceHistory.map((i: any) => i.purchased_from).filter(Boolean))]
+      return c.json({
+        purchased_from: '', invoice_no: '', purchase_date: '', confidence: 0,
+        seller_suggestions: sellers.slice(0, 5),
+        source: 'invoice_db', ai_error: result.error || 'AI could not read invoice'
+      })
+    }
+    return c.json({ purchased_from: '', invoice_no: '', purchase_date: '', confidence: 0, ai_error: result.error || 'Analysis failed' })
   } catch (e: any) { return c.json({ error: e.message || 'AI analysis failed' }, 500) }
 })
 
