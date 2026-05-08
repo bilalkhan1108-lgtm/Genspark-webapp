@@ -854,25 +854,48 @@ async function aiAnalyzeProduct(file, productInputId) {
     fd.append('image', compressed);
     const r = await API.post('/api/ai/analyze-product', fd);
     const d = r.data;
-    if (d.product_name && d.confidence >= 0.6 && !inp.value.trim()) {
+    // v50: Handle all response types — gemini result, DB fallback auto-fill, suggestions
+    if (d.product_name && !inp.value.trim()) {
+      // Auto-fill product name (from Gemini or DB fallback)
       inp.value = d.product_name;
       inp.dispatchEvent(new Event('input', { bubbles: true }));
-      toast(`🤖 AI: ${d.product_name} (${Math.round(d.confidence * 100)}%)`, 'success');
-    } else if (d.product_name && d.confidence >= 0.6 && inp.value.trim()) {
+      const pct = d.confidence ? ` (${Math.round(d.confidence * 100)}%)` : '';
+      const src = d.source === 'learning_db' ? ' (from history)' : '';
+      toast(`🤖 AI: ${d.product_name}${pct}${src}`, 'success');
+    } else if (d.product_name && inp.value.trim()) {
+      // Field already has value — show as suggestion
       toast(`🤖 AI suggests: ${d.product_name}`, 'info');
     } else if (d.suggestions && d.suggestions.length && !inp.value.trim()) {
-      // v49.9: DB fallback — show top suggestions from learning history
+      // v50: Auto-fill from top suggestion when no direct match
       const top = d.suggestions[0];
-      toast(`🤖 AI couldn't identify. Try: ${top.name}`, 'info');
+      inp.value = top.name;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      toast(`🤖 Best match: ${top.name} (from your history)`, 'info');
     } else if (d.ai_error) {
-      toast(`🤖 ${d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : 'AI could not identify product'}`, 'warning');
+      const msg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : d.ai_error;
+      toast(`🤖 ${msg}`, 'warning');
     } else if (d.error) {
       toast(`🤖 ${d.error}`, 'error');
+    } else {
+      toast('🤖 AI could not identify — enter product name manually', 'warning');
+    }
+    // v50: Also auto-fill complaint & charges tiles if available from DB
+    if (d.product_complaint || d.charges) {
+      // Try to find complaint input (nj-complaint or am-comp depending on context)
+      const prefix = productInputId.startsWith('nj-') ? 'nj' : 'am';
+      const compEl = document.getElementById(prefix + '-complaint') || document.getElementById(prefix + '-comp');
+      if (compEl && d.product_complaint && !compEl.value.trim()) {
+        compEl.value = d.product_complaint;
+      }
+      if (d.charges && hasSuperRight('view_financials')) {
+        const chgEl = document.getElementById(prefix + '-charges') || document.getElementById(prefix + '-chg');
+        if (chgEl && !chgEl.value) chgEl.value = d.charges;
+      }
     }
   } catch (e) {
     const msg = e?.response?.data?.error || '';
     if (msg) toast(`🤖 ${msg}`, 'error');
-    else console.warn('AI product analysis failed:', e.message);
+    else toast('🤖 AI analysis failed — enter product name manually', 'warning');
   } finally {
     inp.placeholder = origPlaceholder;
     inp.style.borderColor = '';
@@ -895,23 +918,32 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
     const r = await API.post('/api/ai/analyze-invoice', fd);
     const d = r.data;
     let filled = [];
-    if (d.purchased_from && pfEl && !pfEl.value.trim()) { pfEl.value = d.purchased_from; filled.push('Seller'); }
+    // v50: Auto-fill from both Gemini results AND DB fallback (which now sends actual values)
+    if (d.purchased_from && pfEl) {
+      if (!pfEl.value.trim()) { pfEl.value = d.purchased_from; filled.push('Seller'); }
+      else if (pfEl.value.trim() !== d.purchased_from) toast(`🤖 AI suggests seller: ${d.purchased_from}`, 'info');
+    }
     if (d.invoice_no && inEl && !inEl.value.trim()) { inEl.value = d.invoice_no; filled.push('Invoice No'); }
     if (d.purchase_date && pdEl && !pdEl.value) { pdEl.value = d.purchase_date; filled.push('Date'); }
     if (filled.length) {
-      toast(`🤖 AI extracted: ${filled.join(', ')}`, 'success');
+      const src = d.source === 'invoice_db' ? ' (from history)' : '';
+      toast(`🤖 AI filled: ${filled.join(', ')}${src}`, 'success');
     } else if (d.seller_suggestions && d.seller_suggestions.length && pfEl && !pfEl.value.trim()) {
-      // v49.9: DB fallback — show known sellers
-      toast(`🤖 AI couldn't read. Known sellers: ${d.seller_suggestions.slice(0,3).join(', ')}`, 'info');
+      // v50: Auto-fill first known seller from DB
+      pfEl.value = d.seller_suggestions[0];
+      toast(`🤖 Filled seller: ${d.seller_suggestions[0]} (from history). Others: ${d.seller_suggestions.slice(1,3).join(', ')}`, 'info');
     } else if (d.ai_error) {
-      toast(`🤖 ${d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : 'AI could not read invoice'}`, 'warning');
+      const msg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : d.ai_error;
+      toast(`🤖 ${msg}`, 'warning');
     } else if (d.error) {
       toast(`🤖 ${d.error}`, 'error');
+    } else {
+      toast('🤖 AI could not read invoice — enter details manually', 'warning');
     }
   } catch (e) {
     const msg = e?.response?.data?.error || '';
     if (msg) toast(`🤖 ${msg}`, 'error');
-    else console.warn('AI invoice analysis failed:', e.message);
+    else toast('🤖 Invoice analysis failed — enter details manually', 'warning');
   } finally {
     indicator.placeholder = origPlaceholder;
     indicator.style.borderColor = '';
@@ -6243,24 +6275,38 @@ function bindSettings() {
       } catch (_) { toast('Failed to save API key', 'error'); }
     });
 
-    // Test key — uses dedicated text-only endpoint (no image needed, faster & reliable)
+    // v50: Test key — robust with retry, handles 429 gracefully
     document.getElementById('btn-ai-key-test')?.addEventListener('click', async () => {
       const st = document.getElementById('ai-key-status');
       const btn = document.getElementById('btn-ai-key-test');
       if (btn) btn.disabled = true;
-      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing API key with Gemini…'; }
-      try {
-        const r = await API.post('/api/ai/test-key');
-        const model = r.data?.model || 'Gemini';
-        if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> API key works! Using <b>${esc(model)}</b>. AI features enabled.`; }
-        toast(`Gemini API key works ✅ (${model})`, 'success');
-      } catch (e) {
-        const msg = e?.response?.data?.error || 'API key test failed — check your key';
-        if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + esc(msg); }
-        toast(msg, 'error');
-      } finally {
-        if (btn) btn.disabled = false;
+      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing API key with Gemini… (may take a few seconds)'; }
+      let lastError = '';
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const r = await API.post('/api/ai/test-key');
+          if (r.data?.ok) {
+            const model = r.data?.model || 'Gemini';
+            if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> API key works! Using <b>${esc(model)}</b>. AI features enabled.`; }
+            toast(`Gemini API key works ✅ (${model})`, 'success');
+            if (btn) btn.disabled = false;
+            return;
+          }
+        } catch (e) {
+          lastError = e?.response?.data?.error || 'Test failed';
+          // On 429, wait 3s and retry once
+          if (e?.response?.status === 429 && attempt === 0) {
+            if (st) st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Rate limited — retrying in 3 seconds…';
+            await new Promise(r => setTimeout(r, 3000));
+            continue;
+          }
+        }
+        break;
       }
+      // Show final error
+      if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + esc(lastError || 'API key test failed — check your key'); }
+      toast(lastError || 'API key test failed', 'error');
+      if (btn) btn.disabled = false;
     });
   }
 
@@ -6533,15 +6579,15 @@ async function printAddressLabel(j) {
       wrapped.forEach(wl => { ctx.fillText(wl, padX, fy); fy += 40; });
     });
 
-    // v49.9: Job number watermark — bottom-right corner, readable but subtle
+    // v50: Job number watermark — bottom-right, clearly readable, professional
     const jobNum = j.id || '';
     if (jobNum) {
       ctx.save();
-      ctx.globalAlpha = 0.35;
+      ctx.globalAlpha = 0.55;
       ctx.fillStyle = '#1565C0';
-      ctx.font = 'bold 38px "Segoe UI", Arial, sans-serif';
+      ctx.font = 'bold 52px "Segoe UI", Arial, sans-serif';
       ctx.textAlign = 'right';
-      ctx.fillText(jobNum, W - padX, H - 24);
+      ctx.fillText(jobNum, W - padX, H - 20);
       ctx.restore();
     }
 
