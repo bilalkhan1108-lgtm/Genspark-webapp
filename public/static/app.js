@@ -1194,7 +1194,7 @@ function headerHTML() {
     <div class="hdr-right">
       ${window._pwaInstallPrompt ? `<button class="icon-btn pwa-install-btn" id="hdr-install-btn" title="Install App" style="color:#43A047"><i class="fas fa-download"></i></button>` : ''}
       <span class="role-badge ${S.user?.role==='admin'?'role-admin':S.user?.role==='supervisor'?'role-manager':'role-staff'}">${esc((S.user?.name||'').split(' ')[0])}</span>
-      <button class="icon-btn" id="hdr-logout-btn" title="Sign out"><i class="fas fa-sign-out-alt"></i></button>
+      <button class="icon-btn" id="hdr-refresh-btn" title="Refresh"><i class="fas fa-sync-alt"></i></button>
     </div>
   </header>`;
 }
@@ -1257,7 +1257,7 @@ const deniedHTML = () => `<div class="empty-state"><i class="fas fa-lock fa-3x">
 
 function bindView() {
   document.getElementById('hdr-back-btn')?.addEventListener('click', () => navigate('dashboard'));
-  document.getElementById('hdr-logout-btn')?.addEventListener('click', logout);
+  document.getElementById('hdr-refresh-btn')?.addEventListener('click', () => { _analyticsCacheTs = 0; loadJobs(); toast('Refreshed ✅', 'success'); });
   document.getElementById('hdr-install-btn')?.addEventListener('click', async () => {
     if (!window._pwaInstallPrompt) return;
     try {
@@ -1365,7 +1365,7 @@ function dashboardHTML() {
         <button class="fp-chip ${S.filter==='delivered'?'fp-active':''}" data-fp-status="delivered" style="--fp-color:${sc('delivered')}">Delivered</button>
         <button class="fp-chip ${S.filter==='active_only'?'fp-active':''}" data-fp-status="active_only" style="--fp-color:#2E7D32">Active Only</button>
         <button class="fp-chip ${S.filter==='courier_pending'?'fp-active':''}" data-fp-status="courier_pending" style="--fp-color:#7B1FA2">📮 Courier Pending</button>
-        ${isAdmin() ? `<button class="fp-chip ${S.filter==='pending_payment'?'fp-active':''}" data-fp-status="pending_payment" style="--fp-color:#FB8C00">Pending Payment</button>` : ''}
+        ${roleLevel(S.user?.role) >= 2 ? `<button class="fp-chip ${S.filter==='pending_payment'?'fp-active':''}" data-fp-status="pending_payment" style="--fp-color:#FB8C00">💰 Pending Payment</button>` : ''}
       </div>
       <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Date Range</div>
       <div style="display:flex;gap:8px;margin-bottom:10px">
@@ -1505,17 +1505,18 @@ async function loadJobs(append = false) {
     _jobsLoadId++;
     const cacheKey = _idbFilterKey();
 
-    // v47: BRAND FILTER — instant client-side filter by warranty brand
+    // v50.1: BRAND FILTER — parallel IDB lookups (was sequential, caused lag)
     if (S.brandFilter && _allLoadedJobs.length) {
-      // This requires detail data with machines — filter from master cache
-      // Jobs that have at least one machine with warranty_brand matching
-      // Since list view doesn't include machine details, we filter from detail cache
+      const BATCH = 20;
       const brandJobs = [];
-      for (const j of _allLoadedJobs) {
-        const detail = await IDB.loadDetail(j.id);
-        if (detail?.machines?.some(m => m.warranty_type === 'warranty' && m.warranty_brand === S.brandFilter)) {
-          brandJobs.push(j);
-        }
+      for (let i = 0; i < _allLoadedJobs.length; i += BATCH) {
+        const batch = _allLoadedJobs.slice(i, i + BATCH);
+        const details = await Promise.all(batch.map(j => IDB.loadDetail(j.id)));
+        details.forEach((detail, idx) => {
+          if (detail?.machines?.some(m => m.warranty_type === 'warranty' && m.warranty_brand === S.brandFilter)) {
+            brandJobs.push(batch[idx]);
+          }
+        });
       }
       S.jobs = brandJobs;
       renderVList(false);
@@ -1631,15 +1632,16 @@ async function loadJobs(append = false) {
   if (_isOffline) setTimeout(() => _lockMutatingUI(true), 50);
 }
 
-// v43: Aggressive prefetch — fetches ALL job details in background for instant loading
+// v50.1: Smarter prefetch — only prefetch visible jobs first, longer delay to reduce lag
 let _prefetchRunning = false;
 let _prefetchQueue = [];       // jobs waiting to be prefetched
 let _prefetchPriority = null;  // high-priority job ID (user tapped on this)
 async function _prefetchDetails(jobs) {
   if (!jobs?.length) return;
-  // Merge into queue (deduplicate by id)
+  // Only queue first 15 jobs initially (visible ones), rest will load on demand
+  const toQueue = jobs.slice(0, 15);
   const existing = new Set(_prefetchQueue.map(j => j.id));
-  for (const j of jobs) {
+  for (const j of toQueue) {
     if (j?.id && !existing.has(j.id)) { _prefetchQueue.push(j); existing.add(j.id); }
   }
   if (_prefetchRunning) return;
@@ -1654,15 +1656,15 @@ async function _prefetchDetails(jobs) {
       }
       const j = _prefetchQueue.shift();
       if (!j?.id) continue;
-      // Skip if we already have fresh cached detail (less than 3 min old)
+      // Skip if we already have fresh cached detail (less than 5 min old)
       const cached = await IDB.loadDetail(j.id);
-      if (cached && cached._cachedAt && (Date.now() - cached._cachedAt) < 180000 && !cached._listCache) continue;
+      if (cached && cached._cachedAt && (Date.now() - cached._cachedAt) < 300000 && !cached._listCache) continue;
       try {
         const resp = await API.get(`/api/jobs/${j.id}`);
         if (resp.data) IDB.saveDetail(resp.data);
       } catch { /* Silent */ }
-      // Minimal delay — 80ms keeps API happy, much faster than 200ms
-      await new Promise(r => setTimeout(r, 80));
+      // v50.1: Increased delay to 150ms — reduces API hammering & main thread contention
+      await new Promise(r => setTimeout(r, 150));
     }
   } catch {}
   _prefetchRunning = false;
@@ -2199,6 +2201,13 @@ function bindNewJob() {
         document.getElementById('nj-address').value = r.data.address || '';
         const catSel = document.getElementById('nj-category');
         if (catSel && r.data.category) catSel.value = r.data.category;
+        // v50.1: Auto-fill dispatch method preference
+        const dispSel = document.getElementById('nj-dispatch');
+        if (dispSel && r.data.dispatch_method) {
+          dispSel.value = r.data.dispatch_method;
+          const wrap = document.getElementById('nj-dispatch-courier-wrap');
+          if (wrap) wrap.style.display = r.data.dispatch_method === 'courier' ? 'block' : 'none';
+        }
         toast('Customer found — auto-filled ✅', 'success');
         // Auto-focus product name after auto-fill
         setTimeout(() => document.getElementById('nj-product')?.focus(), 150);
@@ -2249,24 +2258,67 @@ function bindNewJob() {
           nameIn.parentElement.style.position = 'relative';
           nameIn.parentElement.appendChild(box);
         }
-        box.innerHTML = list.map(c => `
+        // v50.1: Store suggestions in temp array so onclick can access safely
+        window._njSuggestions = list;
+        box.innerHTML = list.map((c, idx) => `
           <div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #f0f0f0;font-size:14px"
                onmousedown="event.preventDefault()"
-               onclick="(function(){
-                 document.getElementById('nj-name').value='${esc(c.name)}';
-                 document.getElementById('nj-mobile').value='${c.mobile||''}';
-                 document.getElementById('nj-mobile2').value='${c.mobile2||''}';
-                 document.getElementById('nj-address').value='${esc(c.address||'')}';
-                 var _cs=document.getElementById('nj-category'); if(_cs) _cs.value='${esc(c.category||'Salon')}';
-                 document.getElementById('nj-suggest-box')?.remove();
-               })()">
+               onclick="window._njPickSuggestion(${idx})">
             <b>${esc(c.name)}</b> <span style="color:#888;font-size:12px">${c.mobile||''}</span>
+            ${c.category && c.category !== 'Salon' ? `<span style="background:#E3F2FD;color:#1565C0;border-radius:4px;padding:1px 6px;font-size:10px;margin-left:4px">${esc(c.category)}</span>` : ''}
+            ${c.dispatch_method === 'courier' ? `<span style="background:#F3E5F5;color:#7B1FA2;border-radius:4px;padding:1px 6px;font-size:10px;margin-left:4px">📮 Courier</span>` : ''}
           </div>`).join('');
       } catch (_) {}
     }, 300);
   });
   nameIn?.addEventListener('blur', () => { setTimeout(removeSuggestBox, 200); });
   function removeSuggestBox() { document.getElementById('nj-suggest-box')?.remove(); }
+
+  // v50.1: Pick suggestion — fills ALL fields including category, dispatch, triggers insights
+  window._njPickSuggestion = function(idx) {
+    const c = (window._njSuggestions || [])[idx];
+    if (!c) return;
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+    setVal('nj-name', c.name);
+    setVal('nj-mobile', c.mobile);
+    setVal('nj-mobile2', c.mobile2);
+    setVal('nj-address', c.address);
+    // Set category
+    const catSel = document.getElementById('nj-category');
+    if (catSel) catSel.value = c.category || 'Salon';
+    // Set dispatch method preference
+    const dispSel = document.getElementById('nj-dispatch');
+    if (dispSel && c.dispatch_method) {
+      dispSel.value = c.dispatch_method;
+      const wrap = document.getElementById('nj-dispatch-courier-wrap');
+      if (wrap) wrap.style.display = c.dispatch_method === 'courier' ? 'block' : 'none';
+    }
+    removeSuggestBox();
+    toast('Customer auto-filled ✅', 'success');
+    // Trigger mobile lookup for insights badge
+    if (c.mobile && c.mobile.length >= 10) {
+      _mobileLookupDone = c.mobile;
+      API.get('/api/customers/insights', { params: { mobile: c.mobile } }).then(ir => {
+        const ins = ir.data;
+        const badge = document.getElementById('nj-cust-insights');
+        if (badge && ins && ins.total_jobs > 0) {
+          badge.style.display = 'block';
+          badge.innerHTML = `
+            <div style="background:#E8F5E9;border:1px solid #43A047;border-radius:10px;padding:10px 14px;margin-top:8px">
+              <div style="font-size:14px;font-weight:800;color:#2E7D32;margin-bottom:4px">
+                🔄 Returning Customer (${ins.total_jobs} Jobs)
+              </div>
+              <div style="font-size:13px;color:#555;display:flex;gap:16px;flex-wrap:wrap">
+                <span>💰 Total Spent: <b>${fmtRs(ins.total_spending || 0)}</b></span>
+                ${ins.last_visit ? `<span>📅 Last Visit: <b>${fmtDate(ins.last_visit)}</b></span>` : ''}
+              </div>
+            </div>`;
+        }
+      }).catch(() => {});
+    }
+    // Focus product name
+    setTimeout(() => document.getElementById('nj-product')?.focus(), 150);
+  };
 
   // Smart suggestion tiles for new job product/complaint/amount fields
   const njProdSugs = document.getElementById('nj-prod-sugs');
@@ -2595,7 +2647,7 @@ function renderDetail() {
   if (hdr) {
     hdr.outerHTML = headerHTML();
     document.getElementById('hdr-back-btn')?.addEventListener('click', () => navigate('dashboard'));
-    document.getElementById('hdr-logout-btn')?.addEventListener('click', logout);
+    document.getElementById('hdr-refresh-btn')?.addEventListener('click', () => { _analyticsCacheTs = 0; loadJobs(); toast('Refreshed ✅', 'success'); });
   }
 
   const color    = sc(j.status);
@@ -2884,7 +2936,7 @@ function machineCardHTML(m, currentUserId) {
       ${(m.images||[]).map(img => `
       <div class="img-wrap" onclick="openImageViewer('${img.url}')" style="cursor:pointer">
         <img data-auth-src="${img.url}" class="img-thumb" loading="lazy" alt="">
-        ${hasSuperRight('edit_jobs') ? `<button class="img-del-btn" data-iid="${img.id}" title="Remove" onclick="event.stopPropagation()">×</button>` : ''}
+        ${isAdmin() ? `<button class="img-del-btn" data-iid="${img.id}" title="Remove" onclick="event.stopPropagation()">×</button>` : ''}
       </div>`).join('')}
       <!-- Camera button — part of machine details, available to all -->
       <label class="img-add-btn" title="Take / pick photo">
@@ -6988,7 +7040,7 @@ function bindHeaderInstall() {
   });
   // Re-bind logout/back after header re-render
   document.getElementById('hdr-back-btn')?.addEventListener('click', () => navigate('dashboard'));
-  document.getElementById('hdr-logout-btn')?.addEventListener('click', logout);
+  document.getElementById('hdr-refresh-btn')?.addEventListener('click', () => { _analyticsCacheTs = 0; loadJobs(); toast('Refreshed ✅', 'success'); });
 }
 
 // Handle app installed event

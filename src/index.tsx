@@ -203,6 +203,8 @@ async function ensureDbSchema(db: D1Database) {
     await db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_snap_name ON jobs(snap_name)`).run().catch(() => {})
     // v49.4: note column on customers for manual customer entry
     await db.prepare(`ALTER TABLE customers ADD COLUMN note TEXT`).run().catch(() => {})
+    // v50.1: dispatch_method preference on customers (courier / in_person)
+    await db.prepare(`ALTER TABLE customers ADD COLUMN dispatch_method TEXT`).run().catch(() => {})
     // v49.5: AI learning table — stores user corrections so AI improves over time
     await db.prepare(`
       CREATE TABLE IF NOT EXISTS ai_learning (
@@ -344,6 +346,7 @@ app.get('/api/auth/me', authMiddleware, async (c) => {
 })
 
 // ── API: Customers ────────────────────────────────────────────────────────────
+// v50.1: Return all customer fields including dispatch_method preference
 app.get('/api/customers/by-mobile', authMiddleware, async (c) => {
   const mobile = c.req.query('mobile') || ''
   const cust = await c.env.DB.prepare(
@@ -546,12 +549,13 @@ app.get('/api/jobs', authMiddleware, async (c) => {
 })
 
 // ── API: Jobs — pending payment filter
+// v50.1: Include ALL jobs (including delivered) with unpaid balance
 app.get('/api/jobs/pending-payment', authMiddleware, async (c) => {
   const role = c.get('userRole')
   const isAdminRole = roleLevel(role) >= 2
   if (!isAdminRole) return c.json({ error: 'Forbidden' }, 403)
   const search = c.req.query('q') || ''
-  const conds: string[] = ["j.status != 'delivered'"]
+  const conds: string[] = []
   const params: any[] = []
   if (search) {
     conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.id LIKE ?)')
@@ -591,12 +595,14 @@ app.post('/api/jobs', authMiddleware, async (c) => {
   const [, , prefixSetting, digitsSetting] = await Promise.all([
     c.env.DB.prepare('UPDATE job_counter SET last_seq=last_seq+1 WHERE id=1').run(),
     c.env.DB.prepare(
-      `INSERT INTO customers(name,mobile,mobile2,address,category) VALUES(?,?,?,?,?)
+      `INSERT INTO customers(name,mobile,mobile2,address,category,dispatch_method) VALUES(?,?,?,?,?,?)
        ON CONFLICT(mobile) DO UPDATE SET
          name=excluded.name, mobile2=excluded.mobile2,
-         address=excluded.address, category=excluded.category, updated_at=datetime('now')`
+         address=excluded.address, category=excluded.category,
+         dispatch_method=excluded.dispatch_method, updated_at=datetime('now')`
     ).bind(customer_name, customer_mobile,
-           body.customer_mobile2 || null, body.customer_address || null, category).run(),
+           body.customer_mobile2 || null, body.customer_address || null, category,
+           body.dispatch_method === 'courier' ? 'courier' : 'in_person').run(),
     c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_prefix'").first<any>(),
     c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_seq_digits'").first<any>(),
   ])
@@ -1311,6 +1317,7 @@ app.get('/api/my-notifications', authMiddleware, async (c) => {
 })
 
 // Job history endpoint — returns audit log for a job
+// v50.1: If no explicit history rows, synthesize timeline from job + machines data
 app.get('/api/jobs/:id/history', authMiddleware, async (c) => {
   const jobId = c.req.param('id')
   try {
@@ -1331,7 +1338,70 @@ app.get('/api/jobs/:id/history', authMiddleware, async (c) => {
     const { results } = await c.env.DB.prepare(`
       SELECT * FROM job_history WHERE job_id=? ORDER BY created_at DESC LIMIT 200
     `).bind(jobId).all<any>()
-    return c.json(results || [])
+
+    // v50.1: If we have real history entries, return them
+    if (results && results.length > 0) return c.json(results)
+
+    // Synthesize history from job + machines data for older jobs without history
+    const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first<any>()
+    if (!job) return c.json([])
+    const { results: machines } = await c.env.DB.prepare(
+      'SELECT * FROM machines WHERE job_id=? ORDER BY id'
+    ).bind(jobId).all<any>()
+    const synthetic: any[] = []
+    // 1. Job creation event
+    synthetic.push({
+      id: -1, job_id: jobId, action: 'Job Created',
+      detail: `Customer: ${job.snap_name || 'N/A'} (${job.snap_mobile || ''})${job.dispatch_method === 'courier' ? ' | Dispatch: Courier' : ''}`,
+      user_name: 'System', user_role: 'system', created_at: job.created_at
+    })
+    // 2. Machine additions
+    ;(machines || []).forEach((m: any, i: number) => {
+      synthetic.push({
+        id: -(i + 10), job_id: jobId, action: 'Machine Added',
+        detail: `${m.product_name || 'Product'} — ${m.complaint || 'N/A'}${m.charges ? ' | ₹' + m.charges : ''}`,
+        user_name: 'System', user_role: 'system', created_at: m.created_at || job.created_at
+      })
+    })
+    // 3. Payment events (if any received)
+    if (job.received_amount > 0) {
+      synthetic.push({
+        id: -100, job_id: jobId, action: 'Payment Updated',
+        detail: `Received: ₹${job.received_amount}${job.payment_method ? ' via ' + job.payment_method : ''}`,
+        user_name: 'System', user_role: 'system', created_at: job.updated_at || job.created_at
+      })
+    }
+    // 4. Discount (if any)
+    if (job.discount > 0) {
+      synthetic.push({
+        id: -101, job_id: jobId, action: 'Discount Updated',
+        detail: `Discount: ₹${job.discount}`,
+        user_name: 'System', user_role: 'system', created_at: job.updated_at || job.created_at
+      })
+    }
+    // 5. Machine status changes (repaired/delivered/returned)
+    ;(machines || []).forEach((m: any, i: number) => {
+      if (m.status === 'repaired' || m.status === 'delivered' || m.status === 'returned') {
+        synthetic.push({
+          id: -(200 + i), job_id: jobId,
+          action: m.status === 'repaired' ? 'Machine: repaired' : m.status === 'returned' ? 'Machine: returned' : 'Delivered',
+          detail: `${m.product_name || 'Product'}${m.work_done ? ' | Work: ' + m.work_done : ''}${m.return_reason ? ' | Reason: ' + m.return_reason : ''}`,
+          user_name: 'System', user_role: 'system',
+          created_at: m.delivered_at || m.updated_at || job.updated_at
+        })
+      }
+    })
+    // 6. Job delivery event
+    if (job.status === 'delivered' && job.delivered_at) {
+      synthetic.push({
+        id: -300, job_id: jobId, action: 'Status: delivered',
+        detail: 'All machines delivered',
+        user_name: 'System', user_role: 'system', created_at: job.delivered_at
+      })
+    }
+    // Sort newest first
+    synthetic.sort((a: any, b: any) => (b.created_at || '').localeCompare(a.created_at || ''))
+    return c.json(synthetic)
   } catch (e: any) {
     console.error('Job history fetch error:', e?.message || e)
     return c.json([])
@@ -2043,12 +2113,13 @@ app.get('/api/customers/insights', authMiddleware, async (c) => {
 })
 
 // ── API: Customer search by name/mobile ──────────────────────────────────────
+// v50.1: Return category + dispatch_method for auto-fill on name suggestion click
 app.get('/api/customers/search', authMiddleware, async (c) => {
   const q = (c.req.query('q') || '').trim()
   if (q.length < 2) return c.json([])
   const term = `%${q}%`
   const { results } = await c.env.DB.prepare(`
-    SELECT DISTINCT c.name, c.mobile, c.mobile2, c.address
+    SELECT DISTINCT c.name, c.mobile, c.mobile2, c.address, c.category, c.dispatch_method
     FROM customers c
     WHERE c.name LIKE ? OR c.mobile LIKE ? OR c.mobile2 LIKE ?
     ORDER BY c.name LIMIT 8
