@@ -842,6 +842,7 @@ function compressImage(file, maxW = 1080, quality = 0.82) {
 // ─────────────────────────────────────────────────────────────────────────────
 // v49.5: AI AUTO-ANALYZE — Gemini-powered product & invoice recognition
 // ─────────────────────────────────────────────────────────────────────────────
+// v50.2: AI product analysis — only auto-fills when Gemini actually identified the product
 async function aiAnalyzeProduct(file, productInputId) {
   const inp = document.getElementById(productInputId);
   if (!inp || !file) return;
@@ -849,28 +850,29 @@ async function aiAnalyzeProduct(file, productInputId) {
   inp.placeholder = '🤖 AI analyzing image…';
   inp.style.borderColor = '#7C4DFF';
   try {
-    const compressed = await compressImage(file, 800, 0.75);
+    // v50.2: Send higher quality image to Gemini for better recognition
+    const compressed = await compressImage(file, 1200, 0.85);
     const fd = new FormData();
     fd.append('image', compressed);
     const r = await API.post('/api/ai/analyze-product', fd);
     const d = r.data;
-    // v50: Handle all response types — gemini result, DB fallback auto-fill, suggestions
-    if (d.product_name && !inp.value.trim()) {
-      // Auto-fill product name (from Gemini or DB fallback)
-      inp.value = d.product_name;
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      const pct = d.confidence ? ` (${Math.round(d.confidence * 100)}%)` : '';
-      const src = d.source === 'learning_db' ? ' (from history)' : '';
-      toast(`🤖 AI: ${d.product_name}${pct}${src}`, 'success');
-    } else if (d.product_name && inp.value.trim()) {
-      // Field already has value — show as suggestion
-      toast(`🤖 AI suggests: ${d.product_name}`, 'info');
-    } else if (d.suggestions && d.suggestions.length && !inp.value.trim()) {
-      // v50: Auto-fill from top suggestion when no direct match
-      const top = d.suggestions[0];
-      inp.value = top.name;
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      toast(`🤖 Best match: ${top.name} (from your history)`, 'info');
+
+    // v50.2: ONLY auto-fill if Gemini actually analyzed the image (source === 'gemini')
+    if (d.source === 'gemini' && d.product_name) {
+      if (!inp.value.trim()) {
+        inp.value = d.product_name;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        const pct = d.confidence ? ` (${Math.round(d.confidence * 100)}%)` : '';
+        toast(`🤖 AI identified: ${d.product_name}${pct}`, 'success');
+      } else {
+        toast(`🤖 AI suggests: ${d.product_name}`, 'info');
+      }
+    } else if (d.source === 'suggestions_only' && d.suggestions?.length) {
+      // v50.2: AI failed — show suggestion tiles but do NOT auto-fill
+      const errMsg = d.ai_error === 'RATE_LIMITED' ? 'AI busy (rate limited) — pick from history:' : (d.ai_error || 'AI could not identify');
+      toast(`🤖 ${errMsg}`, 'warning');
+      // Show clickable suggestion tiles below the input
+      _showAiSuggestionTiles(inp, d.suggestions, productInputId);
     } else if (d.ai_error) {
       const msg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : d.ai_error;
       toast(`🤖 ${msg}`, 'warning');
@@ -878,19 +880,6 @@ async function aiAnalyzeProduct(file, productInputId) {
       toast(`🤖 ${d.error}`, 'error');
     } else {
       toast('🤖 AI could not identify — enter product name manually', 'warning');
-    }
-    // v50: Also auto-fill complaint & charges tiles if available from DB
-    if (d.product_complaint || d.charges) {
-      // Try to find complaint input (nj-complaint or am-comp depending on context)
-      const prefix = productInputId.startsWith('nj-') ? 'nj' : 'am';
-      const compEl = document.getElementById(prefix + '-complaint') || document.getElementById(prefix + '-comp');
-      if (compEl && d.product_complaint && !compEl.value.trim()) {
-        compEl.value = d.product_complaint;
-      }
-      if (d.charges && hasSuperRight('view_financials')) {
-        const chgEl = document.getElementById(prefix + '-charges') || document.getElementById(prefix + '-chg');
-        if (chgEl && !chgEl.value) chgEl.value = d.charges;
-      }
     }
   } catch (e) {
     const msg = e?.response?.data?.error || '';
@@ -901,7 +890,40 @@ async function aiAnalyzeProduct(file, productInputId) {
     inp.style.borderColor = '';
   }
 }
+// v50.2: Show clickable AI suggestion tiles when Gemini fails
+function _showAiSuggestionTiles(inp, suggestions, inputId) {
+  const existingTiles = document.getElementById('ai-sug-tiles-' + inputId);
+  if (existingTiles) existingTiles.remove();
+  if (!suggestions?.length) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'ai-sug-tiles-' + inputId;
+  wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding:8px;background:#FFF3E0;border-radius:10px;border:1px solid #FFB74D';
+  wrap.innerHTML = `<div style="width:100%;font-size:11px;color:#E65100;font-weight:700;margin-bottom:2px">🤖 AI couldn't identify — pick from your history:</div>` +
+    suggestions.slice(0, 6).map((s, i) => `<button type="button" class="ai-sug-tile" data-idx="${i}" style="background:#fff;border:1.5px solid #FFB74D;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:#E65100">${esc(s.name)}</button>`).join('');
+  inp.parentElement?.appendChild(wrap);
+  wrap.addEventListener('click', (e) => {
+    const btn = e.target.closest('.ai-sug-tile');
+    if (!btn) return;
+    const s = suggestions[parseInt(btn.dataset.idx)];
+    if (!s) return;
+    inp.value = s.name;
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    // Also fill complaint & charges if available
+    const prefix = inputId.startsWith('nj-') ? 'nj' : 'am';
+    const compEl = document.getElementById(prefix + '-complaint') || document.getElementById(prefix + '-comp');
+    if (compEl && s.complaint && !compEl.value.trim()) compEl.value = s.complaint;
+    if (s.charges && hasSuperRight('view_financials')) {
+      const chgEl = document.getElementById(prefix + '-charges') || document.getElementById(prefix + '-chg');
+      if (chgEl && !chgEl.value) chgEl.value = s.charges;
+    }
+    wrap.remove();
+    toast(`Selected: ${s.name}`, 'success');
+  });
+  // Auto-remove after 30 seconds
+  setTimeout(() => wrap.remove(), 30000);
+}
 
+// v50.2: AI invoice analysis — only auto-fills from actual Gemini results
 async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDateId) {
   const pfEl = document.getElementById(purchasedFromId);
   const inEl = document.getElementById(invoiceNoId);
@@ -912,26 +934,32 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
   indicator.placeholder = '🤖 AI reading invoice…';
   indicator.style.borderColor = '#7C4DFF';
   try {
-    const compressed = await compressImage(file, 800, 0.75);
+    // v50.2: Higher quality for invoice text extraction
+    const compressed = await compressImage(file, 1400, 0.88);
     const fd = new FormData();
     fd.append('image', compressed);
     const r = await API.post('/api/ai/analyze-invoice', fd);
     const d = r.data;
-    let filled = [];
-    // v50: Auto-fill from both Gemini results AND DB fallback (which now sends actual values)
-    if (d.purchased_from && pfEl) {
-      if (!pfEl.value.trim()) { pfEl.value = d.purchased_from; filled.push('Seller'); }
-      else if (pfEl.value.trim() !== d.purchased_from) toast(`🤖 AI suggests seller: ${d.purchased_from}`, 'info');
-    }
-    if (d.invoice_no && inEl && !inEl.value.trim()) { inEl.value = d.invoice_no; filled.push('Invoice No'); }
-    if (d.purchase_date && pdEl && !pdEl.value) { pdEl.value = d.purchase_date; filled.push('Date'); }
-    if (filled.length) {
-      const src = d.source === 'invoice_db' ? ' (from history)' : '';
-      toast(`🤖 AI filled: ${filled.join(', ')}${src}`, 'success');
-    } else if (d.seller_suggestions && d.seller_suggestions.length && pfEl && !pfEl.value.trim()) {
-      // v50: Auto-fill first known seller from DB
-      pfEl.value = d.seller_suggestions[0];
-      toast(`🤖 Filled seller: ${d.seller_suggestions[0]} (from history). Others: ${d.seller_suggestions.slice(1,3).join(', ')}`, 'info');
+
+    // v50.2: ONLY auto-fill if source is 'gemini' (actual AI analysis)
+    if (d.source === 'gemini') {
+      let filled = [];
+      if (d.purchased_from && pfEl) {
+        if (!pfEl.value.trim()) { pfEl.value = d.purchased_from; filled.push('Seller'); }
+        else if (pfEl.value.trim() !== d.purchased_from) toast(`🤖 AI suggests seller: ${d.purchased_from}`, 'info');
+      }
+      if (d.invoice_no && inEl && !inEl.value.trim()) { inEl.value = d.invoice_no; filled.push('Invoice No'); }
+      if (d.purchase_date && pdEl && !pdEl.value) { pdEl.value = d.purchase_date; filled.push('Date'); }
+      if (filled.length) {
+        toast(`🤖 AI extracted: ${filled.join(', ')}`, 'success');
+      } else {
+        toast('🤖 AI processed invoice but couldn\'t extract clear data', 'warning');
+      }
+    } else if (d.source === 'suggestions_only' && d.seller_suggestions?.length && pfEl) {
+      // v50.2: AI failed — show seller suggestions as clickable tiles, do NOT auto-fill
+      const errMsg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — pick seller from history:' : (d.ai_error || 'AI couldn\'t read invoice');
+      toast(`🤖 ${errMsg}`, 'warning');
+      _showSellerSuggestionTiles(pfEl, d.seller_suggestions, purchasedFromId);
     } else if (d.ai_error) {
       const msg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : d.ai_error;
       toast(`🤖 ${msg}`, 'warning');
@@ -948,6 +976,26 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
     indicator.placeholder = origPlaceholder;
     indicator.style.borderColor = '';
   }
+}
+// v50.2: Show clickable seller suggestion tiles when invoice AI fails
+function _showSellerSuggestionTiles(inp, sellers, inputId) {
+  const existingTiles = document.getElementById('ai-seller-tiles-' + inputId);
+  if (existingTiles) existingTiles.remove();
+  if (!sellers?.length) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'ai-seller-tiles-' + inputId;
+  wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding:8px;background:#FFF3E0;border-radius:10px;border:1px solid #FFB74D';
+  wrap.innerHTML = `<div style="width:100%;font-size:11px;color:#E65100;font-weight:700;margin-bottom:2px">🤖 AI couldn't read — pick seller from history:</div>` +
+    sellers.slice(0, 6).map(s => `<button type="button" class="ai-seller-tile" style="background:#fff;border:1.5px solid #FFB74D;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:#E65100">${esc(s)}</button>`).join('');
+  inp.parentElement?.appendChild(wrap);
+  wrap.addEventListener('click', (e) => {
+    const btn = e.target.closest('.ai-seller-tile');
+    if (!btn) return;
+    inp.value = btn.textContent;
+    wrap.remove();
+    toast(`Selected: ${btn.textContent}`, 'success');
+  });
+  setTimeout(() => wrap.remove(), 30000);
 }
 
 // AI learn — send user corrections after save

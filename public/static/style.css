@@ -329,7 +329,8 @@ html, body {
   margin-bottom: 6px;
   box-shadow: 0 1px 4px rgba(0,0,0,.07);
 }
-.view-pad { padding: 8px; }
+/* v50.2: Added padding-bottom so content doesn't get hidden behind bottom nav (56px + safe area) */
+.view-pad { padding: 8px 8px 72px 8px; }
 .mt-3     { margin-top: 8px; }
 
 /* ── Section title ─────────────────────────────────────────────────────────── */
