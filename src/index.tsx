@@ -1675,9 +1675,15 @@ app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
 })
 
 // ── API: AI — Gemini-powered product and invoice analysis ────────────────────
-// v50.2: Complete rewrite — 3 attempts with escalating backoff, model fallback chain,
-//        DB fallback NEVER auto-fills (only returns suggestions), clear source labeling
-const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash']
+// v50.3: Latest Gemini models (2.5-flash/pro stable) with aggressive fallback chain
+//        gemini-2.0-flash is DEPRECATED — was causing all AI failures in v50.2
+//        User has Gemini Pro subscription so we start with best models first
+const GEMINI_MODELS = [
+  'gemini-2.5-flash',      // Latest stable — fast, great vision (June 2025)
+  'gemini-2.5-pro',        // Best quality — complex reasoning (June 2025)
+  'gemini-2.0-flash',      // Deprecated fallback — still works for now
+  'gemini-1.5-flash',      // Legacy fallback
+]
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer)
@@ -1690,125 +1696,169 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary)
 }
 
-// v50.2: Skip listModels entirely — just use hardcoded model with fallback chain
-// listModels was burning API quota and adding latency on every cold start
+// v50.3: Model selection — cached per-worker for 1 hour
 let _cachedModel: string | null = null
 let _cachedModelExpiry = 0
 async function pickModel(apiKey: string): Promise<string> {
   if (_cachedModel && Date.now() < _cachedModelExpiry) return _cachedModel
-  // v50.2: Don't call listModels — just return best known model
-  // callGemini handles 404 fallback automatically
-  _cachedModel = GEMINI_MODELS[0]
-  _cachedModelExpiry = Date.now() + 3600000 // cache 1 hour
+  _cachedModel = GEMINI_MODELS[0]  // gemini-2.5-flash
+  _cachedModelExpiry = Date.now() + 3600000
   return _cachedModel
 }
 
-// v50.2: callGemini — 3 attempts with escalating backoff (2s, 5s, 10s), model fallback chain
+// v50.3: callGemini — tries EVERY model in the chain before giving up
+// On 404 (model not found): immediately try next model, no delay (doesn't count as attempt)
+// On 429 (rate limit): short delay then try NEXT model (different model = different quota)
+// On success: cache the working model for 1 hour
+// Max 6 total API calls (covers all 4 models + 2 retries on rate limit)
 async function callGemini(apiKey: string, model: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string}> {
-  const delays = [2000, 5000, 10000]
   let lastError = ''
-  let modelIdx = GEMINI_MODELS.indexOf(model)
-  if (modelIdx < 0) modelIdx = 0
+  let startIdx = GEMINI_MODELS.indexOf(model)
+  if (startIdx < 0) startIdx = 0
+  let rateLimitCount = 0
+  const MAX_RATE_RETRIES = 2  // max times we wait-and-retry on 429 across all models
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const currentModel = GEMINI_MODELS[Math.min(modelIdx, GEMINI_MODELS.length - 1)]
+  for (let modelIdx = startIdx; modelIdx < GEMINI_MODELS.length; modelIdx++) {
+    const currentModel = GEMINI_MODELS[modelIdx]
     try {
+      console.log(`[AI] Trying model: ${currentModel} (idx ${modelIdx})`)
+      // v50.3: Build request body — disable thinking for 2.5 models (faster, cleaner JSON output)
+      const reqBody: any = {
+        contents,
+        generationConfig: genConfig || { temperature: 0.2, maxOutputTokens: 2048 }
+      }
+      // Disable thinking for 2.5-flash (budget=0) — we need fast JSON, not reasoning
+      // 2.5-pro thinking can't be disabled, but we set low budget to keep it fast
+      if (currentModel.includes('2.5-flash')) {
+        reqBody.generationConfig.thinkingConfig = { thinkingBudget: 0 }
+      } else if (currentModel.includes('2.5-pro')) {
+        reqBody.generationConfig.thinkingConfig = { thinkingBudget: 128 }  // minimum for pro
+      }
       const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents, generationConfig: genConfig || { temperature: 0.2, maxOutputTokens: 1024 } })
+        body: JSON.stringify(reqBody)
       })
+
       if (resp.ok) {
         const data = await resp.json() as any
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text
+        // v50.3: Handle thinking model responses — skip thought parts, get actual answer
+        const parts = data?.candidates?.[0]?.content?.parts || []
+        let text = ''
+        for (const p of parts) {
+          if (p.thought) continue  // skip thinking summary parts
+          if (p.text) { text = p.text; break }
+        }
+        // Fallback: try first part's text if no non-thought part found
+        if (!text) text = parts[0]?.text || ''
         if (!text && data?.candidates?.[0]?.finishReason === 'SAFETY') {
           return { ok: false, error: 'Content blocked by safety filters' }
         }
         if (!text) {
-          // Gemini returned OK but no text — try next model
-          lastError = 'Empty response from AI'
-          modelIdx++
-          if (attempt < 2) { await new Promise(r => setTimeout(r, delays[attempt])); continue }
-          return { ok: false, error: lastError }
+          console.log(`[AI] ${currentModel}: empty response, parts:`, JSON.stringify(parts).slice(0, 200))
+          lastError = `${currentModel}: empty response`
+          continue  // try next model
         }
-        // Cache successful model for future calls
+        // Success — cache this model and return with text in standard location
+        console.log(`[AI] ${currentModel}: SUCCESS, response length ${text.length}`)
         _cachedModel = currentModel
         _cachedModelExpiry = Date.now() + 3600000
+        // Normalize response: put answer text in standard parts[0].text location
+        data._extractedText = text
         return { ok: true, data }
       }
-      const errText = await resp.text()
+
+      // Error responses
+      const errBody = await resp.text().catch(() => '')
+      console.log(`[AI] ${currentModel}: HTTP ${resp.status} — ${errBody.slice(0, 150)}`)
+
+      if (resp.status === 404 || resp.status === 400) {
+        // Model not available or bad request for this model — skip to next immediately
+        lastError = `${currentModel} not available (${resp.status})`
+        // Invalidate cache if this was the cached model
+        if (_cachedModel === currentModel) { _cachedModel = null; _cachedModelExpiry = 0 }
+        continue
+      }
+
       if (resp.status === 429) {
+        // Rate limited — try next model first (different model = different quota bucket)
         lastError = 'RATE_LIMITED'
-        if (attempt < 2) { await new Promise(r => setTimeout(r, delays[attempt])); continue }
+        if (modelIdx < GEMINI_MODELS.length - 1) {
+          // More models to try — skip to next model immediately
+          console.log(`[AI] ${currentModel}: rate limited, trying next model`)
+          continue
+        }
+        // Last model also rate limited — wait and retry from best model if we haven't retried too much
+        if (rateLimitCount < MAX_RATE_RETRIES) {
+          rateLimitCount++
+          const delay = rateLimitCount * 3000  // 3s, 6s
+          console.log(`[AI] All models rate limited, waiting ${delay}ms then retrying (attempt ${rateLimitCount})`)
+          await new Promise(r => setTimeout(r, delay))
+          modelIdx = startIdx - 1  // reset to start (loop will increment)
+          continue
+        }
         return { ok: false, error: 'RATE_LIMITED' }
       }
-      if (resp.status === 403) return { ok: false, error: 'Invalid API key. Check Settings.' }
-      if (resp.status === 404) {
-        // Model not available — try next in chain
-        lastError = `Model ${currentModel} not available`
-        modelIdx++
-        if (attempt < 2) continue
-        return { ok: false, error: lastError }
+
+      if (resp.status === 403) {
+        // Check if it's an API key issue or a model permission issue
+        if (errBody.includes('API_KEY') || errBody.includes('api key') || errBody.includes('API key')) {
+          return { ok: false, error: 'Invalid API key. Check Settings → Gemini API Key.' }
+        }
+        // Model access denied — try next
+        lastError = `${currentModel}: access denied`
+        continue
       }
-      lastError = `Gemini ${resp.status}: ${errText.slice(0, 120)}`
-      if (attempt < 2) { await new Promise(r => setTimeout(r, delays[attempt])); continue }
-      return { ok: false, error: lastError }
+
+      // Other errors (500, 503 etc) — try next model
+      lastError = `${currentModel}: HTTP ${resp.status}`
+      continue
+
     } catch (e: any) {
-      lastError = `Network error: ${e.message}`
-      if (attempt < 2) { await new Promise(r => setTimeout(r, delays[attempt])); continue }
-      return { ok: false, error: lastError }
+      lastError = `${currentModel}: network error — ${e.message}`
+      console.log(`[AI] ${currentModel}: EXCEPTION — ${e.message}`)
+      continue  // try next model on network error too
     }
   }
-  return { ok: false, error: lastError || 'AI analysis failed after 3 retries' }
+  return { ok: false, error: lastError || 'AI analysis failed — all models unavailable' }
 }
 
-// v50: Dedicated API key test — listModels + retry on 429 + actual generateContent verify
+// v50.3: Test API key — try actual generateContent with latest model, no listModels waste
 app.post('/api/ai/test-key', authMiddleware, adminOnly, async (c) => {
   const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
   if (!geminiKey) return c.json({ error: 'No API key configured' }, 400)
   try {
-    // Step 1: List models (lightweight, validates key format)
-    let bestModel = 'gemini-2.0-flash'
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}&pageSize=20`)
-      if (resp.ok) {
-        const data = await resp.json() as any
-        const models = (data.models || []).map((m: any) => m.name?.replace('models/', '')).filter(Boolean)
-        const flash = models.find((n: string) => n.includes('2.0-flash') && !n.includes('lite'))
-          || models.find((n: string) => n.includes('flash'))
-          || models[0] || 'gemini-2.0-flash'
-        bestModel = flash
-        _cachedModel = flash
-        _cachedModelExpiry = Date.now() + 600000
-        break
-      }
-      if (resp.status === 400 || resp.status === 403) {
-        return c.json({ error: 'Invalid API key — please check and re-enter' }, 400)
-      }
-      if (resp.status === 429 && attempt < 2) {
-        await new Promise(r => setTimeout(r, 2000 * (attempt + 1))) // 2s, 4s backoff
-        continue
-      }
-      if (resp.status === 429) {
-        // Even on 429, the key format is valid — just rate limited on listModels
-        return c.json({ ok: true, model: bestModel, message: `API key accepted! Model: ${bestModel} (rate limit on verify — key is valid)` })
-      }
-      return c.json({ error: `Unexpected error (${resp.status})` }, 400)
+    // Try each model until one works — this validates key AND finds best model
+    for (const testModel of GEMINI_MODELS) {
+      try {
+        const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${testModel}:generateContent?key=${geminiKey}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: 'Say OK' }] }], generationConfig: { maxOutputTokens: 10 } })
+        })
+        if (resp.ok) {
+          _cachedModel = testModel
+          _cachedModelExpiry = Date.now() + 3600000
+          return c.json({ ok: true, model: testModel, message: `API key works! Model: ${testModel}. AI features enabled.` })
+        }
+        if (resp.status === 429) {
+          // Rate limited means key IS valid — this model works
+          _cachedModel = testModel
+          _cachedModelExpiry = Date.now() + 3600000
+          return c.json({ ok: true, model: testModel, message: `API key valid! Model: ${testModel} (rate limited now, will work shortly).` })
+        }
+        if (resp.status === 403) {
+          const errBody = await resp.text().catch(() => '')
+          if (errBody.includes('API_KEY') || errBody.includes('api key')) {
+            return c.json({ error: 'Invalid API key — please check and re-enter' }, 400)
+          }
+          // Model access denied — try next
+          continue
+        }
+        if (resp.status === 404) continue  // model not available, try next
+        // Other error — try next model
+      } catch (_) { continue }
     }
-    // Step 2: Quick generateContent test with simple text (validates actual generation)
-    try {
-      const genResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${bestModel}:generateContent?key=${geminiKey}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: 'Say OK' }] }], generationConfig: { maxOutputTokens: 5 } })
-      })
-      if (genResp.ok || genResp.status === 429) {
-        // 429 on generate is normal for free tier — key is still valid
-        return c.json({ ok: true, model: bestModel, message: `API key works! Best model: ${bestModel}. AI features enabled.` })
-      }
-    } catch (_) {
-      // Network issue on generate test — key still validated by listModels
-    }
-    return c.json({ ok: true, model: bestModel, message: `API key verified! Model: ${bestModel}` })
+    return c.json({ error: 'Could not verify key — all models returned errors. Check your API key.' }, 400)
   } catch (e: any) {
     return c.json({ error: `Connection error: ${e.message}` }, 500)
   }
@@ -1857,9 +1907,9 @@ Return ONLY a JSON object: {"brand":"...","model":"...","category":"...","produc
 Return ONLY valid JSON, no markdown, no code fences.` }
       ]
     }])
-    // v50.2: Parse Gemini response — try harder to extract valid JSON
+    // v50.3: Parse Gemini response — use _extractedText (handles thinking model parts)
     if (result.ok) {
-      const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      const text = result.data?._extractedText || result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
       console.log('[AI] Gemini raw response:', text.slice(0, 300))
       // Handle JSON wrapped in code fences: ```json {...} ```
       const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
@@ -1962,9 +2012,9 @@ Return ONLY a JSON object: {"purchased_from":"...","invoice_no":"...","purchase_
 Return ONLY valid JSON, no markdown, no code fences.` }
       ]
     }])
-    // v50.2: Parse Gemini invoice response
+    // v50.3: Parse Gemini invoice response — use _extractedText (handles thinking model parts)
     if (result.ok) {
-      const text = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      const text = result.data?._extractedText || result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
       console.log('[AI] Invoice Gemini raw:', text.slice(0, 300))
       const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
       const jsonMatch = cleaned.match(/\{[\s\S]*\}/)

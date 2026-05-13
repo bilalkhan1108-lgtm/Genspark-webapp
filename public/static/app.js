@@ -850,14 +850,14 @@ async function aiAnalyzeProduct(file, productInputId) {
   inp.placeholder = '🤖 AI analyzing image…';
   inp.style.borderColor = '#7C4DFF';
   try {
-    // v50.2: Send higher quality image to Gemini for better recognition
+    // v50.3: Higher quality image + 45s timeout for Gemini 2.5 model chain
     const compressed = await compressImage(file, 1200, 0.85);
     const fd = new FormData();
     fd.append('image', compressed);
-    const r = await API.post('/api/ai/analyze-product', fd);
+    const r = await API.post('/api/ai/analyze-product', fd, { timeout: 45000 });
     const d = r.data;
 
-    // v50.2: ONLY auto-fill if Gemini actually analyzed the image (source === 'gemini')
+    // v50.3: ONLY auto-fill if Gemini actually analyzed the image (source === 'gemini')
     if (d.source === 'gemini' && d.product_name) {
       if (!inp.value.trim()) {
         inp.value = d.product_name;
@@ -868,14 +868,13 @@ async function aiAnalyzeProduct(file, productInputId) {
         toast(`🤖 AI suggests: ${d.product_name}`, 'info');
       }
     } else if (d.source === 'suggestions_only' && d.suggestions?.length) {
-      // v50.2: AI failed — show suggestion tiles but do NOT auto-fill
-      const errMsg = d.ai_error === 'RATE_LIMITED' ? 'AI busy (rate limited) — pick from history:' : (d.ai_error || 'AI could not identify');
+      // AI failed — show suggestion tiles + retry button, do NOT auto-fill
+      const errMsg = d.ai_error === 'RATE_LIMITED' ? 'AI rate limited — pick from history or retry:' : (d.ai_error || 'AI could not identify');
       toast(`🤖 ${errMsg}`, 'warning');
-      // Show clickable suggestion tiles below the input
-      _showAiSuggestionTiles(inp, d.suggestions, productInputId);
+      _showAiSuggestionTiles(inp, d.suggestions, productInputId, file);
     } else if (d.ai_error) {
-      const msg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : d.ai_error;
-      toast(`🤖 ${msg}`, 'warning');
+      toast(`🤖 ${d.ai_error}`, 'warning');
+      _showRetryButton(inp, productInputId, file, 'product');
     } else if (d.error) {
       toast(`🤖 ${d.error}`, 'error');
     } else {
@@ -883,32 +882,64 @@ async function aiAnalyzeProduct(file, productInputId) {
     }
   } catch (e) {
     const msg = e?.response?.data?.error || '';
-    if (msg) toast(`🤖 ${msg}`, 'error');
-    else toast('🤖 AI analysis failed — enter product name manually', 'warning');
+    if (e?.code === 'ECONNABORTED') {
+      toast('🤖 AI is taking too long — try again', 'warning');
+    } else if (msg) {
+      toast(`🤖 ${msg}`, 'error');
+    } else {
+      toast('🤖 AI analysis failed — enter manually or retry', 'warning');
+    }
+    _showRetryButton(inp, productInputId, file, 'product');
   } finally {
     inp.placeholder = origPlaceholder;
     inp.style.borderColor = '';
   }
 }
-// v50.2: Show clickable AI suggestion tiles when Gemini fails
-function _showAiSuggestionTiles(inp, suggestions, inputId) {
+// v50.3: Show retry button when AI fails
+function _showRetryButton(inp, inputId, file, type) {
+  const existId = 'ai-retry-' + inputId;
+  if (document.getElementById(existId)) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = existId;
+  btn.style.cssText = 'margin-top:6px;padding:6px 16px;background:#7C4DFF;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer';
+  btn.textContent = '🔄 Retry AI Analysis';
+  btn.onclick = () => {
+    btn.remove();
+    if (type === 'product') aiAnalyzeProduct(file, inputId);
+    else if (type === 'invoice') {
+      const prefix = inputId.replace(/-purchased-from$/, '').replace(/-.*$/, '');
+      aiAnalyzeInvoice(file, inputId, prefix + '-invoice-no', prefix + '-purchase-date');
+    }
+  };
+  inp.parentElement?.appendChild(btn);
+  setTimeout(() => btn.remove(), 60000);
+}
+// v50.3: Show clickable AI suggestion tiles when Gemini fails (with retry button)
+function _showAiSuggestionTiles(inp, suggestions, inputId, file) {
   const existingTiles = document.getElementById('ai-sug-tiles-' + inputId);
   if (existingTiles) existingTiles.remove();
   if (!suggestions?.length) return;
   const wrap = document.createElement('div');
   wrap.id = 'ai-sug-tiles-' + inputId;
   wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding:8px;background:#FFF3E0;border-radius:10px;border:1px solid #FFB74D';
-  wrap.innerHTML = `<div style="width:100%;font-size:11px;color:#E65100;font-weight:700;margin-bottom:2px">🤖 AI couldn't identify — pick from your history:</div>` +
-    suggestions.slice(0, 6).map((s, i) => `<button type="button" class="ai-sug-tile" data-idx="${i}" style="background:#fff;border:1.5px solid #FFB74D;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:#E65100">${esc(s.name)}</button>`).join('');
+  const retryBtn = file ? `<button type="button" class="ai-retry-inline" style="background:#7C4DFF;color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer">🔄 Retry AI</button>` : '';
+  wrap.innerHTML = `<div style="width:100%;font-size:11px;color:#E65100;font-weight:700;margin-bottom:2px">🤖 AI couldn't identify — pick from history or retry:</div>` +
+    suggestions.slice(0, 6).map((s, i) => `<button type="button" class="ai-sug-tile" data-idx="${i}" style="background:#fff;border:1.5px solid #FFB74D;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:#E65100">${esc(s.name)}</button>`).join('') + retryBtn;
   inp.parentElement?.appendChild(wrap);
   wrap.addEventListener('click', (e) => {
+    const retryEl = e.target.closest('.ai-retry-inline');
+    if (retryEl && file) {
+      wrap.remove();
+      aiAnalyzeProduct(file, inputId);
+      return;
+    }
     const btn = e.target.closest('.ai-sug-tile');
     if (!btn) return;
     const s = suggestions[parseInt(btn.dataset.idx)];
     if (!s) return;
     inp.value = s.name;
     inp.dispatchEvent(new Event('input', { bubbles: true }));
-    // Also fill complaint & charges if available
     const prefix = inputId.startsWith('nj-') ? 'nj' : 'am';
     const compEl = document.getElementById(prefix + '-complaint') || document.getElementById(prefix + '-comp');
     if (compEl && s.complaint && !compEl.value.trim()) compEl.value = s.complaint;
@@ -919,11 +950,10 @@ function _showAiSuggestionTiles(inp, suggestions, inputId) {
     wrap.remove();
     toast(`Selected: ${s.name}`, 'success');
   });
-  // Auto-remove after 30 seconds
-  setTimeout(() => wrap.remove(), 30000);
+  setTimeout(() => wrap.remove(), 60000);
 }
 
-// v50.2: AI invoice analysis — only auto-fills from actual Gemini results
+// v50.3: AI invoice analysis — 45s timeout, retry button, latest Gemini 2.5 models
 async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDateId) {
   const pfEl = document.getElementById(purchasedFromId);
   const inEl = document.getElementById(invoiceNoId);
@@ -934,14 +964,14 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
   indicator.placeholder = '🤖 AI reading invoice…';
   indicator.style.borderColor = '#7C4DFF';
   try {
-    // v50.2: Higher quality for invoice text extraction
+    // v50.3: Higher quality for invoice text extraction + 45s timeout
     const compressed = await compressImage(file, 1400, 0.88);
     const fd = new FormData();
     fd.append('image', compressed);
-    const r = await API.post('/api/ai/analyze-invoice', fd);
+    const r = await API.post('/api/ai/analyze-invoice', fd, { timeout: 45000 });
     const d = r.data;
 
-    // v50.2: ONLY auto-fill if source is 'gemini' (actual AI analysis)
+    // v50.3: ONLY auto-fill if source is 'gemini' (actual AI analysis)
     if (d.source === 'gemini') {
       let filled = [];
       if (d.purchased_from && pfEl) {
@@ -956,13 +986,13 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
         toast('🤖 AI processed invoice but couldn\'t extract clear data', 'warning');
       }
     } else if (d.source === 'suggestions_only' && d.seller_suggestions?.length && pfEl) {
-      // v50.2: AI failed — show seller suggestions as clickable tiles, do NOT auto-fill
-      const errMsg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — pick seller from history:' : (d.ai_error || 'AI couldn\'t read invoice');
+      // AI failed — show seller suggestions + retry button
+      const errMsg = d.ai_error === 'RATE_LIMITED' ? 'AI rate limited — pick seller or retry:' : (d.ai_error || 'AI couldn\'t read invoice');
       toast(`🤖 ${errMsg}`, 'warning');
-      _showSellerSuggestionTiles(pfEl, d.seller_suggestions, purchasedFromId);
+      _showSellerSuggestionTiles(pfEl, d.seller_suggestions, purchasedFromId, file);
     } else if (d.ai_error) {
-      const msg = d.ai_error === 'RATE_LIMITED' ? 'AI busy — try again in 30s' : d.ai_error;
-      toast(`🤖 ${msg}`, 'warning');
+      toast(`🤖 ${d.ai_error}`, 'warning');
+      if (pfEl) _showRetryButton(pfEl, purchasedFromId, file, 'invoice');
     } else if (d.error) {
       toast(`🤖 ${d.error}`, 'error');
     } else {
@@ -970,32 +1000,46 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
     }
   } catch (e) {
     const msg = e?.response?.data?.error || '';
-    if (msg) toast(`🤖 ${msg}`, 'error');
-    else toast('🤖 Invoice analysis failed — enter details manually', 'warning');
+    if (e?.code === 'ECONNABORTED') {
+      toast('🤖 AI is taking too long — try again', 'warning');
+    } else if (msg) {
+      toast(`🤖 ${msg}`, 'error');
+    } else {
+      toast('🤖 Invoice analysis failed — enter manually or retry', 'warning');
+    }
+    if (pfEl) _showRetryButton(pfEl, purchasedFromId, file, 'invoice');
   } finally {
     indicator.placeholder = origPlaceholder;
     indicator.style.borderColor = '';
   }
 }
-// v50.2: Show clickable seller suggestion tiles when invoice AI fails
-function _showSellerSuggestionTiles(inp, sellers, inputId) {
+// v50.3: Show clickable seller suggestion tiles with retry button
+function _showSellerSuggestionTiles(inp, sellers, inputId, file) {
   const existingTiles = document.getElementById('ai-seller-tiles-' + inputId);
   if (existingTiles) existingTiles.remove();
   if (!sellers?.length) return;
   const wrap = document.createElement('div');
   wrap.id = 'ai-seller-tiles-' + inputId;
   wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding:8px;background:#FFF3E0;border-radius:10px;border:1px solid #FFB74D';
-  wrap.innerHTML = `<div style="width:100%;font-size:11px;color:#E65100;font-weight:700;margin-bottom:2px">🤖 AI couldn't read — pick seller from history:</div>` +
-    sellers.slice(0, 6).map(s => `<button type="button" class="ai-seller-tile" style="background:#fff;border:1.5px solid #FFB74D;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:#E65100">${esc(s)}</button>`).join('');
+  const retryBtn = file ? `<button type="button" class="ai-retry-inline" style="background:#7C4DFF;color:#fff;border:none;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer">🔄 Retry AI</button>` : '';
+  wrap.innerHTML = `<div style="width:100%;font-size:11px;color:#E65100;font-weight:700;margin-bottom:2px">🤖 AI couldn't read — pick seller or retry:</div>` +
+    sellers.slice(0, 6).map(s => `<button type="button" class="ai-seller-tile" style="background:#fff;border:1.5px solid #FFB74D;border-radius:8px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer;color:#E65100">${esc(s)}</button>`).join('') + retryBtn;
   inp.parentElement?.appendChild(wrap);
   wrap.addEventListener('click', (e) => {
+    const retryEl = e.target.closest('.ai-retry-inline');
+    if (retryEl && file) {
+      wrap.remove();
+      const prefix = inputId.replace(/-purchased-from$/, '').replace(/-[^-]*$/, '');
+      aiAnalyzeInvoice(file, inputId, prefix + '-invoice-no', prefix + '-purchase-date');
+      return;
+    }
     const btn = e.target.closest('.ai-seller-tile');
     if (!btn) return;
     inp.value = btn.textContent;
     wrap.remove();
     toast(`Selected: ${btn.textContent}`, 'success');
   });
-  setTimeout(() => wrap.remove(), 30000);
+  setTimeout(() => wrap.remove(), 60000);
 }
 
 // AI learn — send user corrections after save
