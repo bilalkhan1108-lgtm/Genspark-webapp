@@ -1675,14 +1675,17 @@ app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
 })
 
 // ── API: AI — Gemini-powered product and invoice analysis ────────────────────
-// v50.3: Latest Gemini models (2.5-flash/pro stable) with aggressive fallback chain
-//        gemini-2.0-flash is DEPRECATED — was causing all AI failures in v50.2
-//        User has Gemini Pro subscription so we start with best models first
+// v50.4: Complete model chain — LATEST to OLDEST (user request)
+//        Gemini 3.x: thinkingLevel param, temperature must be 1.0
+//        Gemini 2.5: thinkingBudget param
+//        User has Gemini Pro subscription — all models accessible
 const GEMINI_MODELS = [
-  'gemini-2.5-flash',      // Latest stable — fast, great vision (June 2025)
-  'gemini-2.5-pro',        // Best quality — complex reasoning (June 2025)
-  'gemini-2.0-flash',      // Deprecated fallback — still works for now
-  'gemini-1.5-flash',      // Legacy fallback
+  'gemini-3.1-pro-preview',      // 1st: Most advanced reasoning, Feb 2026
+  'gemini-3-flash-preview',      // 2nd: Pro-level intelligence at Flash speed
+  'gemini-2.5-pro',              // 3rd: Stable, advanced reasoning, June 2025
+  'gemini-2.5-flash',            // 4th: Stable, best price-performance, June 2025
+  'gemini-2.0-flash',            // 5th: Deprecated June 2026 — emergency fallback
+  'gemini-1.5-flash',            // 6th: Legacy last resort
 ]
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -1701,7 +1704,7 @@ let _cachedModel: string | null = null
 let _cachedModelExpiry = 0
 async function pickModel(apiKey: string): Promise<string> {
   if (_cachedModel && Date.now() < _cachedModelExpiry) return _cachedModel
-  _cachedModel = GEMINI_MODELS[0]  // gemini-2.5-flash
+  _cachedModel = GEMINI_MODELS[0]  // gemini-3.1-pro-preview (latest)
   _cachedModelExpiry = Date.now() + 3600000
   return _cachedModel
 }
@@ -1710,7 +1713,7 @@ async function pickModel(apiKey: string): Promise<string> {
 // On 404 (model not found): immediately try next model, no delay (doesn't count as attempt)
 // On 429 (rate limit): short delay then try NEXT model (different model = different quota)
 // On success: cache the working model for 1 hour
-// Max 6 total API calls (covers all 4 models + 2 retries on rate limit)
+// Max 8 total API calls (covers all 6 models + 2 retries on rate limit)
 async function callGemini(apiKey: string, model: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string}> {
   let lastError = ''
   let startIdx = GEMINI_MODELS.indexOf(model)
@@ -1722,17 +1725,20 @@ async function callGemini(apiKey: string, model: string, contents: any[], genCon
     const currentModel = GEMINI_MODELS[modelIdx]
     try {
       console.log(`[AI] Trying model: ${currentModel} (idx ${modelIdx})`)
-      // v50.3: Build request body — disable thinking for 2.5 models (faster, cleaner JSON output)
+      // v50.4: Build request body — minimize thinking for speed (JSON extraction, not reasoning)
       const reqBody: any = {
         contents,
-        generationConfig: genConfig || { temperature: 0.2, maxOutputTokens: 2048 }
+        generationConfig: genConfig || { temperature: 0.4, maxOutputTokens: 2048 }
       }
-      // Disable thinking for 2.5-flash (budget=0) — we need fast JSON, not reasoning
-      // 2.5-pro thinking can't be disabled, but we set low budget to keep it fast
-      if (currentModel.includes('2.5-flash')) {
+      // Gemini 3.x: use thinkingLevel (minimal/low), temp must be 1.0
+      // Gemini 2.5: use thinkingBudget (0 for flash, 128 for pro)
+      if (currentModel.includes('3.1-pro') || currentModel.includes('3-flash')) {
+        reqBody.generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }
+        reqBody.generationConfig.temperature = 1.0  // required for Gemini 3 models
+      } else if (currentModel.includes('2.5-flash')) {
         reqBody.generationConfig.thinkingConfig = { thinkingBudget: 0 }
       } else if (currentModel.includes('2.5-pro')) {
-        reqBody.generationConfig.thinkingConfig = { thinkingBudget: 128 }  // minimum for pro
+        reqBody.generationConfig.thinkingConfig = { thinkingBudget: 128 }
       }
       const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`, {
         method: 'POST',

@@ -103,7 +103,7 @@ html, body {
   touch-action: pan-y;
   overscroll-behavior-y: contain;
   will-change: scroll-position;
-  padding-bottom: 0; /* bottom nav is outside flex, no extra padding needed */
+  padding-bottom: 8px; /* v50.4: small safety padding, main bottom spacing is on .view-pad */
 }
 
 /* ── Bottom navigation ─────────────────────────────────────────────────────── */
@@ -330,7 +330,8 @@ html, body {
   box-shadow: 0 1px 4px rgba(0,0,0,.07);
 }
 /* v50.2: Added padding-bottom so content doesn't get hidden behind bottom nav (56px + safe area) */
-.view-pad { padding: 8px 8px 72px 8px; }
+/* v50.4: Increased to 96px for better coverage on all devices + safe area */
+.view-pad { padding: 8px 8px 96px 8px; }
 .mt-3     { margin-top: 8px; }
 
 /* ── Section title ─────────────────────────────────────────────────────────── */

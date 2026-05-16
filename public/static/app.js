@@ -1132,6 +1132,8 @@ async function login(email, password) {
     localStorage.setItem('AES_USER', JSON.stringify(S.user));
     maybeAskPushPermission();
     navigate('dashboard');
+    // v50.4: Preload customer categories immediately after login (so every page has fresh categories)
+    loadCustomerCategories(true).catch(() => {});
     // v36: Pre-cache staff list for offline after login
     API.get('/api/staff').then(sr => { if (sr.data) { S.staff = sr.data; IDB.saveStaff(sr.data); }}).catch(() => {});
   } catch (e) {
@@ -1412,7 +1414,7 @@ function bindView() {
     case 'dashboard': loadJobs();                                               break;
     case 'newjob':    if (isAdmin() || hasSuperRight('create_jobs')) { loadCustomerCategories(true).then(() => bindNewJob()); } break;
     case 'admindash': if (isDirector()) loadAdminDash();                        break;
-    case 'detail':    loadDetail();                                             break;
+    case 'detail':    loadCustomerCategories(true).then(() => loadDetail());    break;
     case 'staff':     if (S.user?.role === 'admin') loadStaff();                break;
     case 'reports':   if (S.user?.role === 'admin') loadStaffForSelects(); bindReports(); break;
     case 'requests':  if (S.user?.role === 'admin') loadRequests();             break;
@@ -5524,16 +5526,29 @@ async function loadStaffForSelects() {
 // v49.8: Load customer categories — always fetch fresh on page navigation
 let _categoriesLastLoad = 0;
 async function loadCustomerCategories(force) {
-  // Always fresh on force (page nav), or if older than 5 seconds for rapid re-calls
   const now = Date.now();
   if (!force && _categoriesLastLoad && (now - _categoriesLastLoad < 5000)) return;
+  // v50.4: Try localStorage cache first for instant load, then refresh from API
+  const cached = localStorage.getItem('AES_CATEGORIES');
+  if (cached && !force) {
+    try {
+      const arr = JSON.parse(cached);
+      if (Array.isArray(arr) && arr.length) { S.customerCategories = arr; _categoriesLastLoad = now; return; }
+    } catch {}
+  }
   try {
     const r = await API.get('/api/settings');
     if (r.data?.customer_categories) {
       S.customerCategories = r.data.customer_categories.split(',').map(c => c.trim()).filter(Boolean);
+      localStorage.setItem('AES_CATEGORIES', JSON.stringify(S.customerCategories));
     }
     _categoriesLastLoad = now;
-  } catch (_) {}
+  } catch {
+    // On network error, use cached if available
+    if (cached) {
+      try { const arr = JSON.parse(cached); if (Array.isArray(arr) && arr.length) S.customerCategories = arr; } catch {}
+    }
+  }
 }
 function categoryOptionsHTML(selected) {
   return S.customerCategories.map(c =>
@@ -6276,7 +6291,9 @@ function bindSettings() {
     async function saveCategoriesAndRefresh() {
       try {
         await API.put('/api/settings', { customer_categories: S.customerCategories.join(',') });
-        _categoriesLastLoad = 0; // invalidate cache so next page load fetches fresh
+        // v50.4: Update localStorage immediately so all views get fresh categories instantly
+        localStorage.setItem('AES_CATEGORIES', JSON.stringify(S.customerCategories));
+        _categoriesLastLoad = Date.now(); // mark as fresh — no need to re-fetch
         renderCategoryChips();
         // Also update the Add Customer dropdown dynamically
         const acCatEl = document.getElementById('ac-category');
@@ -7055,7 +7072,11 @@ if (document.readyState === 'loading') {
 
 // v41: Pre-warm search cache from IndexedDB immediately after boot
 // This ensures instant search results from the very first keystroke
-if (S.token && S.user) _warmupSearchCache();
+if (S.token && S.user) {
+  _warmupSearchCache();
+  // v50.4: Preload customer categories on startup so all views have them
+  loadCustomerCategories(true).catch(() => {});
+}
 
 // Register Service Worker with explicit scope "/"
 if ('serviceWorker' in navigator) {
