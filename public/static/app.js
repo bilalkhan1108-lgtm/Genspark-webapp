@@ -985,6 +985,13 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
       } else {
         toast('🤖 AI processed invoice but couldn\'t extract clear data', 'warning');
       }
+      // v50.5: Warranty period validation — show warning if purchase date > 1 year
+      if (d.warranty_valid === false && d.warranty_message) {
+        toast(`⚠️ ${d.warranty_message}`, 'error');
+        _showWarrantyWarning(pdEl || pfEl, d.warranty_message);
+      } else if (d.warranty_message && d.warranty_valid === true) {
+        toast(`✅ ${d.warranty_message}`, 'success');
+      }
     } else if (d.source === 'suggestions_only' && d.seller_suggestions?.length && pfEl) {
       // AI failed — show seller suggestions + retry button
       const errMsg = d.ai_error === 'RATE_LIMITED' ? 'AI rate limited — pick seller or retry:' : (d.ai_error || 'AI couldn\'t read invoice');
@@ -1012,6 +1019,44 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
     indicator.placeholder = origPlaceholder;
     indicator.style.borderColor = '';
   }
+}
+// v50.5: Show warranty period warning when purchase date exceeds 1 year
+function _showWarrantyWarning(el, message) {
+  if (!el) return;
+  const existId = 'warranty-warn-' + (el.id || 'gen');
+  const existing = document.getElementById(existId);
+  if (existing) existing.remove();
+  const warn = document.createElement('div');
+  warn.id = existId;
+  warn.style.cssText = 'margin-top:6px;padding:8px 12px;background:#FFEBEE;border:1.5px solid #E53935;border-radius:8px;font-size:13px;color:#B71C1C;font-weight:600;display:flex;align-items:center;gap:6px';
+  warn.innerHTML = `<i class="fas fa-exclamation-triangle" style="color:#E53935;font-size:16px"></i> ${message}`;
+  el.parentElement?.appendChild(warn);
+  // Auto-remove after 30 seconds
+  setTimeout(() => warn.remove(), 30000);
+}
+// v50.5: Local warranty date validation — called when user manually enters/changes purchase date
+function validateWarrantyDate(dateInputId) {
+  const el = document.getElementById(dateInputId);
+  if (!el || !el.value) return true;
+  const purchaseMs = new Date(el.value).getTime();
+  if (isNaN(purchaseMs)) return true;
+  const nowMs = Date.now();
+  const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+  const ageMs = nowMs - purchaseMs;
+  if (ageMs > oneYearMs) {
+    const months = Math.round(ageMs / (30 * 24 * 60 * 60 * 1000));
+    const msg = `Purchase date is ${months} months ago — exceeds 1 year warranty period. Product may not be under warranty.`;
+    toast(`⚠️ ${msg}`, 'error');
+    _showWarrantyWarning(el, msg);
+    return false;
+  } else if (ageMs < 0) {
+    toast('⚠️ Purchase date is in the future — please verify', 'warning');
+    return false;
+  }
+  // Clear any previous warning
+  const existId = 'warranty-warn-' + (el.id || 'gen');
+  document.getElementById(existId)?.remove();
+  return true;
 }
 // v50.3: Show clickable seller suggestion tiles with retry button
 function _showSellerSuggestionTiles(inp, sellers, inputId, file) {
@@ -2275,6 +2320,11 @@ function bindNewJob() {
     if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
   });
 
+  // v50.5: Validate warranty period when purchase date is entered/changed
+  document.getElementById('nj-purchase-date')?.addEventListener('change', () => {
+    validateWarrantyDate('nj-purchase-date');
+  });
+
   // Dispatch method toggle — show courier name field when courier selected
   document.getElementById('nj-dispatch')?.addEventListener('change', e => {
     const wrap = document.getElementById('nj-dispatch-courier-wrap');
@@ -2606,6 +2656,18 @@ function bindNewJob() {
     const invoiceFile = document.getElementById('nj-invoice-img')?.files[0];
     const audioBlob = _njAudioBlob;
     const audioMime = _njAudioMime;
+
+    // v50.5: Final warranty period check before saving — warn if purchase date > 1 year
+    if (njWarrantyType === 'warranty' && machData.purchase_date) {
+      const purchaseMs = new Date(machData.purchase_date).getTime();
+      const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+      if (!isNaN(purchaseMs) && (Date.now() - purchaseMs) > oneYearMs) {
+        const months = Math.round((Date.now() - purchaseMs) / (30 * 24 * 60 * 60 * 1000));
+        if (!confirm(`⚠️ WARNING: Purchase date is ${months} months ago — exceeds 1 year warranty period.\n\nThe product may NOT be under warranty.\n\nDo you still want to save as "Under Warranty"?`)) {
+          return; // User cancelled
+        }
+      }
+    }
 
     try {
       // ── OPTIMISTIC UI: Show success immediately, navigate FIRST ───────────
@@ -2946,12 +3008,14 @@ function renderDetail() {
       </div>
     </div>
 
-    <!-- Hidden print element for html2canvas — dynamic height, no overflow -->
-    <div id="job-card-print"
-         style="position:fixed;left:-99999px;top:0;width:1080px;
-                background:#fff;pointer-events:none;z-index:-1">
-      ${jobCardPrintHTML(j)}
-    </div>`;
+    `;
+
+  // v50.5: Move print element OUTSIDE scrollable container to prevent mobile scroll issues
+  // (position:fixed child with width:1080px confuses some mobile browsers' scroll height calc)
+  let printEl = document.getElementById('job-card-print');
+  if (!printEl) { printEl = document.createElement('div'); printEl.id = 'job-card-print'; document.body.appendChild(printEl); }
+  printEl.style.cssText = 'position:fixed;left:-99999px;top:0;width:1080px;background:#fff;pointer-events:none;z-index:-1';
+  printEl.innerHTML = jobCardPrintHTML(j);
 
   bindDetail(j);
   // Load authenticated images and audio after DOM is set
@@ -4178,6 +4242,11 @@ function showAddMachineModal(jobId) {
     if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
   });
 
+  // v50.5: Validate warranty period when purchase date is entered in Add Machine modal
+  document.getElementById('am-purchase-date')?.addEventListener('change', () => {
+    validateWarrantyDate('am-purchase-date');
+  });
+
   // v48: Invoice image preview handlers for add-machine + v49.5 AI auto-read
   const amInvoiceInput = document.getElementById('am-invoice-img');
   amInvoiceInput?.addEventListener('change', e => {
@@ -4280,6 +4349,16 @@ function showAddMachineModal(jobId) {
     const amPurchasedFrom = warrantyType === 'warranty' ? (document.getElementById('am-purchased-from')?.value.trim() || null) : null;
     const amInvoiceNo = warrantyType === 'warranty' ? (document.getElementById('am-invoice-no')?.value.trim() || null) : null;
     const amPurchaseDate = warrantyType === 'warranty' ? (document.getElementById('am-purchase-date')?.value || null) : null;
+
+    // v50.5: Warranty period validation before save
+    if (warrantyType === 'warranty' && amPurchaseDate) {
+      const purchaseMs = new Date(amPurchaseDate).getTime();
+      const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+      if (!isNaN(purchaseMs) && (Date.now() - purchaseMs) > oneYearMs) {
+        const months = Math.round((Date.now() - purchaseMs) / (30 * 24 * 60 * 60 * 1000));
+        if (!confirm(`⚠️ Purchase date is ${months} months ago — exceeds 1 year warranty.\n\nStill save as "Under Warranty"?`)) return;
+      }
+    }
 
     // v45: INSTANT — close modal and show success BEFORE API call
     closeModal();
@@ -4451,6 +4530,11 @@ function showEditMachineModal(m) {
     if (purchaseWrap) purchaseWrap.style.display = isWarranty ? 'block' : 'none';
   });
 
+  // v50.5: Validate warranty period when purchase date is changed in Edit Machine modal
+  document.getElementById('em-purchase-date')?.addEventListener('change', () => {
+    validateWarrantyDate('em-purchase-date');
+  });
+
   // v49: Invoice image preview handlers for edit-machine + v49.5 AI auto-read
   const emInvoiceInput = document.getElementById('em-invoice-img');
   let emInvoiceNewFile = null;
@@ -4487,6 +4571,17 @@ function showEditMachineModal(m) {
     const purchasedFrom = warrantyType === 'warranty' ? (document.getElementById('em-purchased-from')?.value.trim() || null) : null;
     const invoiceNo = warrantyType === 'warranty' ? (document.getElementById('em-invoice-no')?.value.trim() || null) : null;
     const purchaseDate = warrantyType === 'warranty' ? (document.getElementById('em-purchase-date')?.value || null) : null;
+
+    // v50.5: Warranty period validation before save
+    if (warrantyType === 'warranty' && purchaseDate) {
+      const purchaseMs = new Date(purchaseDate).getTime();
+      const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+      if (!isNaN(purchaseMs) && (Date.now() - purchaseMs) > oneYearMs) {
+        const months = Math.round((Date.now() - purchaseMs) / (30 * 24 * 60 * 60 * 1000));
+        if (!confirm(`⚠️ Purchase date is ${months} months ago — exceeds 1 year warranty.\n\nStill save as "Under Warranty"?`)) return;
+      }
+    }
+
     try {
       await API.put(`/api/machines/${m.id}`, {
         product_name:      prod,
@@ -6719,6 +6814,15 @@ async function printAddressLabel(j) {
     // ── FROM section — bottom-left, left-aligned, +4pt larger fonts ──
     let fy = divY + 26;
     ctx.textAlign = 'left';
+
+    // v50.5: Machine count — small readable text above FROM address
+    const machineCount = (j.machines || []).reduce((s, m) => s + (parseInt(m.quantity) || 1), 0);
+    if (machineCount > 0) {
+      ctx.fillStyle = '#555555';
+      ctx.font = 'bold 30px "Segoe UI", Arial, sans-serif';
+      ctx.fillText(`Machines: ${machineCount}`, padX, fy);
+      fy += 38;
+    }
 
     ctx.fillStyle = '#888888';
     ctx.font = 'bold 40px "Segoe UI", Arial, sans-serif';  // was 30 → +10pt = 40

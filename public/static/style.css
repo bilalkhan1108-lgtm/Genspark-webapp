@@ -96,14 +96,14 @@ html, body {
 
 /* ── View root (scrollable content) ───────────────────────────────────────── */
 #view-root {
-  flex: 1;
+  flex: 1 1 0;           /* v50.5: 0 flex-basis forces min-height:0 behavior */
+  min-height: 0;          /* v50.5: CRITICAL — allows flex child to shrink & scroll */
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
   overscroll-behavior-y: contain;
-  will-change: scroll-position;
-  padding-bottom: 8px; /* v50.4: small safety padding, main bottom spacing is on .view-pad */
+  padding-bottom: 8px;
 }
 
 /* ── Bottom navigation ─────────────────────────────────────────────────────── */
@@ -332,6 +332,8 @@ html, body {
 /* v50.2: Added padding-bottom so content doesn't get hidden behind bottom nav (56px + safe area) */
 /* v50.4: Increased to 96px for better coverage on all devices + safe area */
 .view-pad { padding: 8px 8px 96px 8px; }
+/* v50.5: Ensure detail page can scroll on all devices — no height constraints */
+#detail-root { display: block; min-height: auto; }
 .mt-3     { margin-top: 8px; }
 
 /* ── Section title ─────────────────────────────────────────────────────────── */

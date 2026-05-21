@@ -2028,10 +2028,32 @@ Return ONLY valid JSON, no markdown, no code fences.` }
         try {
           const parsed = JSON.parse(jsonMatch[0])
           if (parsed.purchased_from || parsed.invoice_no || parsed.purchase_date) {
+            // v50.5: Warranty period validation — check if purchase date is within 1 year
+            let warranty_valid = true
+            let warranty_message = ''
+            if (parsed.purchase_date) {
+              const purchaseMs = new Date(parsed.purchase_date).getTime()
+              const nowMs = Date.now()
+              const oneYearMs = 365 * 24 * 60 * 60 * 1000
+              if (!isNaN(purchaseMs)) {
+                const ageMs = nowMs - purchaseMs
+                if (ageMs > oneYearMs) {
+                  warranty_valid = false
+                  const months = Math.round(ageMs / (30 * 24 * 60 * 60 * 1000))
+                  warranty_message = `Purchase date is ${months} months ago — exceeds 1 year warranty period`
+                } else if (ageMs < 0) {
+                  warranty_message = 'Purchase date is in the future — please verify'
+                } else {
+                  const daysLeft = Math.round((oneYearMs - ageMs) / (24 * 60 * 60 * 1000))
+                  warranty_message = `Warranty valid — ${daysLeft} days remaining`
+                }
+              }
+            }
             return c.json({
               purchased_from: parsed.purchased_from || '', invoice_no: parsed.invoice_no || '',
               purchase_date: parsed.purchase_date || '',
               confidence: Math.max(parsed.confidence || 0, 0.6),
+              warranty_valid, warranty_message,
               source: 'gemini'
             })
           }
