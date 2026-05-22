@@ -2961,6 +2961,9 @@ function renderDetail() {
       <button id="btn-share" class="action-btn" style="background:#25D366">
         <i class="fab fa-whatsapp"></i><span>Share</span>
       </button>
+      <button id="btn-bot-send" class="action-btn" style="background:#7C4DFF">
+        <i class="fas fa-paper-plane"></i><span>Bot Send</span>
+      </button>
       <button id="btn-print-addr" class="action-btn" style="background:#FB8C00">
         <i class="fas fa-print"></i><span>Address</span>
       </button>` : ''}
@@ -3393,6 +3396,9 @@ function bindDetail(j) {
 
   // WhatsApp share (admin only)
   document.getElementById('btn-share')?.addEventListener('click', () => generateAndShareJobCard(j, true));
+
+  // v50.6: Send Job Card via WhatsApp Bot
+  document.getElementById('btn-bot-send')?.addEventListener('click', () => sendJobCardViaBot(j));
 
   // v49.4: Job Logs button — shows full job lifecycle timeline
   document.getElementById('btn-job-logs')?.addEventListener('click', () => showJobHistory(j));
@@ -5289,6 +5295,116 @@ async function generateAndShareJobCard(j, shareMode) {
   }
 }
 
+// ── v50.6: Send Job Card via WhatsApp Bot ──────────────────────────────────
+// Generates the job card image, converts to base64, and POSTs to the bot
+// server's /send-job-card endpoint. Does NOT touch existing WhatsApp flow.
+async function sendJobCardViaBot(j) {
+  // 1. Get bot URL from settings (cached or fresh)
+  let botUrl = '';
+  try {
+    const r = await API.get('/api/settings');
+    botUrl = (r.data?.whatsapp_bot_url || '').replace(/\/+$/, '');
+  } catch (_) {}
+  if (!botUrl) {
+    toast('WhatsApp Bot URL not configured — go to Settings > WhatsApp Bot', 'error');
+    return;
+  }
+
+  const phone = (j.snap_mobile || '').replace(/\D/g, '');
+  if (!phone) { toast('No customer phone number on this job', 'error'); return; }
+
+  toast('Generating job card for bot…', 'info');
+  try {
+    const el = document.getElementById('job-card-print');
+    if (!el) { toast('Card element missing', 'error'); return; }
+
+    el.style.left = '-99999px'; el.style.top = '0';
+
+    // Pre-load images same as main flow
+    const _imgBase64Cache = new Map();
+    const prodImgUrls = (j.machines || []).map(m => (m.images || [])[0]?.url).filter(Boolean);
+    const invoiceImgUrls = (j.machines || []).map(m => m.invoice_image_url).filter(Boolean);
+    const imgUrls = [...prodImgUrls, ...invoiceImgUrls];
+    for (const url of imgUrls) {
+      if (_mediaCache.has(url)) {
+        try {
+          const resp = await fetch(_mediaCache.get(url));
+          if (resp.ok) {
+            const blob = await resp.blob();
+            if (blob.size > 100) {
+              _imgBase64Cache.set(url, await blobToBase64(blob));
+            }
+          }
+        } catch (_) {}
+      }
+      if (!_imgBase64Cache.has(url)) {
+        const b64 = await _fetchImageAsBase64(url);
+        if (b64) _imgBase64Cache.set(url, b64);
+      }
+    }
+    // Apply base64 to card images
+    el.querySelectorAll('img[data-src]').forEach(img => {
+      const b64 = _imgBase64Cache.get(img.dataset.src);
+      if (b64) img.src = b64;
+    });
+
+    await new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 400)));
+    });
+
+    // Generate JPEG same as main card
+    const CARD_WIDTH = 1080;
+    const actualH = Math.max(el.scrollHeight || el.offsetHeight || 1440, 1365);
+    const SCALE = 3;
+    const canvas = await html2canvas(el, {
+      scale: SCALE, useCORS: true, allowTaint: true,
+      width: CARD_WIDTH, height: actualH, backgroundColor: '#ffffff',
+      logging: false, imageTimeout: 30000, letterRendering: true, removeContainer: false,
+    });
+
+    const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', 0.95));
+    if (!blob || blob.size < 1000) { toast('Card generation failed', 'error'); return; }
+
+    // Convert to base64 for sending
+    const imageBase64 = await blobToBase64(blob);
+    const messageText = shareText(j, false);
+    const chatId = phone.startsWith('91') ? phone + '@c.us' : '91' + phone + '@c.us';
+
+    toast('Sending via WhatsApp Bot…', 'info');
+
+    const resp = await fetch(botUrl + '/send-job-card', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phone: chatId,
+        message: messageText,
+        image_base64: imageBase64,
+        job_id: j.id,
+        customer_name: j.snap_name || '',
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    const data = await resp.json();
+    if (data.ok || data.success) {
+      toast(`Job card sent to ${j.snap_name || phone} via WhatsApp Bot ✅`, 'success');
+      API.post(`/api/jobs/${j.id}/history`, {
+        action: 'Job Card Sent via Bot',
+        detail: `WhatsApp Bot to ${j.snap_mobile}. Size: ${(blob.size/1024).toFixed(0)}KB`
+      }).catch(() => {});
+    } else {
+      toast(data.error || 'Bot failed to send — check bot server', 'error');
+    }
+  } catch (e) {
+    console.error('[AES] Bot send error:', e);
+    if (e.name === 'TimeoutError') {
+      toast('Bot server timed out — is it running?', 'error');
+    } else {
+      toast('Failed to send via bot — check bot URL in settings', 'error');
+    }
+  }
+}
+
 function shareText(j, multiPage) {
   const custName    = j.snap_name || 'Valued Customer';
   const balance     = Math.max(0, (j.total_charges||0) - (j.discount||0) - (j.received_amount||0));
@@ -6244,6 +6360,22 @@ function settingsHTML() {
       <button id="btn-download-contacts" class="btn-sm" style="width:100%;padding:10px;font-size:14px;background:#0288D1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700"><i class="fas fa-download"></i> Download Contacts (.vcf)</button>
       <div id="contacts-dl-status" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:12px;text-align:center"></div>
     </div>
+    <!-- v50.6: WhatsApp Bot Configuration -->
+    <div class="card" style="margin-bottom:12px" id="bot-config-card">
+      <div class="section-title"><i class="fab fa-whatsapp" style="color:#25D366"></i> WhatsApp Bot</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Connect your separate WhatsApp Bot server to send job cards automatically. Enter the bot server URL (e.g., <code>https://your-bot.onrender.com</code>).</div>
+      <div class="form-group">
+        <label class="form-label">Bot Server URL</label>
+        <div style="display:flex;gap:8px">
+          <input id="bot-url-input" type="url" class="form-input" placeholder="https://your-bot.onrender.com" style="flex:1;font-family:monospace;font-size:13px" autocomplete="off">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="btn-bot-url-save" class="btn-sm" style="flex:1;background:#7C4DFF;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700"><i class="fas fa-save"></i> Save URL</button>
+        <button id="btn-bot-url-test" class="btn-sm" style="flex:1;background:#43A047;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700"><i class="fas fa-flask"></i> Test</button>
+      </div>
+      <div id="bot-url-status" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:12px"></div>
+    </div>
     <!-- v49.5: Gemini AI Configuration -->
     <div class="card" style="margin-bottom:12px" id="ai-config-card">
       <div class="section-title"><i class="fas fa-robot" style="color:#7C4DFF"></i> AI Product Recognition</div>
@@ -6562,6 +6694,56 @@ function bindSettings() {
       // Show final error
       if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + esc(lastError || 'API key test failed — check your key'); }
       toast(lastError || 'API key test failed', 'error');
+      if (btn) btn.disabled = false;
+    });
+
+    // ── v50.6: WhatsApp Bot URL config ───────────────────────────────────────
+    // Load existing bot URL
+    API.get('/api/settings').then(r => {
+      const url = r.data?.whatsapp_bot_url || '';
+      if (url) {
+        const inp = document.getElementById('bot-url-input');
+        if (inp) inp.value = url;
+        const st = document.getElementById('bot-url-status');
+        if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> Bot URL configured'; }
+      }
+    }).catch(() => {});
+
+    // Save bot URL
+    document.getElementById('btn-bot-url-save')?.addEventListener('click', async () => {
+      const url = document.getElementById('bot-url-input')?.value.trim();
+      if (!url) { toast('Enter the bot server URL', 'error'); return; }
+      if (!url.startsWith('http://') && !url.startsWith('https://')) { toast('URL must start with http:// or https://', 'error'); return; }
+      try {
+        await API.put('/api/settings', { whatsapp_bot_url: url.replace(/\/+$/, '') });
+        toast('Bot URL saved ✅', 'success');
+        const st = document.getElementById('bot-url-status');
+        if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> Bot URL saved successfully'; }
+      } catch (_) { toast('Failed to save bot URL', 'error'); }
+    });
+
+    // Test bot URL — pings the /health endpoint
+    document.getElementById('btn-bot-url-test')?.addEventListener('click', async () => {
+      const st = document.getElementById('bot-url-status');
+      const btn = document.getElementById('btn-bot-url-test');
+      const url = document.getElementById('bot-url-input')?.value.trim();
+      if (!url) { toast('Enter the bot server URL first', 'error'); return; }
+      if (btn) btn.disabled = true;
+      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing bot connection…'; }
+      try {
+        const r = await fetch(url.replace(/\/+$/, '') + '/health', { method: 'GET', signal: AbortSignal.timeout(10000) });
+        const data = await r.json();
+        if (data.ok || data.status === 'ok') {
+          const waStatus = data.whatsapp_ready ? '✅ WhatsApp connected' : '⚠️ WhatsApp not linked yet';
+          if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> Bot server online! ${waStatus}`; }
+          toast('Bot server is reachable ✅', 'success');
+        } else {
+          if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> Bot responded but status unknown'; }
+        }
+      } catch (e) {
+        if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> Cannot reach bot server — check URL and make sure it\'s running'; }
+        toast('Bot server unreachable', 'error');
+      }
       if (btn) btn.disabled = false;
     });
   }

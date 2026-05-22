@@ -1663,7 +1663,7 @@ app.get('/api/settings', authMiddleware, adminOnly, async (c) => {
 app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
-  const allowed = ['job_prefix', 'job_seq_digits', 'customer_categories', 'gemini_api_key']
+  const allowed = ['job_prefix', 'job_seq_digits', 'customer_categories', 'gemini_api_key', 'whatsapp_bot_url']
   for (const k of allowed) {
     if (k in body) {
       await c.env.DB.prepare(
@@ -2565,6 +2565,43 @@ app.delete('/api/cleanup', authMiddleware, adminOnly, async (c) => {
     return c.json({ ok: true, deleted })
   }
   return c.json({ error: 'Provide from/to dates or full_reset:true' }, 400)
+})
+
+// ── API: Bot Status Check (PUBLIC — read-only, used by WhatsApp bot) ────────
+// v50.6: Returns job status JSON for a given job ID. Used by the external
+// WhatsApp bot to answer customer status inquiries automatically.
+app.get('/api/check-status', async (c) => {
+  const jobId = (c.req.query('job') || '').trim()
+  if (!jobId) return c.json({ error: 'job parameter required' }, 400)
+
+  const job = await c.env.DB.prepare('SELECT * FROM jobs WHERE id=?').bind(jobId).first<any>()
+  if (!job) return c.json({ error: 'Job not found' }, 404)
+
+  // Fetch machines for device summary
+  const { results: machines } = await c.env.DB.prepare(`
+    SELECT product_name, status, quantity, work_done FROM machines WHERE job_id=? ORDER BY id
+  `).bind(jobId).all<any>()
+
+  const machineCount = machines.reduce((s: number, m: any) => s + (parseInt(m.quantity) || 1), 0)
+  const deviceNames = machines.map((m: any) => m.product_name).filter(Boolean).join(', ')
+  const machineStatuses = machines.map((m: any) => ({
+    product_name: m.product_name || '',
+    status: m.status || 'pending',
+    quantity: parseInt(m.quantity) || 1,
+    work_done: m.work_done || ''
+  }))
+
+  return c.json({
+    ok: true,
+    job_id: job.id,
+    customer_name: job.snap_name || '',
+    device_names: deviceNames,
+    status: job.status || 'received',
+    machine_count: machineCount,
+    machines: machineStatuses,
+    created_at: job.created_at || '',
+    delivered_at: job.delivered_at || '',
+  })
 })
 
 // ── API: Customer Self-Tracking (PUBLIC — no auth) ──────────────────────────
