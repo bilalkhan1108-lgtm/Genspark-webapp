@@ -1,4 +1,4 @@
-# ADITION ELECTRIC SOLUTION — PWA v35
+# ADITION ELECTRIC SOLUTION — PWA v50.6
 
 **Mobile-first PWA** for electric appliance repair shop management.  
 Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite DB · IndexedDB offline memory
@@ -112,9 +112,15 @@ Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite
 ### WhatsApp Integration
 - Job creation, repair completion, delivery confirmation
 - Customer reminder with 25-day notice
+- **v50.6: WhatsApp Bot Integration** — separate Node.js bot server for automated job card sharing
+  - New **"Bot Send"** button (purple) next to existing WhatsApp button
+  - Sends job card image + text message via bot automatically
+  - Bot URL configurable in Settings > WhatsApp Bot section
+  - Bot handles inbound auto-replies: business info, status checks in EN/HI/GU
 
 ### Public Customer Tracking
 - `/track?job=ID&mobile=NUMBER` — public page, no auth required
+- **v50.6: `/api/check-status?job=ID`** — public, returns job status JSON (used by WhatsApp bot)
 
 ### PWA Features
 - Installable on Android/iOS home screen
@@ -153,6 +159,7 @@ Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite
 | PUT | `/api/requests/:id` | Admin | Approve/deny request |
 | GET | `/api/settings` | Admin | App settings |
 | PUT | `/api/settings` | Admin | Update settings |
+| GET | `/api/check-status` | Public | Bot status check (job status JSON) |
 | GET | `/api/track` | Public | Customer job tracking |
 | GET | `/api/customers/search` | Auth | Customer autocomplete |
 | GET | `/api/customers/history` | Auth | Customer job history |
@@ -184,4 +191,5 @@ Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite
 ## Deployment
 - **Platform**: Cloudflare Pages
 - **Status**: Active
-- **Last Updated**: 2026-04-13
+- **Last Updated**: 2026-05-22
+- **WhatsApp Bot**: Separate Node.js project — see `/home/user/whatsapp-bot/README.md`
