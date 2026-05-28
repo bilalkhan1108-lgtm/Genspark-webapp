@@ -1644,25 +1644,14 @@ async function loadJobs(append = false) {
     _jobsLoadId++;
     const cacheKey = _idbFilterKey();
 
-    // v50.1: BRAND FILTER — parallel IDB lookups (was sequential, caused lag)
-    if (S.brandFilter && _allLoadedJobs.length) {
-      const BATCH = 20;
-      const brandJobs = [];
-      for (let i = 0; i < _allLoadedJobs.length; i += BATCH) {
-        const batch = _allLoadedJobs.slice(i, i + BATCH);
-        const details = await Promise.all(batch.map(j => IDB.loadDetail(j.id)));
-        details.forEach((detail, idx) => {
-          if (detail?.machines?.some(m => m.warranty_type === 'warranty' && m.warranty_brand === S.brandFilter)) {
-            brandJobs.push(batch[idx]);
-          }
-        });
+    // v50.7: BRAND FILTER — now uses server-side SQL filter (instant, no IDB lookups)
+    // The brand param is sent to /api/jobs which uses indexed warranty_brand column
+    if (S.brandFilter) {
+      // Don't use slow client-side IDB filtering — server handles it
+      // Just show spinner and let the API call below handle it
+      if (!S.jobs.length) {
+        if (wrap) wrap.innerHTML = `<div class="loader-wrap"><i class="fas fa-spinner fa-spin fa-2x"></i></div>`;
       }
-      S.jobs = brandJobs;
-      renderVList(false);
-      bindDashboardEvents();
-      toast(`🔖 ${brandJobs.length} job${brandJobs.length!==1?'s':''} with ${S.brandFilter} warranty`, 'info');
-      _jobsLoading = false;
-      return;
     }
     // v41: INSTANT CLIENT-SIDE FILTER — show results in <1ms from master cache
     // Works on very first keystroke because _allLoadedJobs is pre-warmed from IDB
@@ -1709,6 +1698,7 @@ async function loadJobs(append = false) {
     if (S.search && !S.searchJob && !S.searchName) params.q = S.search;
     if (S.fromDate)   params.from     = S.fromDate;
     if (S.toDate)     params.to       = S.toDate;
+    if (S.brandFilter) params.brand   = S.brandFilter;  // v50.7: server-side brand filter
     if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
     const r = await dedupeGet('/api/jobs', params);
     // v41: Discard if user has moved on (stale load ID or newer search)
@@ -3027,17 +3017,58 @@ function renderDetail() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IMAGE VIEWER (click-to-enlarge lightbox)
+// v50.7: Fixed — added loading spinner, error handling, retry, timeout
 // ─────────────────────────────────────────────────────────────────────────────
 function openImageViewer(url) {
   const ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:2000;display:flex;align-items:center;justify-content:center;';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.95);z-index:2000;display:flex;align-items:center;justify-content:center;flex-direction:column;';
+  // Loading spinner
+  const spinner = document.createElement('div');
+  spinner.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:36px;color:#fff;opacity:.8"></i><p style="color:#aaa;margin-top:12px;font-size:14px">Loading image…</p>';
+  spinner.style.cssText = 'text-align:center;';
+  ov.appendChild(spinner);
+  // Close button
+  const closeBtn = document.createElement('button');
+  closeBtn.innerHTML = '<i class="fas fa-times"></i>';
+  closeBtn.style.cssText = 'position:absolute;top:12px;right:16px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:50%;width:40px;height:40px;font-size:20px;cursor:pointer;z-index:2001;';
+  closeBtn.addEventListener('click', (e) => { e.stopPropagation(); ov.remove(); });
+  ov.appendChild(closeBtn);
+  // Image element (hidden until loaded)
   const img = document.createElement('img');
-  img.style.cssText = 'max-width:95vw;max-height:90vh;object-fit:contain;border-radius:8px;';
+  img.style.cssText = 'max-width:95vw;max-height:85vh;object-fit:contain;border-radius:8px;display:none;';
   img.alt = 'Image';
   ov.appendChild(img);
-  // close on tap
-  ov.addEventListener('click', () => ov.remove());
+  // Close on background tap (not on image)
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
   document.body.appendChild(ov);
+
+  // Success handler
+  img.onload = () => { spinner.remove(); img.style.display = 'block'; };
+  // Error handler with retry
+  let retries = 0;
+  img.onerror = () => {
+    if (retries < 2) {
+      retries++;
+      setTimeout(() => loadAuthMedia(url, img, 'src'), 1500);
+    } else {
+      spinner.innerHTML = '<i class="fas fa-exclamation-triangle" style="font-size:36px;color:#FF9800"></i><p style="color:#ccc;margin-top:12px;font-size:14px">Failed to load image</p><button style="margin-top:12px;background:#1E88E5;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer" onclick="this.parentElement.innerHTML=\'<i class=\\\'fas fa-spinner fa-spin\\\' style=\\\'font-size:36px;color:#fff;opacity:.8\\\'></i><p style=\\\'color:#aaa;margin-top:12px;font-size:14px\\\'>Retrying…</p>\'">Retry</button>';
+      spinner.querySelector('button')?.addEventListener('click', () => {
+        retries = 0;
+        loadAuthMedia(url, img, 'src');
+      });
+    }
+  };
+  // Timeout: if image doesn't load in 15s, show error
+  setTimeout(() => {
+    if (img.style.display === 'none' && spinner.parentElement) {
+      spinner.innerHTML = '<i class="fas fa-hourglass-half" style="font-size:36px;color:#FF9800"></i><p style="color:#ccc;margin-top:12px;font-size:14px">Image taking too long…</p><button id="img-retry-btn" style="margin-top:12px;background:#1E88E5;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer">Retry</button>';
+      document.getElementById('img-retry-btn')?.addEventListener('click', () => {
+        spinner.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:36px;color:#fff;opacity:.8"></i><p style="color:#aaa;margin-top:12px;font-size:14px">Retrying…</p>';
+        retries = 0;
+        loadAuthMedia(url, img, 'src');
+      });
+    }
+  }, 15000);
   loadAuthMedia(url, img, 'src');
 }
 // Expose for inline onclick handlers in modal HTML strings
@@ -6376,19 +6407,20 @@ function settingsHTML() {
       </div>
       <div id="bot-url-status" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:12px"></div>
     </div>
-    <!-- v49.5: Gemini AI Configuration -->
+    <!-- v49.5: Gemini AI Configuration — v50.7: Multi-key support -->
     <div class="card" style="margin-bottom:12px" id="ai-config-card">
       <div class="section-title"><i class="fas fa-robot" style="color:#7C4DFF"></i> AI Product Recognition</div>
-      <div style="font-size:13px;color:#888;margin-bottom:10px">Gemini AI auto-identifies products from photos and reads invoice details. Get a free API key from <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#1E88E5">Google AI Studio</a>.</div>
+      <div style="font-size:13px;color:#888;margin-bottom:10px">Gemini AI auto-identifies products from photos and reads invoice details. Add multiple API keys for automatic rotation when rate-limited. Get free keys from <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#1E88E5">Google AI Studio</a>.</div>
       <div class="form-group">
-        <label class="form-label">Gemini API Key</label>
+        <label class="form-label">Gemini API Keys <span id="ai-key-count" style="background:#7C4DFF;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700"></span></label>
+        <div id="ai-keys-list" style="margin-bottom:8px"></div>
         <div style="display:flex;gap:8px">
-          <input id="ai-gemini-key" type="password" class="form-input" placeholder="AIzaSy…" style="flex:1;font-family:monospace;font-size:13px" autocomplete="off">
+          <input id="ai-gemini-key" type="password" class="form-input" placeholder="AIzaSy… (paste new key)" style="flex:1;font-family:monospace;font-size:13px" autocomplete="off">
           <button id="btn-ai-key-toggle" type="button" style="background:none;border:1px solid #ddd;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:14px;color:#888" title="Show/hide key"><i class="fas fa-eye"></i></button>
         </div>
       </div>
       <div style="display:flex;gap:8px">
-        <button id="btn-ai-key-save" class="btn-sm btn-blue" style="flex:1"><i class="fas fa-save"></i> Save Key</button>
+        <button id="btn-ai-key-save" class="btn-sm btn-blue" style="flex:1"><i class="fas fa-plus"></i> Add Key</button>
         <button id="btn-ai-key-test" class="btn-sm" style="flex:1;background:#43A047;color:#fff;border:none;border-radius:8px;cursor:pointer"><i class="fas fa-flask"></i> Test</button>
       </div>
       <div id="ai-key-status" style="display:none;margin-top:8px;padding:8px;border-radius:8px;font-size:12px"></div>
@@ -6622,19 +6654,42 @@ function bindSettings() {
       } catch (_) { toast('Failed to save', 'error'); }
     });
 
-    // v49.6: Gemini AI Key management
-    // Load existing key (masked)
+    // v50.7: Multi-key Gemini AI management — auto-rotation on rate limit
+    let _aiKeys = [];
+    function renderAiKeysList() {
+      const listEl = document.getElementById('ai-keys-list');
+      const countEl = document.getElementById('ai-key-count');
+      if (countEl) countEl.textContent = _aiKeys.length ? `${_aiKeys.length} key${_aiKeys.length>1?'s':''}` : '';
+      if (!listEl) return;
+      if (!_aiKeys.length) { listEl.innerHTML = '<div style="padding:8px;color:#999;font-size:12px;text-align:center;border:1px dashed #ddd;border-radius:8px">No API keys added yet</div>'; return; }
+      listEl.innerHTML = _aiKeys.map((key, idx) => {
+        const masked = key.slice(0,6) + '•••' + key.slice(-4);
+        const tag = idx === 0 ? '<span style="background:#43A047;color:#fff;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:4px">PRIMARY</span>' : `<span style="color:#999;font-size:10px;margin-left:4px">#${idx+1}</span>`;
+        return `<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:#f8f9fa;border-radius:8px;margin-bottom:4px;font-family:monospace;font-size:12px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${masked}${tag}</span>${idx > 0 ? `<button data-kidx="${idx}" data-ka="up" style="background:none;border:none;cursor:pointer;color:#1E88E5;font-size:14px" title="Move up"><i class="fas fa-arrow-up"></i></button>` : ''}<button data-kidx="${idx}" data-ka="del" style="background:none;border:none;cursor:pointer;color:#E53935;font-size:14px" title="Remove"><i class="fas fa-times"></i></button></div>`;
+      }).join('');
+      listEl.querySelectorAll('button[data-ka]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const idx = parseInt(btn.dataset.kidx);
+          if (btn.dataset.ka === 'del') { if (!confirm('Remove this API key?')) return; _aiKeys.splice(idx, 1); }
+          else if (btn.dataset.ka === 'up') { [_aiKeys[idx-1], _aiKeys[idx]] = [_aiKeys[idx], _aiKeys[idx-1]]; }
+          await _saveAiKeys(); renderAiKeysList();
+        });
+      });
+    }
+    async function _saveAiKeys() {
+      try {
+        await API.put('/api/settings', { gemini_api_keys: JSON.stringify(_aiKeys) });
+        if (_aiKeys.length) await API.put('/api/settings', { gemini_api_key: _aiKeys[0] });
+      } catch (_) { toast('Failed to save keys', 'error'); }
+    }
     API.get('/api/settings').then(r => {
-      const key = r.data?.gemini_api_key;
-      if (key) {
-        const inp = document.getElementById('ai-gemini-key');
-        if (inp) inp.value = key.slice(0, 6) + '•'.repeat(Math.max(0, key.length - 10)) + key.slice(-4);
-        const st = document.getElementById('ai-key-status');
-        if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> API key configured'; }
-      }
+      const d = r.data;
+      if (d.gemini_api_keys) { try { const a = JSON.parse(d.gemini_api_keys); if (Array.isArray(a)) _aiKeys = a.filter(k => typeof k === 'string' && k.startsWith('AIza')); } catch {} }
+      if (!_aiKeys.length && d.gemini_api_key && d.gemini_api_key.startsWith('AIza')) _aiKeys = [d.gemini_api_key];
+      renderAiKeysList();
+      if (_aiKeys.length) { const st = document.getElementById('ai-key-status'); if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> ${_aiKeys.length} API key(s) — auto-rotation enabled`; } }
     }).catch(() => {});
 
-    // Toggle show/hide
     document.getElementById('btn-ai-key-toggle')?.addEventListener('click', () => {
       const inp = document.getElementById('ai-gemini-key');
       if (!inp) return;
@@ -6642,57 +6697,51 @@ function bindSettings() {
       document.querySelector('#btn-ai-key-toggle i').className = inp.type === 'password' ? 'fas fa-eye' : 'fas fa-eye-slash';
     });
 
-    // Clear masked value on focus so user can paste new key
-    document.getElementById('ai-gemini-key')?.addEventListener('focus', function() {
-      if (this.value.includes('•')) this.value = '';
-    });
-
-    // Save key
+    // Add key to multi-key list
     document.getElementById('btn-ai-key-save')?.addEventListener('click', async () => {
-      const key = document.getElementById('ai-gemini-key')?.value.trim();
-      if (!key || key.includes('•')) { toast('Paste your Gemini API key', 'error'); return; }
-      if (!key.startsWith('AIza')) { toast('Invalid key format — should start with AIza…', 'error'); return; }
-      try {
-        await API.put('/api/settings', { gemini_api_key: key });
-        toast('Gemini API key saved ✅', 'success');
-        const st = document.getElementById('ai-key-status');
-        if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = '<i class="fas fa-check-circle"></i> API key saved successfully'; }
-        // Mask the displayed key
-        const inp = document.getElementById('ai-gemini-key');
-        if (inp) { inp.type = 'password'; inp.value = key.slice(0, 6) + '•'.repeat(Math.max(0, key.length - 10)) + key.slice(-4); }
-      } catch (_) { toast('Failed to save API key', 'error'); }
+      const inp = document.getElementById('ai-gemini-key');
+      const key = inp?.value.trim();
+      if (!key || key.includes('•')) { toast('Paste a Gemini API key', 'error'); return; }
+      if (!key.startsWith('AIza')) { toast('Invalid key — should start with AIza…', 'error'); return; }
+      if (_aiKeys.includes(key)) { toast('This key is already added', 'error'); return; }
+      _aiKeys.push(key);
+      await _saveAiKeys();
+      renderAiKeysList();
+      if (inp) inp.value = '';
+      toast(`API key added ✅ (${_aiKeys.length} total)`, 'success');
+      const st = document.getElementById('ai-key-status');
+      if (st) { st.style.display = 'block'; st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> ${_aiKeys.length} key(s) — auto-rotation active`; }
     });
 
-    // v50: Test key — robust with retry, handles 429 gracefully
+    // v50.7: Test keys — robust with retry, handles 429 gracefully
     document.getElementById('btn-ai-key-test')?.addEventListener('click', async () => {
       const st = document.getElementById('ai-key-status');
       const btn = document.getElementById('btn-ai-key-test');
       if (btn) btn.disabled = true;
-      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing API key with Gemini… (may take a few seconds)'; }
+      if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing API keys with Gemini…'; }
       let lastError = '';
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const r = await API.post('/api/ai/test-key');
           if (r.data?.ok) {
             const model = r.data?.model || 'Gemini';
-            if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> API key works! Using <b>${esc(model)}</b>. AI features enabled.`; }
-            toast(`Gemini API key works ✅ (${model})`, 'success');
+            const kc = r.data?.keyCount || _aiKeys.length;
+            if (st) { st.style.background = '#E8F5E9'; st.style.color = '#2E7D32'; st.innerHTML = `<i class="fas fa-check-circle"></i> Works! <b>${esc(model)}</b>. ${kc} key(s) with auto-rotation.`; }
+            toast(`Gemini works ✅ (${model}, ${kc} keys)`, 'success');
             if (btn) btn.disabled = false;
             return;
           }
         } catch (e) {
           lastError = e?.response?.data?.error || 'Test failed';
-          // On 429, wait 3s and retry once
           if (e?.response?.status === 429 && attempt === 0) {
-            if (st) st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Rate limited — retrying in 3 seconds…';
+            if (st) st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Rate limited — retrying…';
             await new Promise(r => setTimeout(r, 3000));
             continue;
           }
         }
         break;
       }
-      // Show final error
-      if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + esc(lastError || 'API key test failed — check your key'); }
+      if (st) { st.style.background = '#FFEBEE'; st.style.color = '#C62828'; st.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + esc(lastError || 'Test failed — check your keys'); }
       toast(lastError || 'API key test failed', 'error');
       if (btn) btn.disabled = false;
     });

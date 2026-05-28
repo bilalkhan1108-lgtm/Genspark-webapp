@@ -454,6 +454,7 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const staffId  = c.req.query('staff_id') || ''
   const from     = c.req.query('from')   || ''
   const to       = c.req.query('to')     || ''
+  const brand    = c.req.query('brand')  || ''  // v50.7: server-side brand filter
   const limit    = Math.min(parseInt(c.req.query('limit') || '100'), 500)
   const offset   = parseInt(c.req.query('offset') || '0') || 0
   const role     = c.get('userRole')
@@ -504,6 +505,11 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   }
   if (from) { conds.push('DATE(j.created_at)>=?'); params.push(from) }
   if (to)   { conds.push('DATE(j.created_at)<=?'); params.push(to) }
+  // v50.7: Brand filter — uses indexed warranty_brand column for fast lookups
+  if (brand) {
+    conds.push(`EXISTS (SELECT 1 FROM machines mb WHERE mb.job_id=j.id AND mb.warranty_type='warranty' AND mb.warranty_brand=?)`)
+    params.push(brand)
+  }
 
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
   // v35: Optimized query — uses indexed subqueries, avoids costly JOIN for thumb
@@ -1663,7 +1669,7 @@ app.get('/api/settings', authMiddleware, adminOnly, async (c) => {
 app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
   let body: any
   try { body = await c.req.json() } catch { return c.json({ error: 'Invalid JSON' }, 400) }
-  const allowed = ['job_prefix', 'job_seq_digits', 'customer_categories', 'gemini_api_key', 'whatsapp_bot_url']
+  const allowed = ['job_prefix', 'job_seq_digits', 'customer_categories', 'gemini_api_key', 'gemini_api_keys', 'whatsapp_bot_url']
   for (const k of allowed) {
     if (k in body) {
       await c.env.DB.prepare(
@@ -1679,13 +1685,16 @@ app.put('/api/settings', authMiddleware, adminOnly, async (c) => {
 //        Gemini 3.x: thinkingLevel param, temperature must be 1.0
 //        Gemini 2.5: thinkingBudget param
 //        User has Gemini Pro subscription — all models accessible
+// v50.7: Added 3.5-flash and 3.1-flash-lite (newest models)
 const GEMINI_MODELS = [
-  'gemini-3.1-pro-preview',      // 1st: Most advanced reasoning, Feb 2026
-  'gemini-3-flash-preview',      // 2nd: Pro-level intelligence at Flash speed
-  'gemini-2.5-pro',              // 3rd: Stable, advanced reasoning, June 2025
-  'gemini-2.5-flash',            // 4th: Stable, best price-performance, June 2025
-  'gemini-2.0-flash',            // 5th: Deprecated June 2026 — emergency fallback
-  'gemini-1.5-flash',            // 6th: Legacy last resort
+  'gemini-3.5-flash-preview',    // 1st: Latest Flash model, May 2026
+  'gemini-3.1-flash-lite-preview', // 2nd: Fast, lightweight, latest lite
+  'gemini-3.1-pro-preview',      // 3rd: Most advanced reasoning
+  'gemini-3-flash-preview',      // 4th: Pro-level intelligence at Flash speed
+  'gemini-2.5-pro',              // 5th: Stable, advanced reasoning, June 2025
+  'gemini-2.5-flash',            // 6th: Stable, best price-performance, June 2025
+  'gemini-2.0-flash',            // 7th: Deprecated June 2026 — emergency fallback
+  'gemini-1.5-flash',            // 8th: Legacy last resort
 ]
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -1704,43 +1713,103 @@ let _cachedModel: string | null = null
 let _cachedModelExpiry = 0
 async function pickModel(apiKey: string): Promise<string> {
   if (_cachedModel && Date.now() < _cachedModelExpiry) return _cachedModel
-  _cachedModel = GEMINI_MODELS[0]  // gemini-3.1-pro-preview (latest)
+  _cachedModel = GEMINI_MODELS[0]  // latest model
   _cachedModelExpiry = Date.now() + 3600000
   return _cachedModel
 }
 
+// v50.7: Multi-API Key rotation system
+// Stores the current key index and last-rate-limited timestamps per key
+// On 429: marks key as rate-limited, moves to next key automatically
+let _keyRotationIndex = 0
+let _keyRateLimitedUntil: Map<string, number> = new Map()  // key -> timestamp when usable again
+
+// Get all available API keys (from gemini_api_keys JSON array + legacy gemini_api_key)
+async function getApiKeys(db: any): Promise<string[]> {
+  const keys: string[] = []
+  // First: get the multi-key array
+  const multiRow = await db.prepare("SELECT value FROM app_settings WHERE key='gemini_api_keys'").first<any>()
+  if (multiRow?.value) {
+    try {
+      const arr = JSON.parse(multiRow.value)
+      if (Array.isArray(arr)) {
+        for (const k of arr) {
+          const trimmed = (typeof k === 'string' ? k : k?.key || '').trim()
+          if (trimmed && trimmed.startsWith('AIza')) keys.push(trimmed)
+        }
+      }
+    } catch {}
+  }
+  // Fallback: legacy single key (if multi-keys is empty)
+  if (keys.length === 0) {
+    const singleRow = await db.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>()
+    if (singleRow?.value?.trim()) keys.push(singleRow.value.trim())
+  }
+  return keys
+}
+
+// Get the best available key (not rate-limited), rotating as needed
+function pickBestKey(keys: string[]): string | null {
+  if (!keys.length) return null
+  const now = Date.now()
+  // Try from current rotation index forward
+  for (let i = 0; i < keys.length; i++) {
+    const idx = (_keyRotationIndex + i) % keys.length
+    const key = keys[idx]
+    const limitUntil = _keyRateLimitedUntil.get(key) || 0
+    if (now >= limitUntil) {
+      _keyRotationIndex = idx
+      return key
+    }
+  }
+  // All keys are rate limited — pick the one expiring soonest
+  let bestKey = keys[0]
+  let soonest = Infinity
+  for (const key of keys) {
+    const until = _keyRateLimitedUntil.get(key) || 0
+    if (until < soonest) { soonest = until; bestKey = key }
+  }
+  return bestKey
+}
+
+// Mark a key as rate-limited (cooldown: 60s)
+function markKeyRateLimited(key: string) {
+  _keyRateLimitedUntil.set(key, Date.now() + 60000) // 60s cooldown
+  // Auto-rotate to next index
+  _keyRotationIndex = (_keyRotationIndex + 1)
+  console.log(`[AI-KEYS] Key ${key.slice(0,8)}… rate limited — rotated to next key`)
+}
+
 // v50.3: callGemini — tries EVERY model in the chain before giving up
-// On 404 (model not found): immediately try next model, no delay (doesn't count as attempt)
-// On 429 (rate limit): short delay then try NEXT model (different model = different quota)
-// On success: cache the working model for 1 hour
-// Max 8 total API calls (covers all 6 models + 2 retries on rate limit)
-async function callGemini(apiKey: string, model: string, contents: any[], genConfig?: any): Promise<{ok: boolean, data?: any, error?: string}> {
+// v50.7: Multi-key support — on 429, rotates to next API key before trying next model
+async function callGemini(apiKey: string, model: string, contents: any[], genConfig?: any, allKeys?: string[]): Promise<{ok: boolean, data?: any, error?: string}> {
   let lastError = ''
   let startIdx = GEMINI_MODELS.indexOf(model)
   if (startIdx < 0) startIdx = 0
   let rateLimitCount = 0
-  const MAX_RATE_RETRIES = 2  // max times we wait-and-retry on 429 across all models
+  const MAX_RATE_RETRIES = 2
+  const availableKeys = allKeys || [apiKey]
+  let currentKey = apiKey
 
   for (let modelIdx = startIdx; modelIdx < GEMINI_MODELS.length; modelIdx++) {
     const currentModel = GEMINI_MODELS[modelIdx]
     try {
-      console.log(`[AI] Trying model: ${currentModel} (idx ${modelIdx})`)
-      // v50.4: Build request body — minimize thinking for speed (JSON extraction, not reasoning)
+      console.log(`[AI] Trying model: ${currentModel} (idx ${modelIdx}) with key ${currentKey.slice(0,8)}…`)
+      // v50.4: Build request body — minimize thinking for speed
       const reqBody: any = {
         contents,
         generationConfig: genConfig || { temperature: 0.4, maxOutputTokens: 2048 }
       }
-      // Gemini 3.x: use thinkingLevel (minimal/low), temp must be 1.0
-      // Gemini 2.5: use thinkingBudget (0 for flash, 128 for pro)
-      if (currentModel.includes('3.1-pro') || currentModel.includes('3-flash')) {
+      // Gemini 3.x: use thinkingLevel, temp must be 1.0
+      if (currentModel.includes('3.5-flash') || currentModel.includes('3.1-pro') || currentModel.includes('3-flash') || currentModel.includes('3.1-flash-lite')) {
         reqBody.generationConfig.thinkingConfig = { thinkingLevel: 'minimal' }
-        reqBody.generationConfig.temperature = 1.0  // required for Gemini 3 models
+        reqBody.generationConfig.temperature = 1.0
       } else if (currentModel.includes('2.5-flash')) {
         reqBody.generationConfig.thinkingConfig = { thinkingBudget: 0 }
       } else if (currentModel.includes('2.5-pro')) {
         reqBody.generationConfig.thinkingConfig = { thinkingBudget: 128 }
       }
-      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`, {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${currentKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(reqBody)
@@ -1748,14 +1817,13 @@ async function callGemini(apiKey: string, model: string, contents: any[], genCon
 
       if (resp.ok) {
         const data = await resp.json() as any
-        // v50.3: Handle thinking model responses — skip thought parts, get actual answer
+        // Handle thinking model responses — skip thought parts
         const parts = data?.candidates?.[0]?.content?.parts || []
         let text = ''
         for (const p of parts) {
-          if (p.thought) continue  // skip thinking summary parts
+          if (p.thought) continue
           if (p.text) { text = p.text; break }
         }
-        // Fallback: try first part's text if no non-thought part found
         if (!text) text = parts[0]?.text || ''
         if (!text && data?.candidates?.[0]?.finishReason === 'SAFETY') {
           return { ok: false, error: 'Content blocked by safety filters' }
@@ -1763,13 +1831,12 @@ async function callGemini(apiKey: string, model: string, contents: any[], genCon
         if (!text) {
           console.log(`[AI] ${currentModel}: empty response, parts:`, JSON.stringify(parts).slice(0, 200))
           lastError = `${currentModel}: empty response`
-          continue  // try next model
+          continue
         }
-        // Success — cache this model and return with text in standard location
-        console.log(`[AI] ${currentModel}: SUCCESS, response length ${text.length}`)
+        // Success — cache model
+        console.log(`[AI] ${currentModel}: SUCCESS (key ${currentKey.slice(0,8)}…), response length ${text.length}`)
         _cachedModel = currentModel
         _cachedModelExpiry = Date.now() + 3600000
-        // Normalize response: put answer text in standard parts[0].text location
         data._extractedText = text
         return { ok: true, data }
       }
@@ -1779,51 +1846,60 @@ async function callGemini(apiKey: string, model: string, contents: any[], genCon
       console.log(`[AI] ${currentModel}: HTTP ${resp.status} — ${errBody.slice(0, 150)}`)
 
       if (resp.status === 404 || resp.status === 400) {
-        // Model not available or bad request for this model — skip to next immediately
         lastError = `${currentModel} not available (${resp.status})`
-        // Invalidate cache if this was the cached model
         if (_cachedModel === currentModel) { _cachedModel = null; _cachedModelExpiry = 0 }
         continue
       }
 
       if (resp.status === 429) {
-        // Rate limited — try next model first (different model = different quota bucket)
         lastError = 'RATE_LIMITED'
-        if (modelIdx < GEMINI_MODELS.length - 1) {
-          // More models to try — skip to next model immediately
-          console.log(`[AI] ${currentModel}: rate limited, trying next model`)
+        // v50.7: Try next API key first before trying next model
+        markKeyRateLimited(currentKey)
+        const nextKey = pickBestKey(availableKeys)
+        if (nextKey && nextKey !== currentKey) {
+          console.log(`[AI] Rotating to next API key: ${nextKey.slice(0,8)}…`)
+          currentKey = nextKey
+          modelIdx--  // Retry same model with different key
           continue
         }
-        // Last model also rate limited — wait and retry from best model if we haven't retried too much
+        // All keys exhausted for this model — try next model
+        if (modelIdx < GEMINI_MODELS.length - 1) {
+          console.log(`[AI] ${currentModel}: rate limited on all keys, trying next model`)
+          // Reset to best key for next model
+          currentKey = pickBestKey(availableKeys) || apiKey
+          continue
+        }
+        // Last model also rate limited — wait and retry
         if (rateLimitCount < MAX_RATE_RETRIES) {
           rateLimitCount++
-          const delay = rateLimitCount * 3000  // 3s, 6s
+          const delay = rateLimitCount * 3000
           console.log(`[AI] All models rate limited, waiting ${delay}ms then retrying (attempt ${rateLimitCount})`)
           await new Promise(r => setTimeout(r, delay))
-          modelIdx = startIdx - 1  // reset to start (loop will increment)
+          currentKey = pickBestKey(availableKeys) || apiKey
+          modelIdx = startIdx - 1
           continue
         }
         return { ok: false, error: 'RATE_LIMITED' }
       }
 
       if (resp.status === 403) {
-        // Check if it's an API key issue or a model permission issue
         if (errBody.includes('API_KEY') || errBody.includes('api key') || errBody.includes('API key')) {
+          // Try next key if available
+          const nextKey = availableKeys.find(k => k !== currentKey)
+          if (nextKey) { currentKey = nextKey; modelIdx--; continue }
           return { ok: false, error: 'Invalid API key. Check Settings → Gemini API Key.' }
         }
-        // Model access denied — try next
         lastError = `${currentModel}: access denied`
         continue
       }
 
-      // Other errors (500, 503 etc) — try next model
       lastError = `${currentModel}: HTTP ${resp.status}`
       continue
 
     } catch (e: any) {
       lastError = `${currentModel}: network error — ${e.message}`
       console.log(`[AI] ${currentModel}: EXCEPTION — ${e.message}`)
-      continue  // try next model on network error too
+      continue
     }
   }
   return { ok: false, error: lastError || 'AI analysis failed — all models unavailable' }
@@ -1831,8 +1907,10 @@ async function callGemini(apiKey: string, model: string, contents: any[], genCon
 
 // v50.3: Test API key — try actual generateContent with latest model, no listModels waste
 app.post('/api/ai/test-key', authMiddleware, adminOnly, async (c) => {
-  const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
+  const allKeys = await getApiKeys(c.env.DB)
+  const geminiKey = allKeys.length ? allKeys[0] : null
   if (!geminiKey) return c.json({ error: 'No API key configured' }, 400)
+  const keyCount = allKeys.length
   try {
     // Try each model until one works — this validates key AND finds best model
     for (const testModel of GEMINI_MODELS) {
@@ -1844,7 +1922,7 @@ app.post('/api/ai/test-key', authMiddleware, adminOnly, async (c) => {
         if (resp.ok) {
           _cachedModel = testModel
           _cachedModelExpiry = Date.now() + 3600000
-          return c.json({ ok: true, model: testModel, message: `API key works! Model: ${testModel}. AI features enabled.` })
+          return c.json({ ok: true, model: testModel, keyCount, message: `API key works! Model: ${testModel}. ${keyCount} key(s) configured.` })
         }
         if (resp.status === 429) {
           // Rate limited means key IS valid — this model works
@@ -1872,7 +1950,8 @@ app.post('/api/ai/test-key', authMiddleware, adminOnly, async (c) => {
 
 // v50: Analyze product image — Gemini with retry + strong DB fallback that auto-fills
 app.post('/api/ai/analyze-product', authMiddleware, async (c) => {
-  const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
+  const allKeys = await getApiKeys(c.env.DB)
+  const geminiKey = pickBestKey(allKeys)
   if (!geminiKey) return c.json({ error: 'Gemini API key not configured. Set it in Settings.' }, 400)
   const formData = await c.req.formData()
   const file = formData.get('image') as File | null
@@ -1912,7 +1991,7 @@ Return ONLY a JSON object: {"brand":"...","model":"...","category":"...","produc
 - Empty string for fields you truly cannot identify.
 Return ONLY valid JSON, no markdown, no code fences.` }
       ]
-    }])
+    }], undefined, allKeys)
     // v50.3: Parse Gemini response — use _extractedText (handles thinking model parts)
     if (result.ok) {
       const text = result.data?._extractedText || result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
@@ -1972,7 +2051,8 @@ Return ONLY valid JSON, no markdown, no code fences.` }
 
 // v50: Analyze invoice image — Gemini with retry + strong DB fallback with auto-fill
 app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
-  const geminiKey = (await c.env.DB.prepare("SELECT value FROM app_settings WHERE key='gemini_api_key'").first<any>())?.value
+  const allKeys = await getApiKeys(c.env.DB)
+  const geminiKey = pickBestKey(allKeys)
   if (!geminiKey) return c.json({ error: 'Gemini API key not configured' }, 400)
   const formData = await c.req.formData()
   const file = formData.get('image') as File | null
@@ -2017,7 +2097,7 @@ Return ONLY a JSON object: {"purchased_from":"...","invoice_no":"...","purchase_
 - Set confidence to at least 0.6 if you can read any field.
 Return ONLY valid JSON, no markdown, no code fences.` }
       ]
-    }])
+    }], undefined, allKeys)
     // v50.3: Parse Gemini invoice response — use _extractedText (handles thinking model parts)
     if (result.ok) {
       const text = result.data?._extractedText || result.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
