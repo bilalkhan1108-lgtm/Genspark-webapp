@@ -5405,7 +5405,7 @@ async function sendJobCardViaBot(j) {
 
     const resp = await fetch(botUrl + '/send-job-card', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({
         phone: chatId,
         message: messageText,
@@ -6780,7 +6780,7 @@ function bindSettings() {
       if (btn) btn.disabled = true;
       if (st) { st.style.display = 'block'; st.style.background = '#FFF3E0'; st.style.color = '#E65100'; st.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing bot connection…'; }
       try {
-        const r = await fetch(url.replace(/\/+$/, '') + '/health', { method: 'GET', signal: AbortSignal.timeout(10000) });
+        const r = await fetch(url.replace(/\/+$/, '') + '/health', { method: 'GET', headers: { 'ngrok-skip-browser-warning': 'true' }, signal: AbortSignal.timeout(10000) });
         const data = await r.json();
         if (data.ok || data.status === 'ok') {
           const waStatus = data.whatsapp_ready ? '✅ WhatsApp connected' : '⚠️ WhatsApp not linked yet';
