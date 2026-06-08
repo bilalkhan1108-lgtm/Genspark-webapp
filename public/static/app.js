@@ -5351,32 +5351,68 @@ async function sendJobCardViaBot(j) {
 
     el.style.left = '-99999px'; el.style.top = '0';
 
-    // Pre-load images same as main flow
+    // Pre-load images — same robust 3-phase strategy as main job card flow
     const _imgBase64Cache = new Map();
     const prodImgUrls = (j.machines || []).map(m => (m.images || [])[0]?.url).filter(Boolean);
     const invoiceImgUrls = (j.machines || []).map(m => m.invoice_image_url).filter(Boolean);
     const imgUrls = [...prodImgUrls, ...invoiceImgUrls];
-    for (const url of imgUrls) {
+
+    // Phase 1: Convert blob URLs from _mediaCache (fastest, already in memory)
+    await Promise.allSettled(imgUrls.map(async url => {
       if (_mediaCache.has(url)) {
         try {
-          const resp = await fetch(_mediaCache.get(url));
+          const blobUrl = _mediaCache.get(url);
+          const resp = await fetch(blobUrl);
           if (resp.ok) {
             const blob = await resp.blob();
             if (blob.size > 100) {
-              _imgBase64Cache.set(url, await blobToBase64(blob));
+              const b64 = await blobToBase64(blob);
+              if (b64 && b64.length > 200) { _imgBase64Cache.set(url, b64); return; }
             }
           }
         } catch (_) {}
+        _mediaCache.delete(url); // Blob URL expired
       }
-      if (!_imgBase64Cache.has(url)) {
-        const b64 = await _fetchImageAsBase64(url);
-        if (b64) _imgBase64Cache.set(url, b64);
-      }
+    }));
+
+    // Phase 2: Fetch remaining images with auth token (parallel, retries)
+    const remaining = imgUrls.filter(u => !_imgBase64Cache.has(u));
+    if (remaining.length) {
+      await Promise.allSettled(remaining.map(async url => {
+        const b64 = await imageUrlToBase64(url, S.token, 3);
+        if (b64 && b64.length > 200) _imgBase64Cache.set(url, b64);
+      }));
     }
-    // Apply base64 to card images
-    el.querySelectorAll('img[data-src]').forEach(img => {
-      const b64 = _imgBase64Cache.get(img.dataset.src);
-      if (b64) img.src = b64;
+
+    // Phase 3: Last-resort fetch for any still-missing images
+    const remaining2 = imgUrls.filter(u => !_imgBase64Cache.has(u));
+    if (remaining2.length) {
+      await Promise.allSettled(remaining2.map(async url => {
+        try {
+          const resp = await fetch(url, {
+            headers: { Authorization: 'Bearer ' + S.token, 'Cache-Control': 'no-cache' },
+            cache: 'reload'
+          });
+          if (resp.ok) {
+            const blob = await resp.blob();
+            if (blob.size > 100) {
+              const b64 = await blobToBase64(blob);
+              if (b64 && b64.length > 200) _imgBase64Cache.set(url, b64);
+            }
+          }
+        } catch (_) {}
+      }));
+    }
+
+    // Apply base64 to ALL card images (uses data-auth-src attribute, not data-src)
+    el.querySelectorAll('img').forEach(img => {
+      const authSrc = img.getAttribute('data-auth-src') || '';
+      const src = authSrc || img.src || '';
+      const cachedB64 = _imgBase64Cache.get(authSrc) || _imgBase64Cache.get(src);
+      if (cachedB64) {
+        img.src = cachedB64;
+        img.removeAttribute('data-auth-src');
+      }
     });
 
     await new Promise(resolve => {
