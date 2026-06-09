@@ -5884,9 +5884,13 @@ function reportsHTML() {
           <i class="fas fa-eye"></i> Preview
         </button>
         <button id="btn-wr-download" class="btn-sm btn-green">
-          <i class="fas fa-download"></i> Download .xlsx
+          <i class="fas fa-download"></i> Raw Data
+        </button>
+        <button id="btn-wr-brand-format" class="btn-sm" style="background:#E65100;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer">
+          <i class="fas fa-file-excel"></i> Brand Format
         </button>
       </div>
+      <div style="font-size:11px;color:#888;margin-top:4px"><i class="fas fa-info-circle"></i> <b>Brand Format</b> = ready-to-submit report for brand company (select a brand first)</div>
       <div id="wr-preview" style="display:none;margin-top:10px;max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px"></div>
     </div>
 
@@ -6219,6 +6223,33 @@ function bindReports() {
       setTimeout(() => URL.revokeObjectURL(url), 1500);
       toast('Warranty report downloaded ✅', 'success');
     } catch (_) { toast('Export failed', 'error'); }
+  });
+
+  // v50.9: Brand Format download — formatted report matching brand company template
+  document.getElementById('btn-wr-brand-format')?.addEventListener('click', async () => {
+    const brand = document.getElementById('wr-brand')?.value || '';
+    const from  = document.getElementById('wr-from')?.value || '';
+    const to    = document.getElementById('wr-to')?.value   || '';
+    if (!brand) { toast('Please select a brand first — formatted report requires a specific brand', 'error'); return; }
+    if (!from || !to) { toast('Please select From and To dates for the report period', 'error'); return; }
+    const p = new URLSearchParams();
+    p.set('brand', brand);
+    p.set('from', from);
+    p.set('to', to);
+    try {
+      toast(`Generating ${brand} formatted report…`, 'info');
+      const r = await API.get('/api/reports/brand-warranty-formatted?' + p, { responseType: 'blob' });
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement('a');
+      a.href = url;
+      // Extract filename from Content-Disposition if available
+      const cd = r.headers?.['content-disposition'] || '';
+      const fnMatch = cd.match(/filename="?([^"]+)"?/);
+      a.download = fnMatch ? fnMatch[1] : `${brand}_warranty_${new Date().toISOString().slice(0,10)}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      toast(`${brand} formatted report downloaded ✅`, 'success');
+    } catch (e) { toast('Export failed — make sure you selected a brand', 'error'); }
   });
 
   // ── Customer Master search ──────────────────────────────────────────────

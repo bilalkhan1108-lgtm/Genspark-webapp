@@ -2536,6 +2536,164 @@ app.get('/api/reports/warranty-brand', authMiddleware, adminOnly, async (c) => {
   })
 })
 
+// v50.9: Formatted brand warranty report — matches exact Ikonic/brand Excel template
+// Columns: Sr.No, Date of complaint, Customer Name, Mobile, Product Model, Purchased From,
+//          Customer Invoice No, Purchase Date, Warranty Status (fixed "In warranty"),
+//          Product Problem, Spare Used (work_done), Date of Delivery, Repair Charge (fixed 150),
+//          Invoice Image (URL link)
+// No courier details table. Each row = 1 machine with warranty_type='warranty'
+app.get('/api/reports/brand-warranty-formatted', authMiddleware, adminOnly, async (c) => {
+  const brand = c.req.query('brand') || ''
+  const from  = c.req.query('from')  || ''
+  const to    = c.req.query('to')    || ''
+
+  if (!brand) return c.json({ error: 'Brand parameter is required' }, 400)
+
+  let q = `
+    SELECT j.id AS job_id, j.snap_name AS customer_name, j.snap_mobile AS phone,
+           j.created_at AS job_created,
+           m.product_name, m.product_complaint, m.work_done,
+           m.status AS machine_status,
+           m.purchased_from, m.purchase_invoice_no, m.purchase_date,
+           m.invoice_image_url,
+           m.delivered_at AS machine_delivered_at,
+           j.delivered_at AS job_delivered_at
+    FROM machines m
+    JOIN jobs j ON m.job_id = j.id
+    WHERE m.warranty_type = 'warranty' AND m.warranty_brand = ?`
+  const ps: any[] = [brand]
+
+  // Date filter on job creation date (= "date of customer complaint")
+  if (from) { q += ' AND DATE(j.created_at) >= ?'; ps.push(from) }
+  if (to)   { q += ' AND DATE(j.created_at) <= ?'; ps.push(to) }
+
+  q += ' ORDER BY j.created_at ASC'
+
+  const { results } = await c.env.DB.prepare(q).bind(...ps).all<any>()
+
+  // Build base URL for invoice image links
+  const reqUrl = c.req.url
+  const baseUrl = reqUrl.includes('/api/') ? reqUrl.split('/api/')[0] : ''
+
+  // Format date helper: "2025-10-01 00:00:00" → Date object for Excel
+  const parseDate = (d: string | null) => {
+    if (!d) return ''
+    const dt = new Date(d)
+    return isNaN(dt.getTime()) ? '' : dt
+  }
+
+  const wb = XLSX.utils.book_new()
+
+  // Build header row manually for exact column control
+  const headers = [
+    'Sr. No.',
+    'Date of customer complaint',
+    'Customer Name',
+    'Mobile no.',
+    'Product Model Name',
+    'Purchased From',
+    'Customer Invoice No',
+    'Purchase Date',
+    'Warranty Status',
+    'Product Problem',
+    'Spare Used',
+    'Date of Delivery',
+    'Repair charge claimed to SSIZ',
+    'Invoice Image'
+  ]
+
+  const rows: any[][] = [headers]
+
+  results.forEach((r: any, i: number) => {
+    // Delivery date: prefer machine-level, then job-level
+    const deliveryDate = r.machine_delivered_at || r.job_delivered_at || ''
+
+    // Invoice image: full URL link
+    const invoiceImgUrl = r.invoice_image_url ? `${baseUrl}${r.invoice_image_url}` : ''
+
+    rows.push([
+      i + 1,                                          // A: Sr. No.
+      parseDate(r.job_created),                       // B: Date of customer complaint
+      r.customer_name || '',                          // C: Customer Name
+      r.phone || '',                                  // D: Mobile no.
+      r.product_name || '',                           // E: Product Model Name
+      r.purchased_from || '',                         // F: Purchased From
+      r.purchase_invoice_no || '',                    // G: Customer Invoice No
+      parseDate(r.purchase_date),                     // H: Purchase Date
+      'In warranty',                                  // I: Warranty Status (fixed)
+      r.product_complaint || '',                      // J: Product Problem
+      r.work_done || '',                              // K: Spare Used
+      parseDate(deliveryDate),                        // L: Date of Delivery
+      150,                                            // M: Repair charge (fixed 150)
+      invoiceImgUrl                                   // N: Invoice Image URL
+    ])
+  })
+
+  // Add totals row at end — sum of column M
+  if (results.length > 0) {
+    const totalRow: any[] = new Array(14).fill('')
+    totalRow[12] = results.length * 150  // Sum of repair charges
+    rows.push(totalRow)
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(rows)
+
+  // Set column widths to match Ikonic format
+  ws['!cols'] = [
+    { wch: 6 },    // A: Sr. No.
+    { wch: 14 },   // B: Date of complaint
+    { wch: 28 },   // C: Customer Name
+    { wch: 14 },   // D: Mobile
+    { wch: 22 },   // E: Product Model
+    { wch: 22 },   // F: Purchased From
+    { wch: 14 },   // G: Invoice No
+    { wch: 14 },   // H: Purchase Date
+    { wch: 14 },   // I: Warranty Status
+    { wch: 22 },   // J: Product Problem
+    { wch: 18 },   // K: Spare Used
+    { wch: 14 },   // L: Delivery Date
+    { wch: 16 },   // M: Repair Charge
+    { wch: 40 },   // N: Invoice Image
+  ]
+
+  // Format date columns (B, H, L) as date
+  for (let rowIdx = 1; rowIdx < rows.length; rowIdx++) {
+    // Column B (index 1) — Date of complaint
+    const bCell = ws[XLSX.utils.encode_cell({ r: rowIdx, c: 1 })]
+    if (bCell && bCell.v instanceof Date) { bCell.t = 'd'; bCell.z = 'yyyy-mm-dd' }
+    // Column H (index 7) — Purchase Date
+    const hCell = ws[XLSX.utils.encode_cell({ r: rowIdx, c: 7 })]
+    if (hCell && hCell.v instanceof Date) { hCell.t = 'd'; hCell.z = 'yyyy-mm-dd' }
+    // Column L (index 11) — Delivery Date
+    const lCell = ws[XLSX.utils.encode_cell({ r: rowIdx, c: 11 })]
+    if (lCell && lCell.v instanceof Date) { lCell.t = 'd'; lCell.z = 'yyyy-mm-dd' }
+  }
+
+  const sheetName = `${brand} Warranty Report`.slice(0, 31)
+  XLSX.utils.book_append_sheet(wb, ws, sheetName)
+
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
+  const dateStr = new Date().toISOString().slice(0, 10)
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  // Build filename like "October-'25 Job Details.xlsx" if date range available
+  let fileName = `${brand}_warranty_${dateStr}.xlsx`
+  if (from) {
+    const fd = new Date(from)
+    if (!isNaN(fd.getTime())) {
+      const monthName = monthNames[fd.getMonth()]
+      const yearShort = "'" + String(fd.getFullYear()).slice(2)
+      fileName = `${monthName}-${yearShort} ${brand} Job Details.xlsx`
+    }
+  }
+
+  return new Response(buf, {
+    headers: {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="${fileName}"`
+    }
+  })
+})
+
 // v47: Warranty brand summary (JSON) for in-page preview
 app.get('/api/reports/warranty-brand-summary', authMiddleware, adminOnly, async (c) => {
   const brand = c.req.query('brand') || ''
