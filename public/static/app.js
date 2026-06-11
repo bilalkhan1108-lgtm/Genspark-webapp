@@ -51,6 +51,7 @@ const S = {
   toDate  : '',
   myJobsOnly: false,
   brandFilter: '', // v47: warranty brand filter
+  staffFilter: '', // v50.9b: staff assignment filter (admin only)
   audioStream  : null,
   audioRecorder: null,
   audioChunks  : [],
@@ -1472,8 +1473,10 @@ function bindView() {
 // DASHBOARD — virtual-scroll list
 // ─────────────────────────────────────────────────────────────────────────────
 function dashboardHTML() {
-  const activeFilterLabel = S.filter === 'active_only' ? 'Active Only' : S.filter === 'courier_pending' ? 'Courier Pending' : S.filter ? sl(S.filter) : (S.fromDate || S.toDate ? 'Date Range' : 'All Jobs');
-  const hasFilter = S.filter || S.fromDate || S.toDate;
+  // v50.9b: Include staffFilter in active filter detection
+  const _staffName = S.staffFilter ? ((S.staff || []).find(st => st.id == S.staffFilter)?.name || 'Staff') : '';
+  const activeFilterLabel = S.staffFilter ? `Staff: ${_staffName}` : S.filter === 'active_only' ? 'Active Only' : S.filter === 'courier_pending' ? 'Courier Pending' : S.filter ? sl(S.filter) : (S.fromDate || S.toDate ? 'Date Range' : 'All Jobs');
+  const hasFilter = S.filter || S.fromDate || S.toDate || S.staffFilter;
   return `
   <div style="display:flex;flex-direction:column;height:100%">
     <!-- TOP BAR: Filter + Refresh icons at the very top -->
@@ -1526,6 +1529,14 @@ function dashboardHTML() {
           <option value="">All Types</option>
           <option value="in_person">In Person</option>
           <option value="courier">Courier</option>
+        </select>
+      </div>` : ''}
+      ${isAdmin() ? `
+      <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px"><i class="fas fa-user-cog" style="margin-right:4px"></i>Assigned Staff</div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <select id="fp-staff" class="form-input" style="min-height:36px;padding:4px 8px;font-size:13px;border-radius:8px;flex:1">
+          <option value="">All Staff</option>
+          ${(S.staff || []).map(st => `<option value="${st.id}" ${S.staffFilter == st.id ? 'selected' : ''}>${esc(st.name)} (${st.role})</option>`).join('')}
         </select>
       </div>` : ''}
       <div style="display:flex;gap:8px">
@@ -1630,7 +1641,7 @@ const JOBS_PER_PAGE = 100; // Higher batch = fewer API calls = faster perceived 
 
 // Build the IDB cache key for the current filter state
 function _idbFilterKey() {
-  if (S.search || S.searchJob || S.searchName || S.fromDate || S.toDate || S.myJobsOnly || S.brandFilter) return null;
+  if (S.search || S.searchJob || S.searchName || S.fromDate || S.toDate || S.myJobsOnly || S.brandFilter || S.staffFilter) return null;
   return 'f_' + (S.filter || '_all');
 }
 
@@ -1699,7 +1710,9 @@ async function loadJobs(append = false) {
     if (S.fromDate)   params.from     = S.fromDate;
     if (S.toDate)     params.to       = S.toDate;
     if (S.brandFilter) params.brand   = S.brandFilter;  // v50.7: server-side brand filter
-    if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
+    // v50.9b: Admin staff filter OR non-admin "My Jobs" filter
+    if (S.staffFilter && isAdmin()) params.staff_id = S.staffFilter;
+    else if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
     const r = await dedupeGet('/api/jobs', params);
     // v41: Discard if user has moved on (stale load ID or newer search)
     if (myLoadId !== _jobsLoadId || mySearchSeq !== _lastSearchSeq) { _jobsLoading = false; return; }
@@ -1868,7 +1881,7 @@ function bindDashboardEvents() {
         break;
       }
       case 'btn-clear-filter':
-        setFilter(''); S.fromDate = ''; S.toDate = ''; _analyticsCacheTs = 0;
+        setFilter(''); S.fromDate = ''; S.toDate = ''; S.staffFilter = ''; _analyticsCacheTs = 0;
         render();
         break;
       case 'fp-apply': {
@@ -1877,6 +1890,8 @@ function bindDashboardEvents() {
         setFilter(newStatus);
         S.fromDate = document.getElementById('fp-from')?.value || '';
         S.toDate = document.getElementById('fp-to')?.value || '';
+        // v50.9b: Read staff filter from dropdown
+        S.staffFilter = document.getElementById('fp-staff')?.value || '';
         const panel = document.getElementById('filter-panel');
         if (panel) panel.style.display = 'none';
 
@@ -1906,7 +1921,7 @@ function bindDashboardEvents() {
         break;
       }
       case 'fp-reset':
-        setFilter(''); S.fromDate = ''; S.toDate = '';
+        setFilter(''); S.fromDate = ''; S.toDate = ''; S.staffFilter = ''; // v50.9b: reset staff filter
         { const panel = document.getElementById('filter-panel'); if (panel) panel.style.display = 'none'; }
         _analyticsCacheTs = 0;
         render();
@@ -5890,7 +5905,7 @@ function reportsHTML() {
           <i class="fas fa-file-excel"></i> Brand Format
         </button>
       </div>
-      <div style="font-size:11px;color:#888;margin-top:4px"><i class="fas fa-info-circle"></i> <b>Brand Format</b> = ready-to-submit report for brand company (select a brand first)</div>
+      <div style="font-size:11px;color:#888;margin-top:4px"><i class="fas fa-info-circle"></i> <b>Brand Format</b> = ready-to-submit report for brand company (currently available for IKONIC only)</div>
       <div id="wr-preview" style="display:none;margin-top:10px;max-height:300px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:8px"></div>
     </div>
 
@@ -6226,11 +6241,14 @@ function bindReports() {
   });
 
   // v50.9: Brand Format download — formatted report matching brand company template
+  // v50.9b: Currently only IKONIC format is configured; HNK, MARC, AYTY Pro formats TBD
   document.getElementById('btn-wr-brand-format')?.addEventListener('click', async () => {
     const brand = document.getElementById('wr-brand')?.value || '';
     const from  = document.getElementById('wr-from')?.value || '';
     const to    = document.getElementById('wr-to')?.value   || '';
     if (!brand) { toast('Please select a brand first — formatted report requires a specific brand', 'error'); return; }
+    // v50.9b: Only IKONIC format is available — other brands have different formats (coming soon)
+    if (brand !== 'IKONIC') { toast(`Formatted report for ${brand} is not yet configured. Each brand has a different format — currently only IKONIC is available.`, 'error'); return; }
     if (!from || !to) { toast('Please select From and To dates for the report period', 'error'); return; }
     const p = new URLSearchParams();
     p.set('brand', brand);

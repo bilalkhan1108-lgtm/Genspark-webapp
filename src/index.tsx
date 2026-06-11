@@ -2557,7 +2557,8 @@ app.get('/api/reports/brand-warranty-formatted', authMiddleware, adminOnly, asyn
            m.purchased_from, m.purchase_invoice_no, m.purchase_date,
            m.invoice_image_url,
            m.delivered_at AS machine_delivered_at,
-           j.delivered_at AS job_delivered_at
+           j.delivered_at AS job_delivered_at,
+           m.quantity
     FROM machines m
     JOIN jobs j ON m.job_id = j.id
     WHERE m.warranty_type = 'warranty' AND m.warranty_brand = ?`
@@ -2604,35 +2605,41 @@ app.get('/api/reports/brand-warranty-formatted', authMiddleware, adminOnly, asyn
 
   const rows: any[][] = [headers]
 
-  results.forEach((r: any, i: number) => {
+  // v50.9b: Expand each machine by its quantity — qty=3 becomes 3 separate rows
+  let srNo = 0
+  results.forEach((r: any) => {
+    const qty = parseInt(r.quantity) || 1
     // Delivery date: prefer machine-level, then job-level
     const deliveryDate = r.machine_delivered_at || r.job_delivered_at || ''
-
     // Invoice image: full URL link
     const invoiceImgUrl = r.invoice_image_url ? `${baseUrl}${r.invoice_image_url}` : ''
 
-    rows.push([
-      i + 1,                                          // A: Sr. No.
-      parseDate(r.job_created),                       // B: Date of customer complaint
-      r.customer_name || '',                          // C: Customer Name
-      r.phone || '',                                  // D: Mobile no.
-      r.product_name || '',                           // E: Product Model Name
-      r.purchased_from || '',                         // F: Purchased From
-      r.purchase_invoice_no || '',                    // G: Customer Invoice No
-      parseDate(r.purchase_date),                     // H: Purchase Date
-      'In warranty',                                  // I: Warranty Status (fixed)
-      r.product_complaint || '',                      // J: Product Problem
-      r.work_done || '',                              // K: Spare Used
-      parseDate(deliveryDate),                        // L: Date of Delivery
-      150,                                            // M: Repair charge (fixed 150)
-      invoiceImgUrl                                   // N: Invoice Image URL
-    ])
+    for (let q = 0; q < qty; q++) {
+      srNo++
+      rows.push([
+        srNo,                                           // A: Sr. No.
+        parseDate(r.job_created),                       // B: Date of customer complaint
+        r.customer_name || '',                          // C: Customer Name
+        r.phone || '',                                  // D: Mobile no.
+        r.product_name || '',                           // E: Product Model Name
+        r.purchased_from || '',                         // F: Purchased From
+        r.purchase_invoice_no || '',                    // G: Customer Invoice No
+        parseDate(r.purchase_date),                     // H: Purchase Date
+        'In warranty',                                  // I: Warranty Status (fixed)
+        r.product_complaint || '',                      // J: Product Problem
+        r.work_done || '',                              // K: Spare Used
+        parseDate(deliveryDate),                        // L: Date of Delivery
+        150,                                            // M: Repair charge (fixed 150)
+        invoiceImgUrl                                   // N: Invoice Image URL
+      ])
+    }
   })
 
-  // Add totals row at end — sum of column M
-  if (results.length > 0) {
+  // Add totals row at end — sum of column M (total rows * 150)
+  const totalDataRows = srNo
+  if (totalDataRows > 0) {
     const totalRow: any[] = new Array(14).fill('')
-    totalRow[12] = results.length * 150  // Sum of repair charges
+    totalRow[12] = totalDataRows * 150  // Sum of repair charges (one 150 per expanded row)
     rows.push(totalRow)
   }
 
