@@ -166,6 +166,8 @@ async function ensureDbSchema(db: D1Database) {
       db.prepare(`ALTER TABLE machines ADD COLUMN invoice_image_url TEXT`).run().catch(() => {}),
       db.prepare(`ALTER TABLE customers ADD COLUMN note TEXT`).run().catch(() => {}),
       db.prepare(`ALTER TABLE customers ADD COLUMN dispatch_method TEXT`).run().catch(() => {}),
+      db.prepare(`ALTER TABLE jobs ADD COLUMN extra_charges REAL NOT NULL DEFAULT 0`).run().catch(() => {}),
+      db.prepare(`ALTER TABLE jobs ADD COLUMN extra_charges_note TEXT`).run().catch(() => {}),
       db.prepare(`UPDATE users SET role='director' WHERE role='supervisor'`).run().catch(() => {}),
     ])
     // Phase 3: CREATE TABLE + all CREATE INDEX in parallel
@@ -515,9 +517,9 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   // v35: Optimized query — uses indexed subqueries, avoids costly JOIN for thumb
   const { results } = await c.env.DB.prepare(`
     SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.dispatch_method, j.dispatch_courier_name,
-           j.received_amount, j.discount, j.payment_method, j.created_at, j.updated_at,
+           j.received_amount, j.discount, j.payment_method, j.extra_charges, j.extra_charges_note, j.created_at, j.updated_at,
            COALESCE((SELECT SUM(quantity) FROM machines WHERE job_id=j.id), 0) AS machine_count,
-           COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'), 0) AS total_charges,
+           COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'), 0) + COALESCE(j.extra_charges, 0) AS total_charges,
            (SELECT mi.url FROM machine_images mi WHERE mi.machine_id IN
              (SELECT id FROM machines WHERE job_id=j.id LIMIT 1) LIMIT 1) AS thumb
     FROM jobs j ${where}
@@ -547,9 +549,9 @@ app.get('/api/jobs/pending-payment', authMiddleware, async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT * FROM (
       SELECT j.id, j.snap_name, j.snap_mobile, j.status,
-             j.received_amount, j.discount, j.created_at, j.updated_at,
+             j.received_amount, j.discount, j.extra_charges, j.extra_charges_note, j.created_at, j.updated_at,
              (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
-             COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'),0) AS total_charges,
+             COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'),0) + COALESCE(j.extra_charges, 0) AS total_charges,
              (SELECT url FROM machine_images mi
               JOIN machines m2 ON mi.machine_id=m2.id
               WHERE m2.job_id=j.id ORDER BY mi.id LIMIT 1) AS thumb
@@ -654,9 +656,9 @@ app.get('/api/jobs/delivered', authMiddleware, async (c) => {
   const { results } = await c.env.DB.prepare(`
     SELECT j.id, j.snap_name, j.snap_mobile, j.status,
            j.received_amount, j.delivered_at, j.delivery_method,
-           j.delivery_receiver_name, j.delivery_courier_name,
+           j.delivery_receiver_name, j.delivery_courier_name, j.extra_charges, j.extra_charges_note,
            (SELECT COALESCE(SUM(quantity),0) FROM machines WHERE job_id=j.id) AS machine_count,
-           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') AS total_charges
+           (SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned') + COALESCE(j.extra_charges, 0) AS total_charges
     FROM jobs j ${where}
     ORDER BY j.delivered_at DESC LIMIT 500
   `).bind(...params).all<any>()
@@ -698,10 +700,12 @@ app.get('/api/jobs/:id', authMiddleware, async (c) => {
     ...m,
     images: (() => { try { return JSON.parse(m.images_json || '[]') } catch { return [] } })()
   }))
-  const totalCharges = enriched.reduce((s: number, m: any) => {
+  const machineCharges = enriched.reduce((s: number, m: any) => {
     if (m.status === 'returned') return s;
     return s + ((parseFloat(m.charges) || 0) * (parseInt(m.quantity) || 1));
   }, 0)
+  const extraCharges = parseFloat(job.extra_charges) || 0
+  const totalCharges = machineCharges + extraCharges
 
   return c.json({
     ...job,
@@ -728,7 +732,8 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
     'delivery_courier_name', 'delivery_tracking', 'delivery_address',
     'dispatch_method', 'dispatch_courier_name',
     'snap_name', 'snap_mobile', 'snap_mobile2', 'snap_address', 'snap_category',
-    'received_amount', 'discount', 'payment_method'
+    'received_amount', 'discount', 'payment_method',
+    'extra_charges', 'extra_charges_note'
   ]
   // Also update customer table when snap fields change
   if (body.snap_name || body.snap_mobile || body.snap_address) {
@@ -776,6 +781,9 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
   }
   if ('discount' in body) {
     logHistory(c.env.DB, id, 'Discount Updated', `Discount: ₹${body.discount}`, uName, uRole)
+  }
+  if ('extra_charges' in body) {
+    logHistory(c.env.DB, id, 'Extra Charges Updated', `Extra charges: ₹${body.extra_charges}${body.extra_charges_note ? ' (' + body.extra_charges_note + ')' : ''}`, uName, uRole)
   }
   if (body.snap_name || body.snap_mobile || body.snap_address) {
     logHistory(c.env.DB, id, 'Customer Info Updated', `Name: ${body.snap_name || '—'}, Mobile: ${body.snap_mobile || '—'}`, uName, uRole)

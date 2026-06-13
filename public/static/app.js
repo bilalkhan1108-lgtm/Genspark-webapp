@@ -2288,10 +2288,16 @@ function newJobHTML() {
                onfocus="if(this.value==='1')this.value=''" onblur="if(!this.value)this.value='1'">
       </div>
 
-      <!-- 7. Assign Staff -->
+      <!-- 7. Assign Staff — v51: Quick-tap first-name tiles for staff (non-admin only) + full dropdown -->
       ${isAdmin() ? `
       <div class="form-group">
         <label class="form-label">Assign Staff</label>
+        <div id="nj-staff-tiles" style="display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;margin-bottom:8px;padding:2px 0;-webkit-overflow-scrolling:touch">
+          ${S.staff.filter(s => s.role === 'staff' && s.active !== 0).map(s => {
+            const firstName = (s.name || '').split(' ')[0];
+            return `<div class="nj-staff-tile" data-sid="${s.id}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:700;cursor:pointer;border:2px solid #ddd;background:#fff;color:#555;transition:all .15s;user-select:none;white-space:nowrap">${esc(firstName)}</div>`;
+          }).join('')}
+        </div>
         <select id="nj-staff" class="form-input">
           <option value="">— None —</option>
           ${S.staff.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
@@ -2313,8 +2319,53 @@ function bindNewJob() {
       const sel = document.getElementById('nj-staff');
       if (sel) sel.innerHTML = `<option value="">— None —</option>` +
         S.staff.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+      // v51: Also rebuild staff tiles after load
+      const tilesWrap = document.getElementById('nj-staff-tiles');
+      if (tilesWrap) {
+        tilesWrap.innerHTML = S.staff.filter(s => s.role === 'staff' && s.active !== 0).map(s => {
+          const fn = (s.name || '').split(' ')[0];
+          return `<div class="nj-staff-tile" data-sid="${s.id}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:700;cursor:pointer;border:2px solid #ddd;background:#fff;color:#555;transition:all .15s;user-select:none;white-space:nowrap">${esc(fn)}</div>`;
+        }).join('');
+        _bindStaffTiles();
+      }
     }).catch(() => {});
   }
+
+  // v51: Staff tile click handlers — tap tile to select, sync with dropdown
+  function _bindStaffTiles() {
+    document.querySelectorAll('.nj-staff-tile').forEach(tile => {
+      tile.addEventListener('click', () => {
+        const sid = tile.dataset.sid;
+        const sel = document.getElementById('nj-staff');
+        const isActive = tile.style.borderColor === 'rgb(21, 101, 192)';
+        // Deselect all tiles
+        document.querySelectorAll('.nj-staff-tile').forEach(t => {
+          t.style.borderColor = '#ddd'; t.style.background = '#fff'; t.style.color = '#555';
+        });
+        if (isActive) {
+          // Deselect — set dropdown back to None
+          if (sel) sel.value = '';
+        } else {
+          // Select this tile
+          tile.style.borderColor = '#1565C0'; tile.style.background = '#E3F2FD'; tile.style.color = '#1565C0';
+          if (sel) sel.value = sid;
+        }
+      });
+    });
+  }
+  _bindStaffTiles();
+
+  // v51: Sync tiles when dropdown changes
+  document.getElementById('nj-staff')?.addEventListener('change', () => {
+    const val = document.getElementById('nj-staff')?.value || '';
+    document.querySelectorAll('.nj-staff-tile').forEach(t => {
+      if (t.dataset.sid === val) {
+        t.style.borderColor = '#1565C0'; t.style.background = '#E3F2FD'; t.style.color = '#1565C0';
+      } else {
+        t.style.borderColor = '#ddd'; t.style.background = '#fff'; t.style.color = '#555';
+      }
+    });
+  });
 
   // Warranty dropdown toggle in New Job form
   document.getElementById('nj-warranty')?.addEventListener('change', e => {
@@ -2889,6 +2940,10 @@ function renderDetail() {
             <span style="font-weight:600;color:${isReturned?'#999':'#1a1a2e'};flex-shrink:0;margin-left:8px">${fmtRs(lineAmt)}</span>
           </div>`;
         }).join('')}
+        ${(parseFloat(j.extra_charges)||0) > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:13px;color:#7B1FA2">
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><i class="fas fa-plus-circle" style="font-size:11px;margin-right:4px"></i>${esc(j.extra_charges_note || 'Extra Charges')}</span>
+          <span style="font-weight:600;flex-shrink:0;margin-left:8px">${fmtRs(parseFloat(j.extra_charges)||0)}</span>
+        </div>` : ''}
         <div class="fin-row" style="border-top:1px solid #e0e0e0;margin-top:4px;padding-top:6px">
           <span class="fin-label fw-bold">= Total Amount</span>
           <span class="fin-amount fw-bold">${fmtRs(total)}</span>
@@ -2904,6 +2959,29 @@ function renderDetail() {
       <div class="fin-row fin-balance">
         <span class="fin-label fw-bold">Balance Due</span>
         <span class="fin-amount fw-bold" style="color:${balance>0?'#E53935':'#43A047'}">${fmtRs(balance)}</span>
+      </div>
+      <!-- v51: Extra Expenses — courier, packing, handling charges etc. -->
+      <div style="border-top:1px solid #e8e8e8;margin-top:8px;padding-top:8px">
+        <div id="extra-charges-toggle" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px 0;user-select:none">
+          <i class="fas fa-plus-circle" style="color:#7B1FA2;font-size:14px"></i>
+          <span style="font-size:13px;font-weight:700;color:#7B1FA2">Add Extra Expenses</span>
+          <span style="font-size:11px;color:#999;margin-left:auto">(courier, packing, handling)</span>
+        </div>
+        <div id="extra-charges-form" style="display:none;margin-top:8px">
+          <div style="display:flex;gap:8px;margin-bottom:6px">
+            <input id="extra-note-input" type="text" class="form-input" style="flex:1.5"
+                   placeholder="e.g. Courier charges, Packing" value="${esc(j.extra_charges_note || '')}">
+            <input id="extra-amt-input" type="number" class="form-input" style="flex:1"
+                   value="${parseFloat(j.extra_charges)||0}" min="0" placeholder="₹ 0" inputmode="decimal">
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+            <button class="extra-quick-btn" data-amt="50" data-label="Packing" style="padding:4px 10px;border-radius:16px;border:1.5px solid #E0E0E0;background:#fff;font-size:12px;font-weight:600;cursor:pointer;color:#555">📦 Packing ₹50</button>
+            <button class="extra-quick-btn" data-amt="100" data-label="Courier" style="padding:4px 10px;border-radius:16px;border:1.5px solid #E0E0E0;background:#fff;font-size:12px;font-weight:600;cursor:pointer;color:#555">🚚 Courier ₹100</button>
+            <button class="extra-quick-btn" data-amt="150" data-label="Courier + Packing" style="padding:4px 10px;border-radius:16px;border:1.5px solid #E0E0E0;background:#fff;font-size:12px;font-weight:600;cursor:pointer;color:#555">📮 Both ₹150</button>
+            <button class="extra-quick-btn" data-amt="200" data-label="Handling charges" style="padding:4px 10px;border-radius:16px;border:1.5px solid #E0E0E0;background:#fff;font-size:12px;font-weight:600;cursor:pointer;color:#555">🔧 Handling ₹200</button>
+          </div>
+          <button id="extra-save-btn" class="btn-sm btn-green" style="width:100%"><i class="fas fa-save"></i> Save Extra Charges</button>
+        </div>
       </div>
       <div class="fin-edit-row">
         <label class="form-label" style="margin:0;font-weight:700">Discount/Deduction (₹)</label>
@@ -3036,52 +3114,78 @@ function renderDetail() {
 // ─────────────────────────────────────────────────────────────────────────────
 function openImageViewer(url) {
   const ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.95);z-index:2000;display:flex;align-items:center;justify-content:center;flex-direction:column;';
-  // Loading spinner
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.95);z-index:2000;display:flex;align-items:center;justify-content:center;flex-direction:column;touch-action:none;overflow:hidden;';
   const spinner = document.createElement('div');
   spinner.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:36px;color:#fff;opacity:.8"></i><p style="color:#aaa;margin-top:12px;font-size:14px">Loading image…</p>';
   spinner.style.cssText = 'text-align:center;';
   ov.appendChild(spinner);
-  // Close button
   const closeBtn = document.createElement('button');
   closeBtn.innerHTML = '<i class="fas fa-times"></i>';
   closeBtn.style.cssText = 'position:absolute;top:12px;right:16px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:50%;width:40px;height:40px;font-size:20px;cursor:pointer;z-index:2001;';
   closeBtn.addEventListener('click', (e) => { e.stopPropagation(); ov.remove(); });
   ov.appendChild(closeBtn);
-  // Image element (hidden until loaded)
+  // v51: Zoom hint
+  const hint = document.createElement('div');
+  hint.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.5);font-size:12px;font-weight:600;z-index:2001;pointer-events:none;transition:opacity .5s;';
+  hint.textContent = '\ud83d\udd0d Pinch or double-tap to zoom';
+  ov.appendChild(hint);
+  setTimeout(() => { hint.style.opacity = '0'; }, 3000);
   const img = document.createElement('img');
-  img.style.cssText = 'max-width:95vw;max-height:85vh;object-fit:contain;border-radius:8px;display:none;';
+  img.style.cssText = 'max-width:95vw;max-height:85vh;object-fit:contain;border-radius:8px;display:none;transform-origin:center center;user-select:none;-webkit-user-drag:none;';
   img.alt = 'Image';
+  img.draggable = false;
   ov.appendChild(img);
-  // Close on background tap (not on image)
-  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+
+  // v51: Zoom state
+  let scale = 1, posX = 0, posY = 0, _pinchDist = 0, _pinchScale = 1;
+  let _panX = 0, _panY = 0, _panPX = 0, _panPY = 0, _panning = false;
+  function applyT(anim) { img.style.transition = anim ? 'transform .2s ease' : 'none'; img.style.transform = `translate(${posX}px,${posY}px) scale(${scale})`; }
+  function resetZoom() { scale = 1; posX = 0; posY = 0; applyT(true); }
+
+  // Pinch-to-zoom
+  ov.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2) { e.preventDefault(); const dx = e.touches[0].clientX-e.touches[1].clientX, dy = e.touches[0].clientY-e.touches[1].clientY; _pinchDist = Math.hypot(dx,dy); _pinchScale = scale; }
+    else if (e.touches.length === 1 && scale > 1) { e.preventDefault(); _panning = true; _panX = e.touches[0].clientX; _panY = e.touches[0].clientY; _panPX = posX; _panPY = posY; }
+  }, {passive:false});
+  ov.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 2) { e.preventDefault(); const dx = e.touches[0].clientX-e.touches[1].clientX, dy = e.touches[0].clientY-e.touches[1].clientY; const d = Math.hypot(dx,dy); if (_pinchDist>0) { scale = Math.min(5, Math.max(1, _pinchScale*(d/_pinchDist))); if (scale<=1.05){scale=1;posX=0;posY=0;} applyT(false); } }
+    else if (e.touches.length === 1 && _panning && scale > 1) { e.preventDefault(); posX = _panPX + (e.touches[0].clientX-_panX); posY = _panPY + (e.touches[0].clientY-_panY); applyT(false); }
+  }, {passive:false});
+  ov.addEventListener('touchend', () => { _panning = false; _pinchDist = 0; if (scale<=1.05) resetZoom(); });
+
+  // Double-tap to zoom
+  let _lastTap = 0;
+  img.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - _lastTap < 300) {
+      e.preventDefault();
+      if (scale > 1.1) { resetZoom(); } else {
+        const rect = img.getBoundingClientRect();
+        const tx = e.changedTouches[0].clientX, ty = e.changedTouches[0].clientY;
+        const cx = rect.left+rect.width/2, cy = rect.top+rect.height/2;
+        scale = 2.5; posX = (cx-tx)*(scale-1); posY = (cy-ty)*(scale-1); applyT(true);
+      }
+    }
+    _lastTap = now;
+  });
+
+  // Scroll-to-zoom (desktop)
+  ov.addEventListener('wheel', (e) => { e.preventDefault(); scale = Math.min(5, Math.max(1, scale + (e.deltaY>0?-0.2:0.2))); if(scale<=1.05){scale=1;posX=0;posY=0;} applyT(true); }, {passive:false});
+
+  // Close on background tap (only if not zoomed)
+  ov.addEventListener('click', (e) => { if (e.target === ov && scale<=1.05) ov.remove(); });
   document.body.appendChild(ov);
 
-  // Success handler
   img.onload = () => { spinner.remove(); img.style.display = 'block'; };
-  // Error handler with retry
   let retries = 0;
   img.onerror = () => {
-    if (retries < 2) {
-      retries++;
-      setTimeout(() => loadAuthMedia(url, img, 'src'), 1500);
-    } else {
-      spinner.innerHTML = '<i class="fas fa-exclamation-triangle" style="font-size:36px;color:#FF9800"></i><p style="color:#ccc;margin-top:12px;font-size:14px">Failed to load image</p><button style="margin-top:12px;background:#1E88E5;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer" onclick="this.parentElement.innerHTML=\'<i class=\\\'fas fa-spinner fa-spin\\\' style=\\\'font-size:36px;color:#fff;opacity:.8\\\'></i><p style=\\\'color:#aaa;margin-top:12px;font-size:14px\\\'>Retrying…</p>\'">Retry</button>';
-      spinner.querySelector('button')?.addEventListener('click', () => {
-        retries = 0;
-        loadAuthMedia(url, img, 'src');
-      });
-    }
+    if (retries < 2) { retries++; setTimeout(() => loadAuthMedia(url, img, 'src'), 1500); }
+    else { spinner.innerHTML = '<i class="fas fa-exclamation-triangle" style="font-size:36px;color:#FF9800"></i><p style="color:#ccc;margin-top:12px;font-size:14px">Failed to load image</p><button style="margin-top:12px;background:#1E88E5;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer">Retry</button>'; spinner.querySelector('button')?.addEventListener('click', () => { retries=0; loadAuthMedia(url, img, 'src'); }); }
   };
-  // Timeout: if image doesn't load in 15s, show error
   setTimeout(() => {
     if (img.style.display === 'none' && spinner.parentElement) {
       spinner.innerHTML = '<i class="fas fa-hourglass-half" style="font-size:36px;color:#FF9800"></i><p style="color:#ccc;margin-top:12px;font-size:14px">Image taking too long…</p><button id="img-retry-btn" style="margin-top:12px;background:#1E88E5;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer">Retry</button>';
-      document.getElementById('img-retry-btn')?.addEventListener('click', () => {
-        spinner.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:36px;color:#fff;opacity:.8"></i><p style="color:#aaa;margin-top:12px;font-size:14px">Retrying…</p>';
-        retries = 0;
-        loadAuthMedia(url, img, 'src');
-      });
+      document.getElementById('img-retry-btn')?.addEventListener('click', () => { spinner.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:36px;color:#fff;opacity:.8"></i><p style="color:#aaa;margin-top:12px;font-size:14px">Retrying…</p>'; retries=0; loadAuthMedia(url, img, 'src'); });
     }
   }, 15000);
   loadAuthMedia(url, img, 'src');
@@ -3434,6 +3538,31 @@ function bindDetail(j) {
     } catch (_) { toast('Save failed', 'error'); }
   });
 
+  // v51: Extra charges toggle + save
+  document.getElementById('extra-charges-toggle')?.addEventListener('click', () => {
+    const form = document.getElementById('extra-charges-form');
+    if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  });
+  document.querySelectorAll('.extra-quick-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const amtInput = document.getElementById('extra-amt-input');
+      const noteInput = document.getElementById('extra-note-input');
+      if (amtInput) amtInput.value = btn.dataset.amt;
+      if (noteInput && !noteInput.value.trim()) noteInput.value = btn.dataset.label;
+      btn.style.background = '#E8F5E9'; btn.style.borderColor = '#43A047';
+      setTimeout(() => { btn.style.background = '#fff'; btn.style.borderColor = '#E0E0E0'; }, 300);
+    });
+  });
+  document.getElementById('extra-save-btn')?.addEventListener('click', async () => {
+    const amt = parseFloat(document.getElementById('extra-amt-input')?.value) || 0;
+    const note = document.getElementById('extra-note-input')?.value.trim() || '';
+    try {
+      await API.put(`/api/jobs/${j.id}`, { extra_charges: amt, extra_charges_note: note });
+      toast(amt > 0 ? `Extra charges ₹${amt} saved ✅` : 'Extra charges cleared', 'success');
+      await loadDetail();
+    } catch (_) { toast('Save failed', 'error'); }
+  });
+
   // Mark delivered (admin only)
   document.getElementById('btn-deliver')?.addEventListener('click', () => showDeliveryModal(j));
 
@@ -3666,10 +3795,10 @@ function bindDetail(j) {
     const balance = Math.max(0, (j.total_charges||0) - (j.discount||0) - (j.received_amount||0));
     const products = (j.machines||[]).map(m => `• ${m.product_name}${m.quantity>1?' ×'+m.quantity:''}`).join('\n') || '• Your device';
     const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(waPhone.replace(/^91/, ''))}`;
-    // v42: Salon/Consumer customers get product shop link in reminders too
+    // v42+v51: Salon/Parlour/Consumer customers get attractive product shop link in reminders too
     const _rCat = (j.snap_category || '').toLowerCase();
-    const _rShopLine = (_rCat === 'salon' || _rCat === 'consumer')
-      ? `\n🛒 *Shop Salon Products:* https://salonessentials.pages.dev/\n   Hair Dryers, Straighteners, Clippers, Trimmers & Accessories\n`
+    const _rShopLine = (_rCat === 'salon' || _rCat === 'parlour' || _rCat === 'consumer')
+      ? `\n\n🛍️✨ *Love Salon Products?* Shop now! 👇\n💇 Hair Dryers • Straighteners • Clippers • Trimmers & more!\n🔥 *https://salonessentials.pages.dev/*\n💫 _Premium products at best prices — your favourites, delivered!_\n`
       : '';
     const reminderMsg = `⚡ *ADITION ELECTRIC*
 
@@ -4196,10 +4325,16 @@ function showAddMachineModal(jobId) {
              onfocus="if(this.value==='1')this.value=''" onblur="if(!this.value)this.value='1'">
     </div>
 
-    <!-- 6. Assign Staff -->
+    <!-- 6. Assign Staff — v51: Quick-tap first-name tiles + full dropdown -->
     ${isAdmin() ? `
     <div class="form-group">
       <label class="form-label">Assign Staff</label>
+      <div id="am-staff-tiles" style="display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;margin-bottom:8px;padding:2px 0;-webkit-overflow-scrolling:touch">
+        ${S.staff.filter(s => s.role === 'staff' && s.active !== 0).map(s => {
+          const fn = (s.name || '').split(' ')[0];
+          return `<div class="am-staff-tile" data-sid="${s.id}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:700;cursor:pointer;border:2px solid #ddd;background:#fff;color:#555;transition:all .15s;user-select:none;white-space:nowrap">${esc(fn)}</div>`;
+        }).join('')}
+      </div>
       <select id="am-staff" class="form-input">
         <option value="">— None —</option>
         ${S.staff.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
@@ -4210,6 +4345,34 @@ function showAddMachineModal(jobId) {
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
       <button id="am-save" class="btn-primary"><i class="fas fa-save"></i> Save Machine</button>
     </div>`);
+
+  // v51: Wire staff tiles for add-machine modal
+  document.querySelectorAll('.am-staff-tile').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const sid = tile.dataset.sid;
+      const sel = document.getElementById('am-staff');
+      const isActive = tile.style.borderColor === 'rgb(21, 101, 192)';
+      document.querySelectorAll('.am-staff-tile').forEach(t => {
+        t.style.borderColor = '#ddd'; t.style.background = '#fff'; t.style.color = '#555';
+      });
+      if (isActive) {
+        if (sel) sel.value = '';
+      } else {
+        tile.style.borderColor = '#1565C0'; tile.style.background = '#E3F2FD'; tile.style.color = '#1565C0';
+        if (sel) sel.value = sid;
+      }
+    });
+  });
+  document.getElementById('am-staff')?.addEventListener('change', () => {
+    const val = document.getElementById('am-staff')?.value || '';
+    document.querySelectorAll('.am-staff-tile').forEach(t => {
+      if (t.dataset.sid === val) {
+        t.style.borderColor = '#1565C0'; t.style.background = '#E3F2FD'; t.style.color = '#1565C0';
+      } else {
+        t.style.borderColor = '#ddd'; t.style.background = '#fff'; t.style.color = '#555';
+      }
+    });
+  });
 
   // ── Wire suggestion tiles ──────────────────────────────────────────────────
   // Product name tiles → clicking fills name + updates complaint/amount tiles + auto-focus complaint
@@ -4563,6 +4726,13 @@ function showEditMachineModal(m) {
     ${hasSuperRight('manage_machines') ? `
     <div class="form-group">
       <label class="form-label">Assign Staff</label>
+      <div id="em-staff-tiles" style="display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;margin-bottom:8px;padding:2px 0;-webkit-overflow-scrolling:touch">
+        ${S.staff.filter(s => s.role === 'staff' && s.active !== 0).map(s => {
+          const fn = (s.name || '').split(' ')[0];
+          const isActive = m.assigned_staff_id == s.id;
+          return `<div class="em-staff-tile" data-sid="${s.id}" style="flex-shrink:0;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:700;cursor:pointer;border:2px solid ${isActive?'#1565C0':'#ddd'};background:${isActive?'#E3F2FD':'#fff'};color:${isActive?'#1565C0':'#555'};transition:all .15s;user-select:none;white-space:nowrap">${esc(fn)}</div>`;
+        }).join('')}
+      </div>
       <select id="em-staff" class="form-input">
         <option value="">— None —</option>
         ${S.staff.map(s => `<option value="${s.id}" ${m.assigned_staff_id==s.id?'selected':''}>${esc(s.name)}</option>`).join('')}
@@ -4572,6 +4742,34 @@ function showEditMachineModal(m) {
       <button onclick="closeModal()" class="btn-ghost">Cancel</button>
       <button id="em-save" class="btn-primary">Update</button>
     </div>`);
+
+  // v51: Wire staff tiles for edit-machine modal
+  document.querySelectorAll('.em-staff-tile').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const sid = tile.dataset.sid;
+      const sel = document.getElementById('em-staff');
+      const isActive = tile.style.borderColor === 'rgb(21, 101, 192)';
+      document.querySelectorAll('.em-staff-tile').forEach(t => {
+        t.style.borderColor = '#ddd'; t.style.background = '#fff'; t.style.color = '#555';
+      });
+      if (isActive) {
+        if (sel) sel.value = '';
+      } else {
+        tile.style.borderColor = '#1565C0'; tile.style.background = '#E3F2FD'; tile.style.color = '#1565C0';
+        if (sel) sel.value = sid;
+      }
+    });
+  });
+  document.getElementById('em-staff')?.addEventListener('change', () => {
+    const val = document.getElementById('em-staff')?.value || '';
+    document.querySelectorAll('.em-staff-tile').forEach(t => {
+      if (t.dataset.sid === val) {
+        t.style.borderColor = '#1565C0'; t.style.background = '#E3F2FD'; t.style.color = '#1565C0';
+      } else {
+        t.style.borderColor = '#ddd'; t.style.background = '#fff'; t.style.color = '#555';
+      }
+    });
+  });
 
   // v49: Warranty dropdown toggle — show/hide brand AND purchase fields
   document.getElementById('em-warranty')?.addEventListener('change', e => {
@@ -4938,6 +5136,10 @@ function jobCardPrintHTML(j) {
         <span style="color:#555;font-size:15px;font-weight:600">Total Amount</span>
         <span style="font-size:17px;font-weight:800;color:#1a1a2e">${fmtRs(total)}</span>
       </div>
+      ${(parseFloat(j.extra_charges)||0) > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #e0e0e0">
+        <span style="color:#7B1FA2;font-size:14px;font-weight:600">${esc(j.extra_charges_note || 'Extra Charges')} (incl. above)</span>
+        <span style="font-size:15px;font-weight:700;color:#7B1FA2">${fmtRs(parseFloat(j.extra_charges)||0)}</span>
+      </div>` : ''}
       ${discount > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #e0e0e0">
         <span style="color:#FB8C00;font-size:15px;font-weight:600">Discount/Deduction</span>
         <span style="font-size:17px;font-weight:800;color:#FB8C00">- ${fmtRs(discount)}</span>
@@ -5499,11 +5701,11 @@ function shareText(j, multiPage) {
   const trackLink = `${window.location.origin}/track?job=${encodeURIComponent(j.id)}&mobile=${encodeURIComponent(phone)}`;
   const communityLink = 'https://chat.whatsapp.com/ILjfPXXuyiBKuL2VdpMhg4';
 
-  // v42: Salon/Consumer customers get a product shop link
+  // v42+v51: Salon/Parlour/Consumer customers get an attractive product shop link
   const cat = (j.snap_category || '').toLowerCase();
-  const isSalonOrConsumer = cat === 'salon' || cat === 'consumer';
+  const isSalonOrConsumer = cat === 'salon' || cat === 'parlour' || cat === 'consumer';
   const shopLine = isSalonOrConsumer
-    ? `\n🛒 *Shop Salon Products:* https://salonessentials.pages.dev/\n   Hair Dryers, Straighteners, Clippers, Trimmers & Accessories`
+    ? `\n\n🛍️✨ *Love Salon Products?* Shop now! 👇\n💇 Hair Dryers • Straighteners • Clippers • Trimmers & more!\n🔥 *https://salonessentials.pages.dev/*\n💫 _Premium products at best prices — your favourites, delivered!_`
     : '';
 
   if (isRepaired && balance > 0) {
