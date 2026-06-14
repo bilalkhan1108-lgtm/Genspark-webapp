@@ -4871,6 +4871,17 @@ function showDeliveryModal(j) {
   const today = new Date().toISOString().slice(0, 10);
   showModal(`
     <h3 class="modal-title"><i class="fas fa-check-double" style="color:#1E88E5"></i> Mark as Delivered</h3>
+    <div class="form-group" style="text-align:center;margin-bottom:16px">
+      <label class="form-label" style="margin-bottom:8px;font-weight:600">Customer Rating</label>
+      <div id="dm-stars" style="display:inline-flex;gap:6px;font-size:32px;cursor:pointer">
+        <i class="far fa-star" data-star="1" style="color:#FFB300;transition:transform .15s"></i>
+        <i class="far fa-star" data-star="2" style="color:#FFB300;transition:transform .15s"></i>
+        <i class="far fa-star" data-star="3" style="color:#FFB300;transition:transform .15s"></i>
+        <i class="far fa-star" data-star="4" style="color:#FFB300;transition:transform .15s"></i>
+        <i class="far fa-star" data-star="5" style="color:#FFB300;transition:transform .15s"></i>
+      </div>
+      <div id="dm-star-label" style="font-size:12px;color:#999;margin-top:4px">Tap to rate (optional)</div>
+    </div>
     <div class="form-row-2">
       <div class="form-group">
         <label class="form-label">Delivery Method <span class="req">*</span></label>
@@ -4965,6 +4976,27 @@ function showDeliveryModal(j) {
   document.getElementById('dm-method')?.addEventListener('change', e => { _dmRnameEdited = false; _dmCourierEdited = false; toggleCourierFields(e.target.value); });
   toggleCourierFields('in_person');
 
+  // v51.1: Star rating interactivity
+  let _dmRating = 0;
+  const starsWrap = document.getElementById('dm-stars');
+  const starLabel = document.getElementById('dm-star-label');
+  const starLabels = ['', 'Poor', 'Fair', 'Good', 'Very Good', 'Excellent'];
+  if (starsWrap) {
+    starsWrap.addEventListener('click', (e) => {
+      const star = e.target.closest('[data-star]');
+      if (!star) return;
+      const val = parseInt(star.dataset.star);
+      // Toggle off if same star tapped again
+      _dmRating = (_dmRating === val) ? 0 : val;
+      starsWrap.querySelectorAll('[data-star]').forEach(s => {
+        const sv = parseInt(s.dataset.star);
+        s.className = sv <= _dmRating ? 'fas fa-star' : 'far fa-star';
+        s.style.transform = sv <= _dmRating ? 'scale(1.15)' : 'scale(1)';
+      });
+      if (starLabel) starLabel.textContent = _dmRating ? starLabels[_dmRating] : 'Tap to rate (optional)';
+    });
+  }
+
   document.getElementById('dm-confirm')?.addEventListener('click', async () => {
     const rname = document.getElementById('dm-rname')?.value.trim() || null;
     const deliveryDate = document.getElementById('dm-date')?.value || null;
@@ -4980,6 +5012,7 @@ function showDeliveryModal(j) {
         delivery_courier_name:    document.getElementById('dm-courier')?.value || null,
         delivery_tracking:        document.getElementById('dm-track')?.value   || null,
         delivery_address:         document.getElementById('dm-addr')?.value    || null,
+        delivery_rating:          _dmRating || null,
         ...(hasSuperRight('view_financials') ? {
           received_amount: parseFloat(document.getElementById('dm-recv')?.value) || 0,
           discount: parseFloat(document.getElementById('dm-disc')?.value) || 0,
@@ -5723,12 +5756,13 @@ Dear *${custName}*, your items are *ready!* 🎉
   }
 
   if (isDelivered) {
+    // v51.1: No tracking link for delivered. Google review link only if rating >= 4
+    const reviewLink = (j.delivery_rating && j.delivery_rating >= 4) ? `\n⭐ Loved our service? Leave a review: https://g.page/r/CReiTEBAxdG1EBE/review` : '';
     return `⚡ *ADITION™ ELECTRIC*
 Job *#${j.id}* | 📦 ${prodCount} Products | ✅ *Delivered*
 
 Dear *${custName}*, your job is complete! 🙏
-${balance > 0 ? `⚠️ Due: ₹${balance.toLocaleString('en-IN')}\n` : ''}
-🔗 Track: ${trackLink}
+${balance > 0 ? `⚠️ Due: ₹${balance.toLocaleString('en-IN')}\n` : ''}${reviewLink}
 📢 Join Updates: ${communityLink}${shopLine}`;
   }
 

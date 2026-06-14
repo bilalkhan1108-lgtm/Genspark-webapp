@@ -8,7 +8,7 @@ Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite
 ## URLs
 | Environment | URL |
 |---|---|
-| **Production** | https://project-c467a55b-186.pages.dev |
+| **Production** | https://adition-crm.pages.dev |
 | **Sandbox (Dev)** | https://3000-itsteu7gob2nb2g5pp83m-dfc00ec5.sandbox.novita.ai |
 | **GitHub** | https://github.com/bilalkhan1108-lgtm/Genspark-webapp |
 

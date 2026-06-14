@@ -168,6 +168,7 @@ async function ensureDbSchema(db: D1Database) {
       db.prepare(`ALTER TABLE customers ADD COLUMN dispatch_method TEXT`).run().catch(() => {}),
       db.prepare(`ALTER TABLE jobs ADD COLUMN extra_charges REAL NOT NULL DEFAULT 0`).run().catch(() => {}),
       db.prepare(`ALTER TABLE jobs ADD COLUMN extra_charges_note TEXT`).run().catch(() => {}),
+      db.prepare(`ALTER TABLE jobs ADD COLUMN delivery_rating INTEGER`).run().catch(() => {}),
       db.prepare(`UPDATE users SET role='director' WHERE role='supervisor'`).run().catch(() => {}),
     ])
     // Phase 3: CREATE TABLE + all CREATE INDEX in parallel
@@ -516,8 +517,8 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
   // v35: Optimized query — uses indexed subqueries, avoids costly JOIN for thumb
   const { results } = await c.env.DB.prepare(`
-    SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.dispatch_method, j.dispatch_courier_name,
-           j.received_amount, j.discount, j.payment_method, j.extra_charges, j.extra_charges_note, j.created_at, j.updated_at,
+    SELECT j.id, j.snap_name, j.snap_mobile, j.snap_category, j.status, j.dispatch_method, j.dispatch_courier_name,
+           j.received_amount, j.discount, j.payment_method, j.extra_charges, j.extra_charges_note, j.delivery_rating, j.created_at, j.updated_at,
            COALESCE((SELECT SUM(quantity) FROM machines WHERE job_id=j.id), 0) AS machine_count,
            COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'), 0) + COALESCE(j.extra_charges, 0) AS total_charges,
            (SELECT mi.url FROM machine_images mi WHERE mi.machine_id IN
@@ -733,7 +734,7 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
     'dispatch_method', 'dispatch_courier_name',
     'snap_name', 'snap_mobile', 'snap_mobile2', 'snap_address', 'snap_category',
     'received_amount', 'discount', 'payment_method',
-    'extra_charges', 'extra_charges_note'
+    'extra_charges', 'extra_charges_note', 'delivery_rating'
   ]
   // Also update customer table when snap fields change
   if (body.snap_name || body.snap_mobile || body.snap_address) {
