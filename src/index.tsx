@@ -198,6 +198,9 @@ async function ensureDbSchema(db: D1Database) {
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_machines_warranty ON machines(warranty_type, warranty_brand)`).run().catch(() => {}),
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_snap_name ON jobs(snap_name)`).run().catch(() => {}),
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_ai_brand ON ai_learning(brand)`).run().catch(() => {}),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_delivered_at ON jobs(delivered_at)`).run().catch(() => {}),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_delivery_method ON jobs(delivery_method)`).run().catch(() => {}),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_jobs_payment ON jobs(payment_method)`).run().catch(() => {}),
     ])
     _dbInited = true
   } catch (_) {}
@@ -399,8 +402,11 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   // Revenue data for admin dashboard
   let revenueData: any = { todayRevenue: 0, monthRevenue: 0, totalRevenue: 0, pendingDues: 0, onlineTotal: 0, cashTotal: 0 }
   let monthlyRevenue: any[] = []
+  // v52: Delivery analytics — courier/in-person today, cash/online today
+  let deliveryAnalytics: any = { courierToday: 0, inPersonToday: 0, deliveredToday: 0, cashToday: 0, onlineToday: 0 }
   if (isAdmin) {
-    const [todayRev, monthRev, totalRev, pendDues, onlineRev, cashRev, monthlyRev] = await Promise.all([
+    const [todayRev, monthRev, totalRev, pendDues, onlineRev, cashRev, monthlyRev,
+           courierTodayQ, inPersonTodayQ, deliveredTodayQ, cashTodayQ, onlineTodayQ] = await Promise.all([
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE DATE(j.created_at)=?`).bind(today).first<any>(),
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE j.created_at>=?`).bind(monthStart).first<any>(),
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j`).first<any>(),
@@ -417,6 +423,13 @@ app.get('/api/analytics', authMiddleware, async (c) => {
         GROUP BY strftime('%Y-%m', j.created_at)
         ORDER BY month DESC LIMIT 6
       `).all<any>(),
+      // v52: Delivery analytics — today's deliveries by type
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND delivery_method='courier'`).bind(today).first<any>(),
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND (delivery_method='in_person' OR delivery_method IS NULL)`).bind(today).first<any>(),
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=?`).bind(today).first<any>(),
+      // v52: Today's payment analytics — cash vs online received today (on delivered jobs)
+      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND (payment_method='cash' OR payment_method IS NULL)`).bind(today).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND payment_method='online'`).bind(today).first<any>(),
     ])
     revenueData = {
       todayRevenue: todayRev?.amt || 0,
@@ -427,6 +440,13 @@ app.get('/api/analytics', authMiddleware, async (c) => {
       cashTotal: cashRev?.amt || 0,
     }
     monthlyRevenue = monthlyRev.results || []
+    deliveryAnalytics = {
+      courierToday: courierTodayQ?.cnt || 0,
+      inPersonToday: inPersonTodayQ?.cnt || 0,
+      deliveredToday: deliveredTodayQ?.cnt || 0,
+      cashToday: cashTodayQ?.amt || 0,
+      onlineToday: onlineTodayQ?.amt || 0,
+    }
   }
 
   return c.json({
@@ -444,6 +464,7 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     byStatus: isAdmin ? byStatus.results : [],
     byStaff: isAdmin ? byStaff.results : [],
     ...revenueData,
+    ...deliveryAnalytics,
     monthlyRevenue,
   })
 })
@@ -574,11 +595,11 @@ app.post('/api/jobs', authMiddleware, async (c) => {
   if (!customer_name || !customer_mobile)
     return c.json({ error: 'customer_name and customer_mobile are required' }, 400)
 
-  // v45: MAXIMUM PARALLEL — all independent queries run simultaneously
-  // Step 1: Increment counter + upsert customer + fetch settings ALL at once
+  // v52: ATOMIC counter — single UPDATE...RETURNING prevents race conditions when
+  // two admins create jobs simultaneously. No separate read needed.
   const category = body.customer_category || 'Salon'
-  const [, , prefixSetting, digitsSetting] = await Promise.all([
-    c.env.DB.prepare('UPDATE job_counter SET last_seq=last_seq+1 WHERE id=1').run(),
+  const [counterResult, , prefixSetting, digitsSetting] = await Promise.all([
+    c.env.DB.prepare('UPDATE job_counter SET last_seq=last_seq+1 WHERE id=1 RETURNING last_seq').first<any>(),
     c.env.DB.prepare(
       `INSERT INTO customers(name,mobile,mobile2,address,category,dispatch_method) VALUES(?,?,?,?,?,?)
        ON CONFLICT(mobile) DO UPDATE SET
@@ -591,14 +612,12 @@ app.post('/api/jobs', authMiddleware, async (c) => {
     c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_prefix'").first<any>(),
     c.env.DB.prepare("SELECT value FROM app_settings WHERE key='job_seq_digits'").first<any>(),
   ])
-  // Step 2: Counter read + customer ID lookup in parallel
-  const [counter, cust] = await Promise.all([
-    c.env.DB.prepare('SELECT last_seq FROM job_counter WHERE id=1').first<any>(),
-    c.env.DB.prepare('SELECT id FROM customers WHERE mobile=?').bind(customer_mobile).first<any>(),
-  ])
+  // Customer ID lookup (depends on upsert above)
+  const cust = await c.env.DB.prepare('SELECT id FROM customers WHERE mobile=?').bind(customer_mobile).first<any>()
   const prefix = prefixSetting?.value || 'C'
   const digits = parseInt(digitsSetting?.value || '3')
-  const jobId = `${prefix}-${String(counter.last_seq).padStart(digits, '0')}`
+  const seqNum = counterResult?.last_seq || 1
+  const jobId = `${prefix}-${String(seqNum).padStart(digits, '0')}`
 
   const isAdminCreate = roleLevel(c.get('userRole')) >= 2
   const dispatchMethod = body.dispatch_method === 'courier' ? 'courier' : 'in_person'
@@ -767,7 +786,20 @@ app.put('/api/jobs/:id', authMiddleware, async (c) => {
   if (!fields.length) return c.json({ error: 'No fields to update' }, 400)
   fields.push(`updated_at=datetime('now')`)
   vals.push(id)
-  await c.env.DB.prepare(`UPDATE jobs SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
+  // v52: Optimistic concurrency — if client sends _updated_at, verify it matches
+  // before writing. Prevents two admins overwriting each other silently.
+  if (body._updated_at) {
+    vals.push(body._updated_at)
+    const result = await c.env.DB.prepare(`UPDATE jobs SET ${fields.join(',')} WHERE id=? AND updated_at=?`).bind(...vals).run()
+    if (result.meta?.changes === 0) {
+      // Row may have been updated by another admin — re-read
+      const current = await c.env.DB.prepare('SELECT updated_at FROM jobs WHERE id=?').bind(id).first<any>()
+      if (current) return c.json({ error: 'Conflict — job was updated by another user. Please refresh and try again.', code: 'CONFLICT' }, 409)
+      return c.json({ error: 'Job not found' }, 404)
+    }
+  } else {
+    await c.env.DB.prepare(`UPDATE jobs SET ${fields.join(',')} WHERE id=?`).bind(...vals).run()
+  }
   // Log history for ALL update types
   const uName = c.get('userName') || 'Admin'
   const uRole = c.get('userRole') || 'admin'

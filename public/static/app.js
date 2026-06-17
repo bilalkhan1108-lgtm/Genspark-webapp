@@ -52,6 +52,7 @@ const S = {
   myJobsOnly: false,
   brandFilter: '', // v47: warranty brand filter
   staffFilter: '', // v50.9b: staff assignment filter (admin only)
+  staffStatusTab: 'under_repair', // v52: staff "My Jobs" tab filter (under_repair/repaired/all)
   audioStream  : null,
   audioRecorder: null,
   audioChunks  : [],
@@ -492,6 +493,11 @@ API.interceptors.request.use(cfg => {
 });
 API.interceptors.response.use(r => r, err => {
   if (err.response?.status === 401) logout();
+  // v52: Concurrency conflict — another admin updated the job
+  if (err.response?.status === 409) {
+    toast('⚠️ Another user updated this job. Refreshing…', 'error');
+    setTimeout(() => { if (S.view === 'detail') loadDetail(); }, 800);
+  }
   return Promise.reject(err);
 });
 
@@ -536,6 +542,14 @@ const sl = s => STATUS_LABEL[s] || s;
 function debounce(fn, ms = 150) {
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+// v52: Global abort controller for in-flight requests — prevents stale responses on fast navigation
+let _activeAbortController = null;
+function getAbortSignal() {
+  if (_activeAbortController) _activeAbortController.abort();
+  _activeAbortController = new AbortController();
+  return _activeAbortController.signal;
 }
 
 // v41: REQUEST DEDUPLICATION — prevents duplicate concurrent API calls
@@ -1232,7 +1246,19 @@ window.addEventListener('popstate', e => {
 // ─────────────────────────────────────────────────────────────────────────────
 // RENDER ROOT
 // ─────────────────────────────────────────────────────────────────────────────
+// v52: Throttled render — prevents jank from rapid state changes (e.g. fast tab switching)
+let _renderRafId = 0;
+let _renderQueued = false;
 function render() {
+  if (_renderQueued) return; // Already queued, skip
+  _renderQueued = true;
+  cancelAnimationFrame(_renderRafId);
+  _renderRafId = requestAnimationFrame(() => {
+    _renderQueued = false;
+    _renderInner();
+  });
+}
+function _renderInner() {
   const app = document.getElementById('app');
   if (!app) return;
   // Public tracking page — no auth required
@@ -1551,7 +1577,13 @@ function dashboardHTML() {
         ${S.myJobsOnly ? 'My Assigned Jobs ✓' : 'My Assigned Jobs'}
       </button>
       ${S.myJobsOnly ? `<button id="btn-clear-my" class="btn-my-clear"><i class="fas fa-times"></i> All Jobs</button>` : ''}
-    </div>` : ''}
+    </div>
+    ${S.myJobsOnly ? `
+    <div class="my-jobs-bar" style="padding-top:0;gap:4px">
+      <button class="btn-staff-tab ${(S.staffStatusTab||'under_repair')==='under_repair'?'btn-tab-active':''}" data-staff-tab="under_repair" style="--tab-color:#E65100">🔧 Under Repair</button>
+      <button class="btn-staff-tab ${S.staffStatusTab==='repaired'?'btn-tab-active':''}" data-staff-tab="repaired" style="--tab-color:#2E7D32">✅ Repaired</button>
+      <button class="btn-staff-tab ${S.staffStatusTab==='all'?'btn-tab-active':''}" data-staff-tab="all" style="--tab-color:#1565C0">📋 All</button>
+    </div>` : ''}` : ''}
     <div style="display:flex;gap:6px;padding:4px 10px;flex-shrink:0">
       <div style="flex:1;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;overflow:hidden;transition:border-color .15s">
         <i class="fas fa-hashtag" style="position:absolute;left:12px;color:#1565C0;font-size:14px;pointer-events:none"></i>
@@ -1612,12 +1644,31 @@ function _applyChipCounts(d) {
       { label: 'Courier', value: d.courierPending || 0, icon: '📮', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterCourierPending()' },
       { label: 'Urgent>25d', value: d.urgent || 0, icon: '🚨', bg: d.urgent > 0 ? '#FFCDD2' : '#F5F5F5', color: d.urgent > 0 ? '#C62828' : '#888', click: 'filterUrgent()' },
     ];
+    // v52: Today's Delivery Analytics row
+    const fmtCurr = (v) => '₹' + (v || 0).toLocaleString('en-IN');
+    const deliveryTiles = [
+      { label: 'Delivered Today', value: d.deliveredToday || 0, icon: '📦', bg: '#E8F5E9', color: '#2E7D32' },
+      { label: 'In Person', value: d.inPersonToday || 0, icon: '🤝', bg: '#E3F2FD', color: '#1565C0' },
+      { label: 'By Courier', value: d.courierToday || 0, icon: '🚛', bg: '#F3E5F5', color: '#7B1FA2' },
+      { label: 'Cash Today', value: fmtCurr(d.cashToday), icon: '💵', bg: '#FFF8E1', color: '#F57F17' },
+      { label: 'Online Today', value: fmtCurr(d.onlineToday), icon: '📱', bg: '#E0F7FA', color: '#00838F' },
+    ];
     ownerDash.innerHTML = tiles.map(t => `
       <div onclick="${t.click}" style="flex:1;min-width:44px;background:${t.bg};border-radius:8px;padding:4px 2px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
         <div style="font-size:13px">${t.icon}</div>
         <div style="font-size:16px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
         <div style="font-size:8px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
       </div>`).join('');
+    // v52: Today's delivery analytics row
+    const delRow = document.createElement('div');
+    delRow.style.cssText = 'display:flex;gap:5px;margin-top:6px;flex-wrap:nowrap;overflow-x:auto;padding:2px 0';
+    delRow.innerHTML = deliveryTiles.map(t => `
+      <div style="flex:1;min-width:60px;background:${t.bg};border-radius:8px;padding:4px 2px;text-align:center">
+        <div style="font-size:12px">${t.icon}</div>
+        <div style="font-size:14px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
+        <div style="font-size:7px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
+      </div>`).join('');
+    ownerDash.appendChild(delRow);
     // v47: Brand filter row below tiles — filter by warranty brand
     const brands = ['IKONIC','HNK','MARC','AYTY Pro'];
     const brandRow = document.createElement('div');
@@ -1712,7 +1763,11 @@ async function loadJobs(append = false) {
     if (S.brandFilter) params.brand   = S.brandFilter;  // v50.7: server-side brand filter
     // v50.9b: Admin staff filter OR non-admin "My Jobs" filter
     if (S.staffFilter && isAdmin()) params.staff_id = S.staffFilter;
-    else if (S.myJobsOnly && !isAdmin()) params.staff_id = S.user?.id;
+    else if (S.myJobsOnly && !isAdmin()) {
+      params.staff_id = S.user?.id;
+      // v52: Staff status tab filter — under_repair (default), repaired, or all
+      if (S.staffStatusTab && S.staffStatusTab !== 'all') params.status = S.staffStatusTab;
+    }
     const r = await dedupeGet('/api/jobs', params);
     // v41: Discard if user has moved on (stale load ID or newer search)
     if (myLoadId !== _jobsLoadId || mySearchSeq !== _lastSearchSeq) { _jobsLoading = false; return; }
@@ -1833,11 +1888,12 @@ function bindDashboardEvents() {
     switch (t.id) {
       case 'btn-my-assigned':
         S.myJobsOnly = !S.myJobsOnly;
+        if (S.myJobsOnly) S.staffStatusTab = 'under_repair'; // v52: default to under_repair
         S.fromDate = ''; S.toDate = ''; setFilter('');
         render();
         break;
       case 'btn-clear-my':
-        S.myJobsOnly = false; render();
+        S.myJobsOnly = false; S.staffStatusTab = 'under_repair'; render();
         break;
       case 'btn-hamburger-menu': {
         // v44: Toggle hamburger menu panel — button is now in header
@@ -1932,6 +1988,12 @@ function bindDashboardEvents() {
     if (e.target.closest('.fp-chip')) {
       document.querySelectorAll('.fp-chip').forEach(b => b.classList.remove('fp-active'));
       e.target.closest('.fp-chip').classList.add('fp-active');
+    }
+    // v52: Staff status tab clicks (Under Repair / Repaired / All)
+    const staffTab = e.target.closest('[data-staff-tab]');
+    if (staffTab) {
+      S.staffStatusTab = staffTab.dataset.staffTab;
+      render();
     }
   });
 
@@ -4998,6 +5060,10 @@ function showDeliveryModal(j) {
   }
 
   document.getElementById('dm-confirm')?.addEventListener('click', async () => {
+    // v52: Prevent double-click
+    const confirmBtn = document.getElementById('dm-confirm');
+    if (confirmBtn?.disabled) return;
+    if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing…'; }
     const rname = document.getElementById('dm-rname')?.value.trim() || null;
     const deliveryDate = document.getElementById('dm-date')?.value || null;
     // v49.9: Send custom delivery date (or null for server-side 'now')
@@ -5033,7 +5099,10 @@ function showDeliveryModal(j) {
           setTimeout(() => autoDownloadDeliveredCard(S.job), 800);
         }
       }
-    } catch (_) { toast('Failed to update', 'error'); }
+    } catch (_) {
+      toast('Failed to update', 'error');
+      if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.innerHTML = '<i class="fas fa-check"></i> Confirm Delivery'; }
+    }
   });
 }
 
@@ -6181,7 +6250,14 @@ function reportsHTML() {
     <div class="report-card">
       <div class="report-title"><i class="fas fa-user-chart" style="color:#FB8C00"></i> Staff Work Report</div>
       <div class="report-desc">Machines handled per staff member</div>
-      <div class="form-row-2" style="margin-top:10px">
+      <div class="form-group" style="margin-top:10px">
+        <label class="form-label">Select Staff</label>
+        <select id="sr-staff" class="form-input">
+          <option value="">All Staff</option>
+          ${(S.staff || []).map(st => `<option value="${st.id}">${esc(st.name)} (${st.role})</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-row-2" style="margin-top:8px">
         <div class="form-group"><label class="form-label">From</label>
           <input id="sr-from" type="date" class="form-input"></div>
         <div class="form-group"><label class="form-label">To</label>
@@ -6284,7 +6360,8 @@ function bindReports() {
   document.getElementById('btn-sr')?.addEventListener('click', async () => {
     const from = document.getElementById('sr-from')?.value;
     const to   = document.getElementById('sr-to')?.value;
-    const p    = new URLSearchParams(); if (from) p.set('from',from); if (to) p.set('to',to);
+    const staffId = document.getElementById('sr-staff')?.value;
+    const p    = new URLSearchParams(); if (from) p.set('from',from); if (to) p.set('to',to); if (staffId) p.set('staff_id', staffId);
     try {
       toast('Preparing staff report…', 'info');
       const r = await API.get('/api/reports/staff?' + p, { responseType: 'blob' });

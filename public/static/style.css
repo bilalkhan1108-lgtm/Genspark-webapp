@@ -934,6 +934,31 @@ button, a, label, select, input[type="file"] + label, [role="button"] {
 }
 .btn-my-clear:active { background: #FFEBEE; }
 
+/* v52: Staff status tab buttons (Under Repair / Repaired / All) */
+.btn-staff-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border-radius: 16px;
+  border: 1.5px solid var(--tab-color, #888);
+  background: #fff;
+  color: var(--tab-color, #888);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 30px;
+  transition: all 0.15s;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn-staff-tab:active { transform: scale(0.95); }
+.btn-tab-active {
+  background: var(--tab-color, #888) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,.15);
+}
+
 /* ── Notification badge (pending requests dot) ─────────────────────────────── */
 .nav-badge-wrap { position: relative; display: inline-flex; }
 .nav-dot {
