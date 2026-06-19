@@ -53,6 +53,9 @@ const S = {
   brandFilter: '', // v47: warranty brand filter
   staffFilter: '', // v50.9b: staff assignment filter (admin only)
   staffStatusTab: 'under_repair', // v52: staff "My Jobs" tab filter (under_repair/repaired/all)
+  _delDate: '', // v52.1: delivery analytics date filter (YYYY-MM-DD or empty for today)
+  _delMonth: '', // v52.1: delivery analytics month filter (YYYY-MM or empty)
+  _delTileFilter: '', // v52.1: active delivery tile filter ('' | 'delivered' | 'in_person' | 'courier' | 'cash' | 'online')
   audioStream  : null,
   audioRecorder: null,
   audioChunks  : [],
@@ -727,12 +730,12 @@ window.navigate = navigate;
 window.S = S;
 // Expose global helpers used in inline onclick attributes
 window.setFilter  = setFilter;
-window.filterAll       = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; _analyticsCacheTs = 0; loadJobs(); };
+window.filterAll       = function() { setFilter('');             S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadJobs(); };
 window.filterActive    = function() { setFilter('under_repair'); S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; loadJobs(); };
-window.filterDone      = function() { setFilter('delivered');    S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; loadJobs(); };
+window.filterDone      = function() { setFilter('delivered');    S.fromDate = ''; S.toDate = ''; S.brandFilter = ''; S._delTileFilter = ''; loadJobs(); };
 // v47: Brand filter — show only jobs with machines under warranty for a specific brand
-window.filterByBrand   = function(brand) { S.brandFilter = brand; setFilter(''); S.fromDate = ''; S.toDate = ''; loadJobs(); };
-window.filterByStatus  = function(st) { setFilter(st); S.fromDate = ''; S.toDate = ''; loadJobs(); };
+window.filterByBrand   = function(brand) { S.brandFilter = brand; setFilter(''); S.fromDate = ''; S.toDate = ''; S._delTileFilter = ''; loadJobs(); };
+window.filterByStatus  = function(st) { setFilter(st); S.fromDate = ''; S.toDate = ''; S._delTileFilter = ''; loadJobs(); };
 window.filterToday  = function() {
   const t = new Date().toISOString().split('T')[0];
   setFilter(''); S.fromDate = t; S.toDate = t; loadJobs();
@@ -749,11 +752,22 @@ window.filterActiveOnly = function() {
 };
 // Courier Pending: show jobs dispatched via courier, not yet delivered
 window.filterCourierPending = function() {
-  setFilter('courier_pending'); S.fromDate = ''; S.toDate = ''; loadJobs();
+  setFilter('courier_pending'); S.fromDate = ''; S.toDate = ''; S._delTileFilter = ''; loadJobs();
 };
 // v49.7: Urgent: show active jobs older than 25 days — server-side query (not client cache)
 window.filterUrgent = function() {
-  setFilter('urgent'); S.fromDate = ''; S.toDate = ''; loadJobs();
+  setFilter('urgent'); S.fromDate = ''; S.toDate = ''; S._delTileFilter = ''; loadJobs();
+};
+// v52.1: Delivery tile click — filter jobs by delivery method/payment for the current analytics date
+window.filterDeliveryTile = function(tile) {
+  // Toggle off if same tile clicked again
+  if (S._delTileFilter === tile) { S._delTileFilter = ''; }
+  else { S._delTileFilter = tile; }
+  // Always show delivered jobs when a delivery tile is active
+  if (S._delTileFilter) setFilter('delivered');
+  else setFilter('');
+  S.fromDate = ''; S.toDate = ''; S.brandFilter = '';
+  loadJobs();
 };
 
 function setFilter(s) {
@@ -1600,6 +1614,10 @@ function dashboardHTML() {
                style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none">
       </div>
     </div>
+    ${S._delTileFilter ? `<div id="del-filter-banner" style="display:flex;align-items:center;gap:6px;padding:6px 12px;background:linear-gradient(90deg,#E3F2FD,#F3E5F5);border-radius:8px;margin:4px 0;font-size:12px;font-weight:700;color:#333">
+      <span>🔍 Showing: <b style="color:#1565C0">${({delivered:'All Delivered',in_person:'In-Person Delivered',courier:'Courier Delivered',cash:'Cash Payments',online:'Online Payments'})[S._delTileFilter]||S._delTileFilter}</b> ${S._delDate ? '('+S._delDate+')' : S._delMonth ? '('+S._delMonth+')' : '(Today)'}</span>
+      <button onclick="filterDeliveryTile('')" style="margin-left:auto;background:#E53935;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700;cursor:pointer">✕ Clear</button>
+    </div>` : ''}
     <div id="vlist-wrap" class="vlist-wrap" style="flex:1"></div>
   </div>`;
 }
@@ -1618,8 +1636,11 @@ async function loadAnalytics(force) {
     const cached = await IDB.loadMeta('analytics');
     if (cached) { _analyticsCache = cached; _applyChipCounts(cached); }
   }
-  // Background: fetch fresh
-  API.get('/api/analytics').then(r => {
+  // Background: fetch fresh (v52.1: pass delivery date/month filter)
+  const _delParams = {};
+  if (S._delDate) _delParams.del_date = S._delDate;
+  else if (S._delMonth) _delParams.del_month = S._delMonth;
+  API.get('/api/analytics', { params: _delParams }).then(r => {
     _analyticsCache = r.data;
     _analyticsCacheTs = Date.now();
     _applyChipCounts(r.data);
@@ -1644,14 +1665,18 @@ function _applyChipCounts(d) {
       { label: 'Courier', value: d.courierPending || 0, icon: '📮', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterCourierPending()' },
       { label: 'Urgent>25d', value: d.urgent || 0, icon: '🚨', bg: d.urgent > 0 ? '#FFCDD2' : '#F5F5F5', color: d.urgent > 0 ? '#C62828' : '#888', click: 'filterUrgent()' },
     ];
-    // v52: Today's Delivery Analytics row
+    // v52.1: Delivery Analytics — date/month aware with inline picker
     const fmtCurr = (v) => '₹' + (v || 0).toLocaleString('en-IN');
+    const _dLabel = d.delLabel || 'today';
+    const _dIsToday = (_dLabel === 'today' || _dLabel === new Date().toISOString().slice(0,10));
+    const _dLabelText = _dIsToday ? 'Today' : (_dLabel.length === 7 ? new Date(_dLabel+'-01').toLocaleDateString('en-IN',{month:'short',year:'numeric'}) : new Date(_dLabel+'T00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short'}));
+    const _activeTile = S._delTileFilter || '';
     const deliveryTiles = [
-      { label: 'Delivered Today', value: d.deliveredToday || 0, icon: '📦', bg: '#E8F5E9', color: '#2E7D32' },
-      { label: 'In Person', value: d.inPersonToday || 0, icon: '🤝', bg: '#E3F2FD', color: '#1565C0' },
-      { label: 'By Courier', value: d.courierToday || 0, icon: '🚛', bg: '#F3E5F5', color: '#7B1FA2' },
-      { label: 'Cash Today', value: fmtCurr(d.cashToday), icon: '💵', bg: '#FFF8E1', color: '#F57F17' },
-      { label: 'Online Today', value: fmtCurr(d.onlineToday), icon: '📱', bg: '#E0F7FA', color: '#00838F' },
+      { label: 'Delivered', value: d.deliveredDel || 0, icon: '📦', bg: '#E8F5E9', color: '#2E7D32', key: 'delivered' },
+      { label: 'In Person', value: d.inPersonDel || 0, icon: '🤝', bg: '#E3F2FD', color: '#1565C0', key: 'in_person' },
+      { label: 'By Courier', value: d.courierDel || 0, icon: '🚛', bg: '#F3E5F5', color: '#7B1FA2', key: 'courier' },
+      { label: 'Cash', value: fmtCurr(d.cashDel), icon: '💵', bg: '#FFF8E1', color: '#F57F17', key: 'cash' },
+      { label: 'Online', value: fmtCurr(d.onlineDel), icon: '📱', bg: '#E0F7FA', color: '#00838F', key: 'online' },
     ];
     ownerDash.innerHTML = tiles.map(t => `
       <div onclick="${t.click}" style="flex:1;min-width:44px;background:${t.bg};border-radius:8px;padding:4px 2px;cursor:pointer;text-align:center;transition:transform .15s;-webkit-tap-highlight-color:transparent" ontouchstart="this.style.transform='scale(0.95)'" ontouchend="this.style.transform=''">
@@ -1659,16 +1684,42 @@ function _applyChipCounts(d) {
         <div style="font-size:16px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
         <div style="font-size:8px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
       </div>`).join('');
-    // v52: Today's delivery analytics row
+    // v52.1: Date selector row for delivery analytics
+    const delHeader = document.createElement('div');
+    delHeader.style.cssText = 'display:flex;align-items:center;gap:4px;margin-top:8px;flex-wrap:nowrap;overflow-x:auto';
+    const _today = new Date().toISOString().slice(0,10);
+    const _thisMonth = _today.slice(0,7);
+    const _prevMonth = (() => { const d2 = new Date(); d2.setMonth(d2.getMonth()-1); return d2.toISOString().slice(0,7); })();
+    delHeader.innerHTML = `
+      <span style="font-size:10px;font-weight:800;color:#555;white-space:nowrap">📊 ${_dLabelText}</span>
+      <button class="del-date-btn ${_dIsToday?'del-date-active':''}" data-del-date="${_today}">Today</button>
+      <button class="del-date-btn ${_dLabel===_thisMonth?'del-date-active':''}" data-del-month="${_thisMonth}">This Month</button>
+      <button class="del-date-btn ${_dLabel===_prevMonth?'del-date-active':''}" data-del-month="${_prevMonth}">Last Month</button>
+      <input type="date" id="del-date-pick" value="${_dLabel.length===10&&!_dIsToday?_dLabel:''}" max="${_today}" style="font-size:10px;padding:2px 4px;border:1.5px solid #ddd;border-radius:6px;background:#fff;color:#555;min-height:24px;max-width:110px;cursor:pointer">
+    `;
+    ownerDash.appendChild(delHeader);
+    // Delivery tiles row
     const delRow = document.createElement('div');
-    delRow.style.cssText = 'display:flex;gap:5px;margin-top:6px;flex-wrap:nowrap;overflow-x:auto;padding:2px 0';
-    delRow.innerHTML = deliveryTiles.map(t => `
-      <div style="flex:1;min-width:60px;background:${t.bg};border-radius:8px;padding:4px 2px;text-align:center">
+    delRow.style.cssText = 'display:flex;gap:5px;margin-top:4px;flex-wrap:nowrap;overflow-x:auto;padding:2px 0';
+    delRow.innerHTML = deliveryTiles.map(t => {
+      const isActive = _activeTile === t.key;
+      return `<div onclick="filterDeliveryTile('${t.key}')" style="flex:1;min-width:55px;background:${isActive ? t.color : t.bg};border-radius:8px;padding:4px 2px;text-align:center;cursor:pointer;transition:all .18s;${isActive ? 'box-shadow:0 2px 8px rgba(0,0,0,.2)' : ''}" ontouchstart="this.style.transform='scale(0.93)'" ontouchend="this.style.transform=''">
         <div style="font-size:12px">${t.icon}</div>
-        <div style="font-size:14px;font-weight:900;color:${t.color};line-height:1.1">${t.value}</div>
-        <div style="font-size:7px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
-      </div>`).join('');
+        <div style="font-size:14px;font-weight:900;color:${isActive ? '#fff' : t.color};line-height:1.1">${t.value}</div>
+        <div style="font-size:7px;color:${isActive ? 'rgba(255,255,255,.85)' : '#888'};font-weight:700;text-transform:uppercase;letter-spacing:.2px">${t.label}</div>
+      </div>`;
+    }).join('');
     ownerDash.appendChild(delRow);
+    // Event handlers for delivery date buttons
+    ownerDash.querySelectorAll('[data-del-date]').forEach(btn => {
+      btn.addEventListener('click', () => { S._delDate = btn.dataset.delDate; S._delMonth = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); });
+    });
+    ownerDash.querySelectorAll('[data-del-month]').forEach(btn => {
+      btn.addEventListener('click', () => { S._delMonth = btn.dataset.delMonth; S._delDate = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); });
+    });
+    document.getElementById('del-date-pick')?.addEventListener('change', (e) => {
+      if (e.target.value) { S._delDate = e.target.value; S._delMonth = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); }
+    });
     // v47: Brand filter row below tiles — filter by warranty brand
     const brands = ['IKONIC','HNK','MARC','AYTY Pro'];
     const brandRow = document.createElement('div');
@@ -1692,7 +1743,7 @@ const JOBS_PER_PAGE = 100; // Higher batch = fewer API calls = faster perceived 
 
 // Build the IDB cache key for the current filter state
 function _idbFilterKey() {
-  if (S.search || S.searchJob || S.searchName || S.fromDate || S.toDate || S.myJobsOnly || S.brandFilter || S.staffFilter) return null;
+  if (S.search || S.searchJob || S.searchName || S.fromDate || S.toDate || S.myJobsOnly || S.brandFilter || S.staffFilter || S._delTileFilter) return null;
   return 'f_' + (S.filter || '_all');
 }
 
@@ -1761,6 +1812,18 @@ async function loadJobs(append = false) {
     if (S.fromDate)   params.from     = S.fromDate;
     if (S.toDate)     params.to       = S.toDate;
     if (S.brandFilter) params.brand   = S.brandFilter;  // v50.7: server-side brand filter
+    // v52.1: Delivery tile click filters — pass delivery method/date/payment to API
+    if (S._delTileFilter) {
+      const tf = S._delTileFilter;
+      if (tf === 'courier')   params.del_method = 'courier';
+      if (tf === 'in_person') params.del_method = 'in_person';
+      if (tf === 'cash')      params.pay_filter = 'cash';
+      if (tf === 'online')    params.pay_filter = 'online';
+      // Pass the current analytics date/month
+      if (S._delDate)       params.del_date  = S._delDate;
+      else if (S._delMonth) params.del_month = S._delMonth;
+      else                  params.del_date  = new Date().toISOString().slice(0,10); // default: today
+    }
     // v50.9b: Admin staff filter OR non-admin "My Jobs" filter
     if (S.staffFilter && isAdmin()) params.staff_id = S.staffFilter;
     else if (S.myJobsOnly && !isAdmin()) {
@@ -2153,7 +2216,7 @@ function jobRowHTML(j) {
   <div class="job-row" data-id="${j.id}" style="border-left-color:${color};will-change:transform,opacity${isActive && daysSince>=25?';background:#FFF8F8':''}">
     <div class="job-row-thumb">
       ${j.thumb
-        ? `<img data-auth-src="${j.thumb}" class="thumb-img" loading="lazy" alt="thumb">`
+        ? `<img data-auth-src="${j.thumb}" class="thumb-img" loading="lazy" alt="" onerror="this.style.display='none';this.parentElement.innerHTML='<i class=\\'fas fa-tools\\' style=\\'color:#bbb;font-size:22px\\'></i>'">`
         : `<i class="fas fa-tools" style="color:#bbb;font-size:22px"></i>`}
     </div>
     <div class="job-row-body">
@@ -2449,21 +2512,27 @@ function bindNewJob() {
     if (wrap) wrap.style.display = e.target.value === 'courier' ? 'block' : 'none';
   });
 
+  // v52.1: FIXED — AbortController prevents overlapping lookups that cause app hang
   const mobileIn = document.getElementById('nj-mobile');
   let _mobileLookupDone = '';
+  let _mobileLookupController = null;
+  let _mobileLookupRunning = false;
   async function lookupMobile() {
     const m = mobileIn?.value.trim();
-    if (!m || m.length < 10 || m === _mobileLookupDone) return;
+    if (!m || m.length < 10 || m === _mobileLookupDone || _mobileLookupRunning) return;
     _mobileLookupDone = m;
+    _mobileLookupRunning = true;
+    // Abort any previous in-flight lookup
+    if (_mobileLookupController) _mobileLookupController.abort();
+    _mobileLookupController = new AbortController();
     try {
-      const r = await API.get('/api/customers/by-mobile', { params: { mobile: m } });
+      const r = await API.get('/api/customers/by-mobile', { params: { mobile: m }, signal: _mobileLookupController.signal });
       if (r.data) {
         document.getElementById('nj-name').value    = r.data.name    || '';
         document.getElementById('nj-mobile2').value = r.data.mobile2 || '';
         document.getElementById('nj-address').value = r.data.address || '';
         const catSel = document.getElementById('nj-category');
         if (catSel && r.data.category) catSel.value = r.data.category;
-        // v50.1: Auto-fill dispatch method preference
         const dispSel = document.getElementById('nj-dispatch');
         if (dispSel && r.data.dispatch_method) {
           dispSel.value = r.data.dispatch_method;
@@ -2471,10 +2540,9 @@ function bindNewJob() {
           if (wrap) wrap.style.display = r.data.dispatch_method === 'courier' ? 'block' : 'none';
         }
         toast('Customer found — auto-filled ✅', 'success');
-        // Auto-focus product name after auto-fill
         setTimeout(() => document.getElementById('nj-product')?.focus(), 150);
       }
-      // Fetch customer insights (total jobs, spending, last visit)
+      // Fetch insights in background (non-blocking, separate abort)
       API.get('/api/customers/insights', { params: { mobile: m } }).then(ir => {
         const ins = ir.data;
         const badge = document.getElementById('nj-cust-insights');
@@ -2492,24 +2560,33 @@ function bindNewJob() {
             </div>`;
         }
       }).catch(() => {});
-    } catch (_) {}
+    } catch (e) {
+      if (e?.name !== 'CanceledError' && e?.code !== 'ERR_CANCELED') { /* ignore abort errors */ }
+    } finally {
+      _mobileLookupRunning = false;
+    }
   }
   mobileIn?.addEventListener('blur', lookupMobile);
-  // Also trigger on input for instant lookup when 10+ digits typed
+  // Debounced input handler — longer delay to avoid rapid-fire on paste
   mobileIn?.addEventListener('input', debounce(() => {
     if ((mobileIn?.value.trim() || '').length >= 10) lookupMobile();
-  }, 400));
+  }, 500));
 
   // Smart name autofill — suggest existing customers as user types
+  // v52.1: FIXED — AbortController cancels stale searches, prevents queue buildup
   const nameIn = document.getElementById('nj-name');
   let _suggestTimeout = null;
+  let _suggestController = null;
   nameIn?.addEventListener('input', () => {
     clearTimeout(_suggestTimeout);
     const q = nameIn.value.trim();
     if (q.length < 2) { removeSuggestBox(); return; }
     _suggestTimeout = setTimeout(async () => {
+      // Cancel previous search
+      if (_suggestController) _suggestController.abort();
+      _suggestController = new AbortController();
       try {
-        const r = await API.get('/api/customers/search', { params: { q } });
+        const r = await API.get('/api/customers/search', { params: { q }, signal: _suggestController.signal });
         const list = r.data || [];
         if (!list.length) { removeSuggestBox(); return; }
         let box = document.getElementById('nj-suggest-box');
@@ -2520,7 +2597,6 @@ function bindNewJob() {
           nameIn.parentElement.style.position = 'relative';
           nameIn.parentElement.appendChild(box);
         }
-        // v50.1: Store suggestions in temp array so onclick can access safely
         window._njSuggestions = list;
         box.innerHTML = list.map((c, idx) => `
           <div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid #f0f0f0;font-size:14px"
@@ -2530,8 +2606,10 @@ function bindNewJob() {
             ${c.category && c.category !== 'Salon' ? `<span style="background:#E3F2FD;color:#1565C0;border-radius:4px;padding:1px 6px;font-size:10px;margin-left:4px">${esc(c.category)}</span>` : ''}
             ${c.dispatch_method === 'courier' ? `<span style="background:#F3E5F5;color:#7B1FA2;border-radius:4px;padding:1px 6px;font-size:10px;margin-left:4px">📮 Courier</span>` : ''}
           </div>`).join('');
-      } catch (_) {}
-    }, 300);
+      } catch (e) {
+        if (e?.name !== 'CanceledError' && e?.code !== 'ERR_CANCELED') { /* ignore abort errors */ }
+      }
+    }, 350);
   });
   nameIn?.addEventListener('blur', () => { setTimeout(removeSuggestBox, 200); });
   function removeSuggestBox() { document.getElementById('nj-suggest-box')?.remove(); }
@@ -6250,12 +6328,24 @@ function reportsHTML() {
     <div class="report-card">
       <div class="report-title"><i class="fas fa-user-chart" style="color:#FB8C00"></i> Staff Work Report</div>
       <div class="report-desc">Machines handled per staff member</div>
-      <div class="form-group" style="margin-top:10px">
-        <label class="form-label">Select Staff</label>
-        <select id="sr-staff" class="form-input">
-          <option value="">All Staff</option>
-          ${(S.staff || []).map(st => `<option value="${st.id}">${esc(st.name)} (${st.role})</option>`).join('')}
-        </select>
+      <div class="form-row-2" style="margin-top:10px">
+        <div class="form-group">
+          <label class="form-label">Select Staff</label>
+          <select id="sr-staff" class="form-input">
+            <option value="">All Staff</option>
+            ${(S.staff || []).map(st => `<option value="${st.id}">${esc(st.name)} (${st.role})</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Machine Status</label>
+          <select id="sr-status" class="form-input">
+            <option value="">All Status</option>
+            <option value="under_repair">Under Repair</option>
+            <option value="repaired">Repaired</option>
+            <option value="delivered">Delivered</option>
+            <option value="returned">Returned</option>
+          </select>
+        </div>
       </div>
       <div class="form-row-2" style="margin-top:8px">
         <div class="form-group"><label class="form-label">From</label>
@@ -6361,7 +6451,8 @@ function bindReports() {
     const from = document.getElementById('sr-from')?.value;
     const to   = document.getElementById('sr-to')?.value;
     const staffId = document.getElementById('sr-staff')?.value;
-    const p    = new URLSearchParams(); if (from) p.set('from',from); if (to) p.set('to',to); if (staffId) p.set('staff_id', staffId);
+    const mStatus = document.getElementById('sr-status')?.value;
+    const p    = new URLSearchParams(); if (from) p.set('from',from); if (to) p.set('to',to); if (staffId) p.set('staff_id', staffId); if (mStatus) p.set('status', mStatus);
     try {
       toast('Preparing staff report…', 'info');
       const r = await API.get('/api/reports/staff?' + p, { responseType: 'blob' });

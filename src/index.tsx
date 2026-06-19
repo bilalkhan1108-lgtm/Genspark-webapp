@@ -402,11 +402,23 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   // Revenue data for admin dashboard
   let revenueData: any = { todayRevenue: 0, monthRevenue: 0, totalRevenue: 0, pendingDues: 0, onlineTotal: 0, cashTotal: 0 }
   let monthlyRevenue: any[] = []
-  // v52: Delivery analytics — courier/in-person today, cash/online today
-  let deliveryAnalytics: any = { courierToday: 0, inPersonToday: 0, deliveredToday: 0, cashToday: 0, onlineToday: 0 }
+  // v52.1: Delivery analytics — supports custom date/month via ?del_date=YYYY-MM-DD or ?del_month=YYYY-MM
+  const delDate = c.req.query('del_date') || ''  // specific date
+  const delMonth = c.req.query('del_month') || '' // month like 2026-06
+  // Build delivery date filter: specific date > specific month > today
+  let delDateCond = 'DATE(delivered_at)=?'
+  let delDateParam: string = today
+  let delLabel = 'today'
+  if (delDate && /^\d{4}-\d{2}-\d{2}$/.test(delDate)) {
+    delDateParam = delDate; delLabel = delDate
+  } else if (delMonth && /^\d{4}-\d{2}$/.test(delMonth)) {
+    delDateCond = "strftime('%Y-%m',delivered_at)=?"
+    delDateParam = delMonth; delLabel = delMonth
+  }
+  let deliveryAnalytics: any = { courierDel: 0, inPersonDel: 0, deliveredDel: 0, cashDel: 0, onlineDel: 0, delLabel }
   if (isAdmin) {
     const [todayRev, monthRev, totalRev, pendDues, onlineRev, cashRev, monthlyRev,
-           courierTodayQ, inPersonTodayQ, deliveredTodayQ, cashTodayQ, onlineTodayQ] = await Promise.all([
+           courierDelQ, inPersonDelQ, deliveredDelQ, cashDelQ, onlineDelQ] = await Promise.all([
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE DATE(j.created_at)=?`).bind(today).first<any>(),
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j WHERE j.created_at>=?`).bind(monthStart).first<any>(),
       c.env.DB.prepare(`SELECT COALESCE(SUM(j.received_amount),0) AS amt FROM jobs j`).first<any>(),
@@ -423,13 +435,12 @@ app.get('/api/analytics', authMiddleware, async (c) => {
         GROUP BY strftime('%Y-%m', j.created_at)
         ORDER BY month DESC LIMIT 6
       `).all<any>(),
-      // v52: Delivery analytics — today's deliveries by type
-      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND delivery_method='courier'`).bind(today).first<any>(),
-      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND (delivery_method='in_person' OR delivery_method IS NULL)`).bind(today).first<any>(),
-      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=?`).bind(today).first<any>(),
-      // v52: Today's payment analytics — cash vs online received today (on delivered jobs)
-      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND (payment_method='cash' OR payment_method IS NULL)`).bind(today).first<any>(),
-      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND DATE(delivered_at)=? AND payment_method='online'`).bind(today).first<any>(),
+      // v52.1: Delivery analytics — date/month-aware
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond} AND delivery_method='courier'`).bind(delDateParam).first<any>(),
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond} AND (delivery_method='in_person' OR delivery_method IS NULL)`).bind(delDateParam).first<any>(),
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond}`).bind(delDateParam).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND ${delDateCond} AND (payment_method='cash' OR payment_method IS NULL)`).bind(delDateParam).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND ${delDateCond} AND payment_method='online'`).bind(delDateParam).first<any>(),
     ])
     revenueData = {
       todayRevenue: todayRev?.amt || 0,
@@ -441,11 +452,12 @@ app.get('/api/analytics', authMiddleware, async (c) => {
     }
     monthlyRevenue = monthlyRev.results || []
     deliveryAnalytics = {
-      courierToday: courierTodayQ?.cnt || 0,
-      inPersonToday: inPersonTodayQ?.cnt || 0,
-      deliveredToday: deliveredTodayQ?.cnt || 0,
-      cashToday: cashTodayQ?.amt || 0,
-      onlineToday: onlineTodayQ?.amt || 0,
+      courierDel: courierDelQ?.cnt || 0,
+      inPersonDel: inPersonDelQ?.cnt || 0,
+      deliveredDel: deliveredDelQ?.cnt || 0,
+      cashDel: cashDelQ?.amt || 0,
+      onlineDel: onlineDelQ?.amt || 0,
+      delLabel,
     }
   }
 
@@ -479,6 +491,11 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const from     = c.req.query('from')   || ''
   const to       = c.req.query('to')     || ''
   const brand    = c.req.query('brand')  || ''  // v50.7: server-side brand filter
+  // v52.1: Delivery tile click filters — filter by delivery method / date / payment
+  const delMethod  = c.req.query('del_method')  || ''  // 'courier' | 'in_person'
+  const delDate    = c.req.query('del_date')    || ''  // YYYY-MM-DD
+  const delMonth   = c.req.query('del_month')   || ''  // YYYY-MM
+  const payFilter  = c.req.query('pay_filter')  || ''  // 'cash' | 'online'
   const limit    = Math.min(parseInt(c.req.query('limit') || '100'), 500)
   const offset   = parseInt(c.req.query('offset') || '0') || 0
   const role     = c.get('userRole')
@@ -533,6 +550,22 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   if (brand) {
     conds.push(`EXISTS (SELECT 1 FROM machines mb WHERE mb.job_id=j.id AND mb.warranty_type='warranty' AND mb.warranty_brand=?)`)
     params.push(brand)
+  }
+  // v52.1: Delivery tile click filters — filter delivered jobs by method/date/payment
+  if (delMethod === 'courier') {
+    conds.push("j.delivery_method='courier'")
+  } else if (delMethod === 'in_person') {
+    conds.push("(j.delivery_method='in_person' OR j.delivery_method IS NULL)")
+  }
+  if (delDate && /^\d{4}-\d{2}-\d{2}$/.test(delDate)) {
+    conds.push('DATE(j.delivered_at)=?'); params.push(delDate)
+  } else if (delMonth && /^\d{4}-\d{2}$/.test(delMonth)) {
+    conds.push("strftime('%Y-%m',j.delivered_at)=?"); params.push(delMonth)
+  }
+  if (payFilter === 'cash') {
+    conds.push("(j.payment_method='cash' OR j.payment_method IS NULL)")
+  } else if (payFilter === 'online') {
+    conds.push("j.payment_method='online'")
   }
 
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
@@ -1612,11 +1645,12 @@ app.get('/api/reports/staff', authMiddleware, adminOnly, async (c) => {
   const from    = c.req.query('from')     || ''
   const to      = c.req.query('to')       || ''
   const staffId = c.req.query('staff_id') || ''
+  const mStatus = c.req.query('status')   || '' // v52.1: machine status filter
   let q = `
     SELECT u.name AS staff_name, m.product_name, m.product_complaint AS problem_description,
-           m.status AS job_status, m.charges, m.quantity,
+           m.status AS machine_status, m.charges, m.quantity,
            j.id AS job_id, j.snap_name AS customer_name, j.snap_mobile AS phone,
-           m.created_at AS created_date
+           m.created_at AS created_date, m.work_done
     FROM machines m
     JOIN jobs j ON m.job_id=j.id
     LEFT JOIN users u ON m.assigned_staff_id=u.id
@@ -1625,6 +1659,10 @@ app.get('/api/reports/staff', authMiddleware, adminOnly, async (c) => {
   if (from)    { q += ' AND DATE(m.created_at)>=?'; ps.push(from) }
   if (to)      { q += ' AND DATE(m.created_at)<=?'; ps.push(to) }
   if (staffId) { q += ' AND m.assigned_staff_id=?'; ps.push(staffId) }
+  // v52.1: Filter by machine status (under_repair, repaired, delivered, returned)
+  if (mStatus && ['under_repair','repaired','delivered','returned'].includes(mStatus)) {
+    q += ' AND m.status=?'; ps.push(mStatus)
+  }
   q += ' ORDER BY u.name, m.created_at DESC'
   const { results } = await c.env.DB.prepare(q).bind(...ps).all<any>()
   const wb = XLSX.utils.book_new()
