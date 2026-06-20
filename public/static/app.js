@@ -767,8 +767,30 @@ window.filterDeliveryTile = function(tile) {
   if (S._delTileFilter) setFilter('delivered');
   else setFilter('');
   S.fromDate = ''; S.toDate = ''; S.brandFilter = '';
+  // Dynamically update the filter banner immediately (no full re-render needed)
+  _updateDelFilterBanner();
   loadJobs();
 };
+// Helper: update delivery filter banner dynamically
+function _updateDelFilterBanner() {
+  let banner = document.getElementById('del-filter-banner');
+  const wrap = document.getElementById('vlist-wrap');
+  if (S._delTileFilter && wrap) {
+    const labels = {delivered:'All Delivered',in_person:'In-Person Delivered',courier:'Courier Delivered',cash:'Cash Payments',online:'Online Payments'};
+    const dateCtx = S._delDate ? '('+S._delDate+')' : S._delMonth ? '('+S._delMonth+')' : '(Today)';
+    const html = `<span>🔍 Showing: <b style="color:#1565C0">${labels[S._delTileFilter]||S._delTileFilter}</b> ${dateCtx}</span><button onclick="filterDeliveryTile('')" style="margin-left:auto;background:#E53935;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700;cursor:pointer">✕ Clear</button>`;
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'del-filter-banner';
+      banner.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 12px;background:linear-gradient(90deg,#E3F2FD,#F3E5F5);border-radius:8px;margin:4px 0;font-size:12px;font-weight:700;color:#333';
+      wrap.parentElement.insertBefore(banner, wrap);
+    }
+    banner.innerHTML = html;
+    banner.style.display = 'flex';
+  } else if (banner) {
+    banner.style.display = 'none';
+  }
+}
 
 function setFilter(s) {
   S.filter = s;
@@ -1731,6 +1753,17 @@ function _applyChipCounts(d) {
       }).join('');
     ownerDash.appendChild(brandRow);
   }
+  // v52.2: Auto-show tiles panel if delivery tile filter is active + update banner
+  if (S._delTileFilter) {
+    const panel = document.getElementById('owner-dash-panel');
+    if (panel && panel.style.display === 'none') {
+      panel.style.display = 'block';
+      const menuBtn = document.getElementById('btn-hamburger-menu');
+      const icon = menuBtn?.querySelector('i');
+      if (icon) icon.className = 'fas fa-times';
+    }
+  }
+  _updateDelFilterBanner();
   // v46: Revenue bar removed per user request
 }
 
@@ -1967,11 +2000,13 @@ function bindDashboardEvents() {
           const menuBtn = document.getElementById('btn-hamburger-menu');
           const icon = menuBtn?.querySelector('i');
           if (icon) icon.className = isHidden ? 'fas fa-times' : 'fas fa-bars';
-          // Auto-close menu when any tile is clicked
+          // Auto-close menu when a STATUS tile is clicked (not delivery/date tiles)
           if (isHidden && !panel._autoCloseSet) {
             panel._autoCloseSet = true;
             panel.addEventListener('click', ev => {
-              if (ev.target.closest('[onclick]')) {
+              const clickEl = ev.target.closest('[onclick]');
+              // Don't auto-close for delivery tile clicks, date buttons, brand filters
+              if (clickEl && !clickEl.getAttribute('onclick')?.includes('filterDeliveryTile') && !clickEl.getAttribute('onclick')?.includes('filterByBrand') && !ev.target.closest('[data-del-date]') && !ev.target.closest('[data-del-month]') && !ev.target.closest('#del-date-pick')) {
                 setTimeout(() => {
                   panel.style.display = 'none';
                   const btn2 = document.getElementById('btn-hamburger-menu');
@@ -2216,7 +2251,7 @@ function jobRowHTML(j) {
   <div class="job-row" data-id="${j.id}" style="border-left-color:${color};will-change:transform,opacity${isActive && daysSince>=25?';background:#FFF8F8':''}">
     <div class="job-row-thumb">
       ${j.thumb
-        ? `<img data-auth-src="${j.thumb}" class="thumb-img" loading="lazy" alt="" onerror="this.style.display='none';this.parentElement.innerHTML='<i class=\\'fas fa-tools\\' style=\\'color:#bbb;font-size:22px\\'></i>'">`
+        ? `<img data-auth-src="${j.thumb}" class="thumb-img" loading="lazy" alt="" style="background:#f0f0f0" onerror="this.style.display='none';this.parentElement.innerHTML='<i class=\\'fas fa-tools\\' style=\\'color:#bbb;font-size:22px\\'></i>'">`
         : `<i class="fas fa-tools" style="color:#bbb;font-size:22px"></i>`}
     </div>
     <div class="job-row-body">
@@ -3658,13 +3693,51 @@ function bindDetail(j) {
     });
   });
 
-  // Delete job (admin only)
+  // Delete job (admin only) — v52.2: Safe delete with type-to-confirm
   document.getElementById('btn-del-job')?.addEventListener('click', async () => {
-    if (!confirm(`Delete job ${j.id}? This cannot be undone.`)) return;
-    try {
-      await API.delete(`/api/jobs/${j.id}`);
-      toast(`Job ${j.id} deleted`, 'success'); navigate('dashboard');
-    } catch (_) { toast('Delete failed', 'error'); }
+    // Create modal overlay
+    const overlay = document.createElement('div');
+    overlay.id = 'del-confirm-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .15s ease';
+    overlay.innerHTML = `
+      <div style="background:#fff;border-radius:16px;padding:24px;max-width:340px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+        <div style="text-align:center;margin-bottom:16px">
+          <div style="font-size:40px;margin-bottom:8px">⚠️</div>
+          <h3 style="font-size:18px;font-weight:800;color:#C62828;margin:0">Delete Job ${j.id}?</h3>
+          <p style="font-size:13px;color:#666;margin:8px 0 0">This action <b>cannot be undone</b>. All machines, images, and data will be permanently removed.</p>
+        </div>
+        <div style="margin:16px 0">
+          <label style="font-size:12px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.5px">Type <span style="color:#C62828;font-family:monospace;font-size:14px">DELETE</span> to confirm</label>
+          <input id="del-confirm-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type DELETE here..." style="width:100%;margin-top:6px;padding:10px 14px;border:2px solid #E0E0E0;border-radius:10px;font-size:15px;font-weight:700;letter-spacing:1px;outline:none;transition:border-color .2s;text-transform:uppercase">
+        </div>
+        <div style="display:flex;gap:10px">
+          <button id="del-confirm-cancel" style="flex:1;padding:12px;border:2px solid #E0E0E0;border-radius:10px;font-size:14px;font-weight:700;color:#666;background:#fff;cursor:pointer">Cancel</button>
+          <button id="del-confirm-btn" disabled style="flex:1;padding:12px;border:none;border-radius:10px;font-size:14px;font-weight:700;color:#fff;background:#ccc;cursor:not-allowed;transition:all .2s">Delete</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const inp = document.getElementById('del-confirm-input');
+    const btn = document.getElementById('del-confirm-btn');
+    inp.focus();
+    inp.addEventListener('input', () => {
+      const match = inp.value.trim().toUpperCase() === 'DELETE';
+      btn.disabled = !match;
+      btn.style.background = match ? '#C62828' : '#ccc';
+      btn.style.cursor = match ? 'pointer' : 'not-allowed';
+      inp.style.borderColor = match ? '#4CAF50' : '#E0E0E0';
+    });
+    document.getElementById('del-confirm-cancel').addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Deleting...';
+      btn.disabled = true;
+      try {
+        await API.delete(`/api/jobs/${j.id}`);
+        overlay.remove();
+        toast(`Job ${j.id} deleted`, 'success'); navigate('dashboard');
+      } catch (_) { toast('Delete failed', 'error'); overlay.remove(); }
+    });
   });
 
   // Update received amount, discount, and payment method (admin only)

@@ -290,7 +290,8 @@ html, body {
   flex-shrink: 0;
   overflow: hidden;
 }
-.thumb-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; }
+.thumb-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; transition: opacity .2s; }
+.thumb-img:not([src]), .thumb-img[src=""] { opacity: 0; }
 .job-row-body { flex: 1; min-width: 0; }
 .job-row-top {
   display: flex;
