@@ -402,18 +402,24 @@ app.get('/api/analytics', authMiddleware, async (c) => {
   // Revenue data for admin dashboard
   let revenueData: any = { todayRevenue: 0, monthRevenue: 0, totalRevenue: 0, pendingDues: 0, onlineTotal: 0, cashTotal: 0 }
   let monthlyRevenue: any[] = []
-  // v52.1: Delivery analytics — supports custom date/month via ?del_date=YYYY-MM-DD or ?del_month=YYYY-MM
-  const delDate = c.req.query('del_date') || ''  // specific date
-  const delMonth = c.req.query('del_month') || '' // month like 2026-06
-  // Build delivery date filter: specific date > specific month > today
+  // v52.2: Delivery analytics — supports date, month, OR date range
+  const delDate = c.req.query('del_date') || ''
+  const delMonth = c.req.query('del_month') || ''
+  const delFrom = c.req.query('del_from') || ''
+  const delTo = c.req.query('del_to') || ''
+  // Build delivery date filter: range > specific date > month > today
   let delDateCond = 'DATE(delivered_at)=?'
-  let delDateParam: string = today
+  let delDateParams: string[] = [today]
   let delLabel = 'today'
-  if (delDate && /^\d{4}-\d{2}-\d{2}$/.test(delDate)) {
-    delDateParam = delDate; delLabel = delDate
+  if (delFrom && delTo && /^\d{4}-\d{2}-\d{2}$/.test(delFrom) && /^\d{4}-\d{2}-\d{2}$/.test(delTo)) {
+    delDateCond = 'DATE(delivered_at) BETWEEN ? AND ?'
+    delDateParams = [delFrom, delTo]
+    delLabel = `${delFrom}~${delTo}`
+  } else if (delDate && /^\d{4}-\d{2}-\d{2}$/.test(delDate)) {
+    delDateParams = [delDate]; delLabel = delDate
   } else if (delMonth && /^\d{4}-\d{2}$/.test(delMonth)) {
     delDateCond = "strftime('%Y-%m',delivered_at)=?"
-    delDateParam = delMonth; delLabel = delMonth
+    delDateParams = [delMonth]; delLabel = delMonth
   }
   let deliveryAnalytics: any = { courierDel: 0, inPersonDel: 0, deliveredDel: 0, cashDel: 0, onlineDel: 0, delLabel }
   if (isAdmin) {
@@ -435,12 +441,12 @@ app.get('/api/analytics', authMiddleware, async (c) => {
         GROUP BY strftime('%Y-%m', j.created_at)
         ORDER BY month DESC LIMIT 6
       `).all<any>(),
-      // v52.1: Delivery analytics — date/month-aware
-      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond} AND delivery_method='courier'`).bind(delDateParam).first<any>(),
-      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond} AND (delivery_method='in_person' OR delivery_method IS NULL)`).bind(delDateParam).first<any>(),
-      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond}`).bind(delDateParam).first<any>(),
-      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND ${delDateCond} AND (payment_method='cash' OR payment_method IS NULL)`).bind(delDateParam).first<any>(),
-      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND ${delDateCond} AND payment_method='online'`).bind(delDateParam).first<any>(),
+      // v52.2: Delivery analytics — date/month/range-aware
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond} AND delivery_method='courier'`).bind(...delDateParams).first<any>(),
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond} AND (delivery_method='in_person' OR delivery_method IS NULL)`).bind(...delDateParams).first<any>(),
+      c.env.DB.prepare(`SELECT COUNT(*) AS cnt FROM jobs WHERE status='delivered' AND ${delDateCond}`).bind(...delDateParams).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND ${delDateCond} AND (payment_method='cash' OR payment_method IS NULL)`).bind(...delDateParams).first<any>(),
+      c.env.DB.prepare(`SELECT COALESCE(SUM(received_amount),0) AS amt FROM jobs WHERE status='delivered' AND ${delDateCond} AND payment_method='online'`).bind(...delDateParams).first<any>(),
     ])
     revenueData = {
       todayRevenue: todayRev?.amt || 0,
@@ -535,9 +541,17 @@ app.get('/api/jobs', authMiddleware, async (c) => {
     params.push(`%${searchJob}%`)
   }
   if (searchName) {
-    // v45: Also search mobile2 and address for comprehensive results
-    conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.snap_mobile2 LIKE ? OR j.snap_address LIKE ?)')
-    params.push(`%${searchName}%`, `%${searchName}%`, `%${searchName}%`, `%${searchName}%`)
+    // v52.2: Normalize phone search — strip +91, spaces, hyphens for tolerant matching
+    const snDigits = searchName.replace(/[^0-9]/g, '')
+    const snPhone = snDigits.length >= 12 && snDigits.startsWith('91') ? snDigits.slice(2) : snDigits
+    // If search looks like a phone number (3+ digits), search both raw and normalized
+    if (snPhone.length >= 3 && /\d/.test(searchName)) {
+      conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.snap_mobile2 LIKE ? OR j.snap_address LIKE ? OR REPLACE(REPLACE(REPLACE(j.snap_mobile," ",""),"+",""),"-","") LIKE ? OR REPLACE(REPLACE(REPLACE(j.snap_mobile2," ",""),"+",""),"-","") LIKE ?)')
+      params.push(`%${searchName}%`, `%${searchName}%`, `%${searchName}%`, `%${searchName}%`, `%${snPhone}%`, `%${snPhone}%`)
+    } else {
+      conds.push('(j.snap_name LIKE ? OR j.snap_mobile LIKE ? OR j.snap_mobile2 LIKE ? OR j.snap_address LIKE ?)')
+      params.push(`%${searchName}%`, `%${searchName}%`, `%${searchName}%`, `%${searchName}%`)
+    }
   }
   // Legacy combined search (fallback)
   if (search && !searchJob && !searchName) {

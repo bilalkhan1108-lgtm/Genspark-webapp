@@ -55,6 +55,8 @@ const S = {
   staffStatusTab: 'under_repair', // v52: staff "My Jobs" tab filter (under_repair/repaired/all)
   _delDate: '', // v52.1: delivery analytics date filter (YYYY-MM-DD or empty for today)
   _delMonth: '', // v52.1: delivery analytics month filter (YYYY-MM or empty)
+  _delFrom: '', // v52.2: delivery analytics date range FROM (YYYY-MM-DD)
+  _delTo: '', // v52.2: delivery analytics date range TO (YYYY-MM-DD)
   _delTileFilter: '', // v52.1: active delivery tile filter ('' | 'delivered' | 'in_person' | 'courier' | 'cash' | 'online')
   audioStream  : null,
   audioRecorder: null,
@@ -528,7 +530,10 @@ function hasSuperRight(right) {
 const ROLE_LABEL = { admin: 'Admin', director: 'Director', manager: 'Manager', staff: 'Staff' };
 const roleLabel = (r) => ROLE_LABEL[r] || r;
 const fmtRs   = n => '₹' + (parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
+// v52.2: Ensure UTC timestamps from DB are correctly interpreted (append Z if needed)
+const _utcFix = d => d && typeof d === 'string' && !d.endsWith('Z') && /^\d{4}-\d{2}-\d{2}[ T]/.test(d) ? d + 'Z' : d;
+const fmtDate = d => d ? new Date(_utcFix(d)).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) : '';
+const fmtDateTime = d => d ? new Date(_utcFix(d)).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:true }) : '';
 const esc     = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
 // v49.2: Format phone number for WhatsApp (strip non-digits, add 91 prefix if needed)
@@ -596,6 +601,10 @@ function _clientSideFilter(jobs, searchJob, searchName) {
   if (!searchJob && !searchName) return null; // No filter active
   const sjLower = searchJob ? searchJob.toLowerCase().replace(/[^a-z0-9-]/g, '') : '';
   const snLower = searchName ? searchName.toLowerCase().trim() : '';
+  // v52.2: Strip +91, +, spaces, hyphens from search for phone matching
+  const snDigits = snLower.replace(/[^0-9]/g, '');
+  // Remove leading 91 country code if 12+ digits (91 + 10 digit number)
+  const snPhone = snDigits.length >= 12 && snDigits.startsWith('91') ? snDigits.slice(2) : snDigits;
   // v45: Score-based sorting — exact matches first, fuzzy lower
   const scored = [];
   for (const j of jobs) {
@@ -610,14 +619,16 @@ function _clientSideFilter(jobs, searchJob, searchName) {
     // Name/Mobile/Address filter
     if (snLower) {
       const name = (j.snap_name || '').toLowerCase();
-      const mobile = (j.snap_mobile || '');
-      const mobile2 = (j.snap_mobile2 || '');
+      const mobile = (j.snap_mobile || '').replace(/[^0-9]/g, '');
+      const mobile2 = (j.snap_mobile2 || '').replace(/[^0-9]/g, '');
       const addr = (j.snap_address || '').toLowerCase();
-      // Check digits-only input against mobile numbers
-      const isDigits = /^\d+$/.test(snLower);
-      if (isDigits) {
-        if (mobile.includes(snLower)) score += 100;
-        else if (mobile2.includes(snLower)) score += 90;
+      // v52.2: Check if input contains digits — match against phone numbers (tolerant of +91, spaces)
+      const hasDigits = snPhone.length >= 3;
+      if (hasDigits) {
+        if (mobile.includes(snPhone)) score += 100;
+        else if (mobile2.includes(snPhone)) score += 90;
+        else if (name.includes(snLower)) score += 70;
+        else if (addr.includes(snLower)) score += 50;
         else continue;
       } else {
         // Exact name match gets highest score
@@ -845,48 +856,120 @@ function applyAuthImages(container) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IMAGE COMPRESSION (canvas, max 1080px, before R2 upload)
+// v52.2: Fixed half-image/black block issue on mobile devices
+// - Fill canvas white before drawing (prevents black/transparent areas)
+// - Enforce iOS canvas size limit (16MP max = ~4096×4096)
+// - Use FileReader path always on iOS for reliability (createImageBitmap unreliable)
+// - Add timeout fallback: if compression hangs >10s, resolve with original file
+// - Progressive quality reduction for very large source images
 // ─────────────────────────────────────────────────────────────────────────────
 function compressImage(file, maxW = 1080, quality = 0.82) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    // Safety timeout: if compression takes >10s, return original file
+    const safetyTimer = setTimeout(() => { resolve(file); }, 10000);
+    const done = (result) => { clearTimeout(safetyTimer); resolve(result); };
+
     try {
-      // Use createImageBitmap for faster decoding when available
-      const useBlob = typeof createImageBitmap === 'function';
+      // iOS canvas pixel limit: ~16.7M pixels (4096×4096 safe max)
+      const MAX_CANVAS_PIXELS = 16777216;
+      // Detect iOS for conservative path
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
       const processImg = (img, w, h) => {
-        const ratio = Math.min(1, maxW / Math.max(w, h));
-        const nw = Math.round(w * ratio);
-        const nh = Math.round(h * ratio);
-        const canvas = document.createElement('canvas');
-        canvas.width = nw; canvas.height = nh;
-        const ctx = canvas.getContext('2d');
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, nw, nh);
-        // Try WebP first (smaller file, faster upload), fallback to JPEG
-        const tryWebP = typeof canvas.toBlob === 'function';
-        const mime = tryWebP && canvas.toDataURL('image/webp').startsWith('data:image/webp') ? 'image/webp' : 'image/jpeg';
-        const ext = mime === 'image/webp' ? '.webp' : '.jpg';
-        canvas.toBlob(blob => {
-          if (blob) resolve(new File([blob], file.name.replace(/\.[^.]+$/, ext), { type: mime }));
-          else resolve(file); // Fallback to original
-        }, mime, quality);
+        try {
+          // Step 1: Calculate target dimensions respecting maxW
+          let ratio = Math.min(1, maxW / Math.max(w, h));
+          let nw = Math.round(w * ratio);
+          let nh = Math.round(h * ratio);
+
+          // Step 2: Enforce canvas pixel limit (prevents black/half-image on mobile)
+          const totalPixels = nw * nh;
+          if (totalPixels > MAX_CANVAS_PIXELS) {
+            const pixelRatio = Math.sqrt(MAX_CANVAS_PIXELS / totalPixels);
+            nw = Math.round(nw * pixelRatio);
+            nh = Math.round(nh * pixelRatio);
+          }
+
+          // Step 3: Ensure minimum dimensions
+          nw = Math.max(1, nw);
+          nh = Math.max(1, nh);
+
+          const canvas = document.createElement('canvas');
+          canvas.width = nw;
+          canvas.height = nh;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) { done(file); return; }
+
+          // Step 4: Fill white background FIRST (prevents black/transparent areas)
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, nw, nh);
+
+          // Step 5: Draw image with high quality smoothing
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(img, 0, 0, nw, nh);
+
+          // Step 6: Determine output format (WebP preferred, JPEG fallback)
+          let mime = 'image/jpeg';
+          try {
+            const testUrl = canvas.toDataURL('image/webp');
+            if (testUrl && testUrl.startsWith('data:image/webp')) mime = 'image/webp';
+          } catch (_) { /* WebP not supported, use JPEG */ }
+          const ext = mime === 'image/webp' ? '.webp' : '.jpg';
+
+          // Step 7: Adjust quality for very large source images (>5MP source)
+          let finalQuality = quality;
+          const sourcePixels = w * h;
+          if (sourcePixels > 5000000) finalQuality = Math.min(quality, 0.78);
+          if (sourcePixels > 10000000) finalQuality = Math.min(quality, 0.72);
+
+          // Step 8: Convert to blob
+          canvas.toBlob(blob => {
+            // Cleanup canvas to free memory immediately
+            canvas.width = 1; canvas.height = 1;
+            if (blob && blob.size > 0) {
+              done(new File([blob], file.name.replace(/\.[^.]+$/, ext), { type: mime }));
+            } else {
+              done(file); // Fallback to original if blob failed
+            }
+          }, mime, finalQuality);
+        } catch (_) { done(file); }
       };
 
-      if (useBlob) {
+      // Use FileReader path for reliability (createImageBitmap can produce half-decoded on iOS)
+      // createImageBitmap is faster but causes half-image issue on some mobile devices
+      const useReliablePath = isIOS || !window.createImageBitmap;
+
+      if (!useReliablePath) {
+        // Non-iOS: Try createImageBitmap with timeout fallback
+        const bmpTimeout = setTimeout(() => {
+          // If createImageBitmap hangs, fallback to FileReader
+          fallbackFileReader();
+        }, 5000);
+
         createImageBitmap(file).then(bmp => {
+          clearTimeout(bmpTimeout);
           processImg(bmp, bmp.width, bmp.height);
         }).catch(() => {
-          // Fallback to FileReader
-          const reader = new FileReader();
-          reader.onload = e => { const img = new Image(); img.onload = () => processImg(img, img.width, img.height); img.onerror = () => resolve(file); img.src = e.target.result; };
-          reader.readAsDataURL(file);
+          clearTimeout(bmpTimeout);
+          fallbackFileReader();
         });
       } else {
+        fallbackFileReader();
+      }
+
+      function fallbackFileReader() {
         const reader = new FileReader();
-        reader.onload = e => { const img = new Image(); img.onload = () => processImg(img, img.width, img.height); img.onerror = () => resolve(file); img.src = e.target.result; };
-        reader.onerror = () => resolve(file);
+        reader.onload = e => {
+          const img = new Image();
+          img.onload = () => processImg(img, img.naturalWidth, img.naturalHeight);
+          img.onerror = () => done(file);
+          img.src = e.target.result;
+        };
+        reader.onerror = () => done(file);
         reader.readAsDataURL(file);
       }
-    } catch (_) { resolve(file); }
+    } catch (_) { done(file); }
   });
 }
 
@@ -1498,7 +1581,7 @@ function bindView() {
         const border = n.status === 'approved' ? '#43A047' : '#E53935';
         const action = n.status === 'approved' ? 'Assignment Approved' : 'Assignment Denied';
         const ts     = n.resolved_at || n.created_at;
-        const tsStr  = ts ? new Date(ts).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
+        const tsStr  = ts ? new Date(_utcFix(ts)).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', hour12:true }) : '';
         const msg    = `${icon} <b>${action}</b> — Job <b>#${esc(n.job_id)}</b> · <i>${esc(n.product_name)}</i>`;
         return `<div class="staff-notif-item" data-nidx="${idx}" style="position:relative;background:${color};border-left:4px solid ${border};border-radius:8px;padding:10px 32px 10px 14px;margin-bottom:6px;font-size:13px;line-height:1.5">
           ${msg}
@@ -1658,9 +1741,10 @@ async function loadAnalytics(force) {
     const cached = await IDB.loadMeta('analytics');
     if (cached) { _analyticsCache = cached; _applyChipCounts(cached); }
   }
-  // Background: fetch fresh (v52.1: pass delivery date/month filter)
+  // Background: fetch fresh (v52.1: pass delivery date/month/range filter)
   const _delParams = {};
-  if (S._delDate) _delParams.del_date = S._delDate;
+  if (S._delFrom && S._delTo) { _delParams.del_from = S._delFrom; _delParams.del_to = S._delTo; }
+  else if (S._delDate) _delParams.del_date = S._delDate;
   else if (S._delMonth) _delParams.del_month = S._delMonth;
   API.get('/api/analytics', { params: _delParams }).then(r => {
     _analyticsCache = r.data;
@@ -1687,11 +1771,12 @@ function _applyChipCounts(d) {
       { label: 'Courier', value: d.courierPending || 0, icon: '📮', bg: '#F3E5F5', color: '#7B1FA2', click: 'filterCourierPending()' },
       { label: 'Urgent>25d', value: d.urgent || 0, icon: '🚨', bg: d.urgent > 0 ? '#FFCDD2' : '#F5F5F5', color: d.urgent > 0 ? '#C62828' : '#888', click: 'filterUrgent()' },
     ];
-    // v52.1: Delivery Analytics — date/month aware with inline picker
+    // v52.2: Delivery Analytics — date/month/range aware with inline picker
     const fmtCurr = (v) => '₹' + (v || 0).toLocaleString('en-IN');
     const _dLabel = d.delLabel || 'today';
     const _dIsToday = (_dLabel === 'today' || _dLabel === new Date().toISOString().slice(0,10));
-    const _dLabelText = _dIsToday ? 'Today' : (_dLabel.length === 7 ? new Date(_dLabel+'-01').toLocaleDateString('en-IN',{month:'short',year:'numeric'}) : new Date(_dLabel+'T00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short'}));
+    const _dIsRange = _dLabel.includes('~');
+    const _dLabelText = _dIsToday ? 'Today' : _dIsRange ? (() => { const [f,t] = _dLabel.split('~'); return new Date(f+'T00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short'}) + ' → ' + new Date(t+'T00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short'}); })() : (_dLabel.length === 7 ? new Date(_dLabel+'-01').toLocaleDateString('en-IN',{month:'short',year:'numeric'}) : new Date(_dLabel+'T00:00').toLocaleDateString('en-IN',{day:'2-digit',month:'short'}));
     const _activeTile = S._delTileFilter || '';
     const deliveryTiles = [
       { label: 'Delivered', value: d.deliveredDel || 0, icon: '📦', bg: '#E8F5E9', color: '#2E7D32', key: 'delivered' },
@@ -1715,9 +1800,11 @@ function _applyChipCounts(d) {
     delHeader.innerHTML = `
       <span style="font-size:10px;font-weight:800;color:#555;white-space:nowrap">📊 ${_dLabelText}</span>
       <button class="del-date-btn ${_dIsToday?'del-date-active':''}" data-del-date="${_today}">Today</button>
-      <button class="del-date-btn ${_dLabel===_thisMonth?'del-date-active':''}" data-del-month="${_thisMonth}">This Month</button>
-      <button class="del-date-btn ${_dLabel===_prevMonth?'del-date-active':''}" data-del-month="${_prevMonth}">Last Month</button>
-      <input type="date" id="del-date-pick" value="${_dLabel.length===10&&!_dIsToday?_dLabel:''}" max="${_today}" style="font-size:10px;padding:2px 4px;border:1.5px solid #ddd;border-radius:6px;background:#fff;color:#555;min-height:24px;max-width:110px;cursor:pointer">
+      <button class="del-date-btn ${_dLabel===_thisMonth?'del-date-active':''}" data-del-month="${_thisMonth}">This Mo</button>
+      <button class="del-date-btn ${_dLabel===_prevMonth?'del-date-active':''}" data-del-month="${_prevMonth}">Last Mo</button>
+      <input type="date" id="del-from-pick" value="${S._delFrom||''}" max="${_today}" title="From" style="font-size:9px;padding:2px 3px;border:1.5px solid #ddd;border-radius:6px;background:#fff;color:#555;min-height:22px;max-width:100px;cursor:pointer">
+      <span style="font-size:9px;color:#999">→</span>
+      <input type="date" id="del-to-pick" value="${S._delTo||''}" max="${_today}" title="To" style="font-size:9px;padding:2px 3px;border:1.5px solid #ddd;border-radius:6px;background:#fff;color:#555;min-height:22px;max-width:100px;cursor:pointer">
     `;
     ownerDash.appendChild(delHeader);
     // Delivery tiles row
@@ -1734,14 +1821,22 @@ function _applyChipCounts(d) {
     ownerDash.appendChild(delRow);
     // Event handlers for delivery date buttons
     ownerDash.querySelectorAll('[data-del-date]').forEach(btn => {
-      btn.addEventListener('click', () => { S._delDate = btn.dataset.delDate; S._delMonth = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); });
+      btn.addEventListener('click', () => { S._delDate = btn.dataset.delDate; S._delMonth = ''; S._delFrom = ''; S._delTo = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); });
     });
     ownerDash.querySelectorAll('[data-del-month]').forEach(btn => {
-      btn.addEventListener('click', () => { S._delMonth = btn.dataset.delMonth; S._delDate = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); });
+      btn.addEventListener('click', () => { S._delMonth = btn.dataset.delMonth; S._delDate = ''; S._delFrom = ''; S._delTo = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); });
     });
-    document.getElementById('del-date-pick')?.addEventListener('change', (e) => {
-      if (e.target.value) { S._delDate = e.target.value; S._delMonth = ''; S._delTileFilter = ''; _analyticsCacheTs = 0; loadAnalytics(true); }
-    });
+    // v52.2: From-To date range — triggers when both fields have values
+    const _tryDateRange = () => {
+      const from = document.getElementById('del-from-pick')?.value;
+      const to = document.getElementById('del-to-pick')?.value;
+      if (from && to && from <= to) {
+        S._delFrom = from; S._delTo = to; S._delDate = ''; S._delMonth = ''; S._delTileFilter = '';
+        _analyticsCacheTs = 0; loadAnalytics(true);
+      }
+    };
+    document.getElementById('del-from-pick')?.addEventListener('change', _tryDateRange);
+    document.getElementById('del-to-pick')?.addEventListener('change', _tryDateRange);
     // v47: Brand filter row below tiles — filter by warranty brand
     const brands = ['IKONIC','HNK','MARC','AYTY Pro'];
     const brandRow = document.createElement('div');
@@ -2236,7 +2331,7 @@ function jobRowHTML(j) {
   const bg      = sb(j.status);
   const balance = Math.max(0, (j.total_charges || 0) - (j.discount || 0) - (j.received_amount || 0));
   // v41: AGING ALERT — show how old the job is + color warning for stale jobs
-  const daysSince = j.created_at ? Math.floor((Date.now() - new Date(j.created_at).getTime()) / 86400000) : 0;
+  const daysSince = j.created_at ? Math.floor((Date.now() - new Date(_utcFix(j.created_at)).getTime()) / 86400000) : 0;
   const isActive = j.status === 'under_repair' || j.status === 'repaired' || j.status === 'partial_delivered';
   const agingTag = isActive && daysSince >= 15
     ? `<span style="background:${daysSince>=25?'#FFCDD2':daysSince>=15?'#FFF3E0':'transparent'};color:${daysSince>=25?'#C62828':'#E65100'};font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px;margin-left:4px">${daysSince}d</span>`
@@ -4235,7 +4330,7 @@ async function showJobHistory(j) {
           <div style="background:#f8f9fa;border-radius:10px;padding:10px 14px;border-left:3px solid ${color}">
             <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">
               <span style="font-weight:700;color:#1a1a2e;font-size:14px">${esc(ev.action)}</span>
-              <span style="font-size:11px;color:#999">${ev.created_at ? new Date(ev.created_at).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : ''}</span>
+              <span style="font-size:11px;color:#999">${fmtDateTime(ev.created_at)}</span>
             </div>
             ${ev.detail ? `<div style="font-size:13px;color:#555;margin-top:4px">${esc(ev.detail)}</div>` : ''}
             <div style="font-size:12px;color:#aaa;margin-top:3px">
