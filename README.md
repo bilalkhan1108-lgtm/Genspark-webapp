@@ -1,4 +1,4 @@
-# ADITION ELECTRIC SOLUTION — PWA v52.1
+# ADITION ELECTRIC SOLUTION — PWA v52.2
 
 **Mobile-first PWA** for electric appliance repair shop management.  
 Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite DB · IndexedDB offline memory
@@ -10,6 +10,43 @@ Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite
 |---|---|
 | **Production** | https://adition-crm.pages.dev |
 | **GitHub** | https://github.com/bilalkhan1108-lgtm/Genspark-webapp |
+
+---
+
+## What's New in v52.2
+
+### Phone Search Normalization
+- **Search with +91 prefix, spaces, or hyphens** now works correctly
+- Backend uses SQL REPLACE functions for normalized matching across `snap_mobile` and `snap_mobile2`
+- Frontend `_clientSideFilter()` strips country code and non-digit characters for fuzzy matching
+- Searching "9876543210" or "+91 98765 43210" both find the same contact
+
+### Timezone Fix (UTC → IST)
+- **`_utcFix()` helper** appends 'Z' to UTC datetime strings from SQLite so JS correctly interprets them
+- **`fmtDateTime()` formatter** uses `en-IN` locale with 12-hour format for all timestamp displays
+- Job history timestamps, delivery dates, creation dates all display correctly in IST
+
+### Delivery Analytics Date Range Picker
+- **From-To date range** inputs in delivery analytics header
+- Backend supports `del_from` / `del_to` params with SQL `BETWEEN` query
+- Frontend passes range params through `loadAnalytics()` with proper state management
+- Quick buttons: Today / This Month / Last Month + custom From-To range
+
+### Image Upload Half-Image Fix
+- **Complete rewrite of `compressImage()`** to prevent black/half-image artifacts on mobile
+- **White canvas fill** before drawing prevents transparent/black areas
+- **iOS canvas pixel limit** (16MP max) enforcement with automatic downscaling
+- **iOS uses FileReader path** (avoids unreliable `createImageBitmap` that caused half-decoded images)
+- **10-second safety timeout** returns original file if compression hangs
+- **Progressive quality reduction** for large source images (>5MP / >10MP)
+- **Immediate canvas cleanup** (1×1 resize) frees GPU memory after blob creation
+
+### UX Improvements (from v52.2 Phase 1)
+- **Tiles panel stays open** on delivery tile/brand/date clicks (auto-close logic fixed)
+- **Dynamic filter banner** (`_updateDelFilterBanner()`) injects above job list without re-render
+- **Safe delete modal** — type "DELETE" to confirm (replaces dangerous `confirm()` dialog)
+- **Auto-show panel** on dashboard return when tile filter is active
+- **Thumbnail placeholders** — CSS transition + background prevents broken image flash
 
 ---
 
@@ -134,7 +171,7 @@ Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite
 |--------|----------|------|-------------|
 | POST | `/api/auth/login` | — | Login |
 | GET | `/api/auth/me` | Auth | Current user info |
-| GET | `/api/analytics` | Auth | Dashboard stats (supports `del_date`, `del_month` params) |
+| GET | `/api/analytics` | Auth | Dashboard stats (supports `del_date`, `del_month`, `del_from`, `del_to` params) |
 | GET | `/api/jobs` | Auth | List jobs (status, search, date, staff_id, brand, del_method, del_date, del_month, pay_filter) |
 | GET | `/api/jobs/pending-payment` | Admin | Jobs with outstanding balance |
 | GET | `/api/jobs/delivered` | Admin | Delivered jobs with method/date filters |
@@ -180,4 +217,4 @@ Admin, Supervisor & Staff roles · Job tracking · R2 image storage · D1 SQLite
 - **Platform**: Cloudflare Pages
 - **Project Name**: adition-crm
 - **Status**: ✅ Active
-- **Last Updated**: 2026-06-19
+- **Last Updated**: 2026-06-24
