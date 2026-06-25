@@ -788,7 +788,7 @@ function _updateDelFilterBanner() {
   const wrap = document.getElementById('vlist-wrap');
   if (S._delTileFilter && wrap) {
     const labels = {delivered:'All Delivered',in_person:'In-Person Delivered',courier:'Courier Delivered',cash:'Cash Payments',online:'Online Payments'};
-    const dateCtx = S._delDate ? '('+S._delDate+')' : S._delMonth ? '('+S._delMonth+')' : '(Today)';
+    const dateCtx = S._delFrom && S._delTo ? '('+S._delFrom+' → '+S._delTo+')' : S._delDate ? '('+S._delDate+')' : S._delMonth ? '('+S._delMonth+')' : '(Today)';
     const html = `<span>🔍 Showing: <b style="color:#1565C0">${labels[S._delTileFilter]||S._delTileFilter}</b> ${dateCtx}</span><button onclick="filterDeliveryTile('')" style="margin-left:auto;background:#E53935;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700;cursor:pointer">✕ Clear</button>`;
     if (!banner) {
       banner = document.createElement('div');
@@ -1720,7 +1720,7 @@ function dashboardHTML() {
       </div>
     </div>
     ${S._delTileFilter ? `<div id="del-filter-banner" style="display:flex;align-items:center;gap:6px;padding:6px 12px;background:linear-gradient(90deg,#E3F2FD,#F3E5F5);border-radius:8px;margin:4px 0;font-size:12px;font-weight:700;color:#333">
-      <span>🔍 Showing: <b style="color:#1565C0">${({delivered:'All Delivered',in_person:'In-Person Delivered',courier:'Courier Delivered',cash:'Cash Payments',online:'Online Payments'})[S._delTileFilter]||S._delTileFilter}</b> ${S._delDate ? '('+S._delDate+')' : S._delMonth ? '('+S._delMonth+')' : '(Today)'}</span>
+      <span>🔍 Showing: <b style="color:#1565C0">${({delivered:'All Delivered',in_person:'In-Person Delivered',courier:'Courier Delivered',cash:'Cash Payments',online:'Online Payments'})[S._delTileFilter]||S._delTileFilter}</b> ${S._delFrom && S._delTo ? '('+S._delFrom+' → '+S._delTo+')' : S._delDate ? '('+S._delDate+')' : S._delMonth ? '('+S._delMonth+')' : '(Today)'}</span>
       <button onclick="filterDeliveryTile('')" style="margin-left:auto;background:#E53935;color:#fff;border:none;border-radius:6px;padding:3px 10px;font-size:11px;font-weight:700;cursor:pointer">✕ Clear</button>
     </div>` : ''}
     <div id="vlist-wrap" class="vlist-wrap" style="flex:1"></div>
@@ -1947,8 +1947,9 @@ async function loadJobs(append = false) {
       if (tf === 'in_person') params.del_method = 'in_person';
       if (tf === 'cash')      params.pay_filter = 'cash';
       if (tf === 'online')    params.pay_filter = 'online';
-      // Pass the current analytics date/month
-      if (S._delDate)       params.del_date  = S._delDate;
+      // v52.2 fix: Pass the current analytics date context (range > single date > month > today)
+      if (S._delFrom && S._delTo) { params.del_from = S._delFrom; params.del_to = S._delTo; }
+      else if (S._delDate)       params.del_date  = S._delDate;
       else if (S._delMonth) params.del_month = S._delMonth;
       else                  params.del_date  = new Date().toISOString().slice(0,10); // default: today
     }
@@ -2101,7 +2102,7 @@ function bindDashboardEvents() {
             panel.addEventListener('click', ev => {
               const clickEl = ev.target.closest('[onclick]');
               // Don't auto-close for delivery tile clicks, date buttons, brand filters
-              if (clickEl && !clickEl.getAttribute('onclick')?.includes('filterDeliveryTile') && !clickEl.getAttribute('onclick')?.includes('filterByBrand') && !ev.target.closest('[data-del-date]') && !ev.target.closest('[data-del-month]') && !ev.target.closest('#del-date-pick')) {
+              if (clickEl && !clickEl.getAttribute('onclick')?.includes('filterDeliveryTile') && !clickEl.getAttribute('onclick')?.includes('filterByBrand') && !ev.target.closest('[data-del-date]') && !ev.target.closest('[data-del-month]') && !ev.target.closest('#del-date-pick') && !ev.target.closest('#del-from-pick') && !ev.target.closest('#del-to-pick')) {
                 setTimeout(() => {
                   panel.style.display = 'none';
                   const btn2 = document.getElementById('btn-hamburger-menu');

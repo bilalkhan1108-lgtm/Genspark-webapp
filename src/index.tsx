@@ -501,6 +501,8 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   const delMethod  = c.req.query('del_method')  || ''  // 'courier' | 'in_person'
   const delDate    = c.req.query('del_date')    || ''  // YYYY-MM-DD
   const delMonth   = c.req.query('del_month')   || ''  // YYYY-MM
+  const delFrom    = c.req.query('del_from')    || ''  // v52.2: YYYY-MM-DD date range start
+  const delTo      = c.req.query('del_to')      || ''  // v52.2: YYYY-MM-DD date range end
   const payFilter  = c.req.query('pay_filter')  || ''  // 'cash' | 'online'
   const limit    = Math.min(parseInt(c.req.query('limit') || '100'), 500)
   const offset   = parseInt(c.req.query('offset') || '0') || 0
@@ -571,13 +573,18 @@ app.get('/api/jobs', authMiddleware, async (c) => {
   } else if (delMethod === 'in_person') {
     conds.push("(j.delivery_method='in_person' OR j.delivery_method IS NULL)")
   }
-  if (delDate && /^\d{4}-\d{2}-\d{2}$/.test(delDate)) {
+  // v52.2: Support date range (del_from/del_to), single date, or month for delivery tile filters
+  if (delFrom && delTo && /^\d{4}-\d{2}-\d{2}$/.test(delFrom) && /^\d{4}-\d{2}-\d{2}$/.test(delTo)) {
+    conds.push('DATE(j.delivered_at) BETWEEN ? AND ?'); params.push(delFrom, delTo)
+  } else if (delDate && /^\d{4}-\d{2}-\d{2}$/.test(delDate)) {
     conds.push('DATE(j.delivered_at)=?'); params.push(delDate)
   } else if (delMonth && /^\d{4}-\d{2}$/.test(delMonth)) {
     conds.push("strftime('%Y-%m',j.delivered_at)=?"); params.push(delMonth)
   }
+  // v52.2 fix: Cash filter — only match explicit 'cash' or NULL when job IS delivered
+  // (NULL payment_method on delivered jobs likely means cash/in-person)
   if (payFilter === 'cash') {
-    conds.push("(j.payment_method='cash' OR j.payment_method IS NULL)")
+    conds.push("(j.payment_method='cash' OR (j.payment_method IS NULL AND j.status='delivered'))")
   } else if (payFilter === 'online') {
     conds.push("j.payment_method='online'")
   }
