@@ -5833,6 +5833,7 @@ async function generateAndShareJobCard(j, shareMode) {
     const waUrl   = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
     // ── Auto-download: programmatic <a> click ───────────────────────────────
+    // v52.2 fix: Increased revoke timeout to 30s (mobile downloads are slow)
     function autoDownloadBlob(blobData, fileName) {
       try {
         const bUrl = URL.createObjectURL(blobData);
@@ -5843,9 +5844,9 @@ async function generateAndShareJobCard(j, shareMode) {
         document.body.appendChild(a);
         a.click();
         setTimeout(() => {
-          document.body.removeChild(a);
+          try { document.body.removeChild(a); } catch (_) {}
           URL.revokeObjectURL(bUrl);
-        }, 3000);
+        }, 30000); // 30s — give mobile browser plenty of time to save file
         return true;
       } catch (e) {
         console.error('[AES] Auto-download failed:', e);
@@ -5854,17 +5855,45 @@ async function generateAndShareJobCard(j, shareMode) {
     }
 
     if (shareMode) {
-      // ── PARALLEL: Download + WhatsApp simultaneously ──────────────────────
-      autoDownloadBlob(blob, jobFileName);
-      toast(`Downloading ${jobFileName} (${outW}x${outH}px)…`, 'success');
+      // ── v52.2 fix: Use Web Share API on mobile for reliable file sharing ──
+      // The old approach (download blob + redirect to wa.me 150ms later) was
+      // unreliable: the page navigation killed the pending download, so the
+      // file never saved. Web Share API passes the file directly to WhatsApp.
+      const shareFile = new File([blob], jobFileName, { type: 'image/jpeg' });
+      const canNativeShare = navigator.canShare && navigator.canShare({ files: [shareFile] });
 
-      setTimeout(() => {
-        if (waPhone) {
-          window.location.href = `https://wa.me/${waPhone}?text=${waText}`;
-        } else {
-          window.open(waUrl, '_blank');
+      if (canNativeShare) {
+        // Native share — directly opens OS share sheet with file attached
+        toast(`Sharing ${jobFileName}…`, 'success');
+        try {
+          await navigator.share({
+            files: [shareFile],
+            title: `Job Card - ${j.id}`,
+            text: text
+          });
+          toast('Shared successfully ✅', 'success');
+        } catch (shareErr) {
+          // User cancelled or share failed — fall back to download + WhatsApp
+          if (shareErr.name !== 'AbortError') {
+            console.warn('[AES] Native share failed, falling back:', shareErr);
+            autoDownloadBlob(blob, jobFileName);
+            toast(`Downloading ${jobFileName}…`, 'info');
+            setTimeout(() => {
+              window.open(waUrl, '_blank');
+            }, 1500);
+          }
         }
-      }, 150);
+        // Also trigger download so file is saved to device gallery
+        autoDownloadBlob(blob, jobFileName);
+      } else {
+        // Fallback: download first, then open WhatsApp after delay
+        // v52.2 fix: Wait 1.5s (not 150ms) so download can complete before navigation
+        autoDownloadBlob(blob, jobFileName);
+        toast(`Downloading ${jobFileName} (${outW}x${outH}px)…`, 'success');
+        setTimeout(() => {
+          window.open(waUrl, '_blank'); // Use window.open (not location.href) to avoid killing download
+        }, 1500);
+      }
 
       API.post(`/api/jobs/${j.id}/history`, {
         action: 'Job Card Shared',
