@@ -583,17 +583,14 @@ function _fuzzyMatch(hay, needle) {
   const h = hay.toLowerCase();
   const n = needle.toLowerCase();
   if (h.includes(n)) return true;
-  // Fuzzy: all chars of needle appear in order in hay (for typos)
-  if (n.length >= 3) {
-    let hi = 0;
-    for (let ni = 0; ni < n.length && hi < h.length; hi++) {
-      if (h[hi] === n[ni]) ni++;
-      if (ni === n.length) return true;
-    }
-  }
   // Word-start matching: "pan" matches "Pankajbhai"
   const words = h.split(/\s+/);
   for (const w of words) { if (w.startsWith(n)) return true; }
+  // v52.2 fix: Removed aggressive sequential-character fuzzy matching.
+  // The old algorithm matched "darshit" to "dharmesh bhai dishant" because
+  // all chars d-a-r-s-h-i-t appeared in order across the full string.
+  // This caused wrong results. Now only exact substring and word-start
+  // matching are used — much more accurate for a CRM search.
   return false;
 }
 
@@ -697,17 +694,17 @@ async function _warmupSearchCache() {
 }
 
 // Toast
-function toast(msg, type = 'info') {
+function toast(msg, type = 'info', duration = 3200) {
   document.querySelectorAll('.aes-toast').forEach(t => t.remove());
   const el = Object.assign(document.createElement('div'), { className: 'aes-toast', textContent: msg });
-  const bg = type === 'error' ? '#C62828' : type === 'success' ? '#2E7D32' : '#1565C0';
+  const bg = type === 'error' ? '#C62828' : type === 'success' ? '#2E7D32' : type === 'warning' ? '#E65100' : '#1565C0';
   el.style.cssText = `position:fixed;bottom:82px;left:50%;transform:translateX(-50%);
     background:${bg};color:#fff;padding:11px 22px;border-radius:12px;z-index:9999;
     font-size:14px;font-weight:600;box-shadow:0 4px 20px rgba(0,0,0,.35);
     max-width:90vw;text-align:center;animation:toastIn .22s ease;pointer-events:none;
     will-change:transform,opacity;`;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+  setTimeout(() => el.remove(), duration);
 }
 
 // Scroll lock
@@ -1901,9 +1898,11 @@ async function loadJobs(append = false) {
       if (clientResults !== null) {
         S.jobs = clientResults;
         renderVList(false);
-        // If master cache has enough data, skip API call entirely for instant UX
-        if (_allJobsFullyLoaded && clientResults.length > 0) {
+        // If master cache has ALL jobs, use client results only (no API needed)
+        if (_allJobsFullyLoaded) {
+          _jobsHasMore = false; // v52.2 fix: Prevent infinite "Loading more..." spinner
           _jobsLoading = false;
+          renderVList(false); // Re-render without the loading spinner
           bindDashboardEvents();
           return;
         }
@@ -5855,45 +5854,34 @@ async function generateAndShareJobCard(j, shareMode) {
     }
 
     if (shareMode) {
-      // ── v52.2 fix: Use Web Share API on mobile for reliable file sharing ──
-      // The old approach (download blob + redirect to wa.me 150ms later) was
-      // unreliable: the page navigation killed the pending download, so the
-      // file never saved. Web Share API passes the file directly to WhatsApp.
-      const shareFile = new File([blob], jobFileName, { type: 'image/jpeg' });
-      const canNativeShare = navigator.canShare && navigator.canShare({ files: [shareFile] });
+      // ── v52.2 fix: Download file FIRST, then open customer's WhatsApp chat ──
+      // Strategy: Save file to device gallery, then redirect to wa.me/{phone}
+      // which opens the specific customer's chat with pre-filled message.
+      // User can attach the downloaded image from gallery.
+      //
+      // Previous issues fixed:
+      // - v52.2a used navigator.share() which opened GENERIC share sheet (user
+      //   had to manually find WhatsApp + contact — terrible UX)
+      // - Original code redirected to wa.me 150ms after download start, which
+      //   killed the in-progress download on Android Chrome
+      //
+      // Current approach: Download via hidden <a>, wait for browser to register
+      // the download, THEN open WhatsApp in a NEW TAB (window.open) so the
+      // current page stays alive and the download continues.
 
-      if (canNativeShare) {
-        // Native share — directly opens OS share sheet with file attached
-        toast(`Sharing ${jobFileName}…`, 'success');
-        try {
-          await navigator.share({
-            files: [shareFile],
-            title: `Job Card - ${j.id}`,
-            text: text
-          });
-          toast('Shared successfully ✅', 'success');
-        } catch (shareErr) {
-          // User cancelled or share failed — fall back to download + WhatsApp
-          if (shareErr.name !== 'AbortError') {
-            console.warn('[AES] Native share failed, falling back:', shareErr);
-            autoDownloadBlob(blob, jobFileName);
-            toast(`Downloading ${jobFileName}…`, 'info');
-            setTimeout(() => {
-              window.open(waUrl, '_blank');
-            }, 1500);
-          }
+      autoDownloadBlob(blob, jobFileName);
+      toast(`📥 Saving ${jobFileName}…`, 'success');
+
+      // Wait 1.5s for download to register, then open WhatsApp in new tab
+      setTimeout(() => {
+        toast('Opening WhatsApp… 📎 Attach image from gallery', 'info', 4000);
+        // window.open keeps current page alive (download continues)
+        if (waPhone) {
+          window.open(`https://wa.me/${waPhone}?text=${waText}`, '_blank');
+        } else {
+          window.open(waUrl, '_blank');
         }
-        // Also trigger download so file is saved to device gallery
-        autoDownloadBlob(blob, jobFileName);
-      } else {
-        // Fallback: download first, then open WhatsApp after delay
-        // v52.2 fix: Wait 1.5s (not 150ms) so download can complete before navigation
-        autoDownloadBlob(blob, jobFileName);
-        toast(`Downloading ${jobFileName} (${outW}x${outH}px)…`, 'success');
-        setTimeout(() => {
-          window.open(waUrl, '_blank'); // Use window.open (not location.href) to avoid killing download
-        }, 1500);
-      }
+      }, 1500);
 
       API.post(`/api/jobs/${j.id}/history`, {
         action: 'Job Card Shared',
