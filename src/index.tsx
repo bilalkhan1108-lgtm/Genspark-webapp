@@ -2831,10 +2831,12 @@ app.get('/api/jobs/sync', authMiddleware, async (c) => {
   const userId  = c.get('userId')
 
   let q = `
-    SELECT j.id, j.snap_name, j.snap_mobile, j.status, j.dispatch_method,
-           j.received_amount, j.discount, j.created_at, j.updated_at,
+    SELECT j.id, j.snap_name, j.snap_mobile, j.snap_mobile2, j.snap_address, j.snap_category, j.status, j.dispatch_method,
+           j.received_amount, j.discount, j.payment_method, j.extra_charges, j.delivery_rating, j.created_at, j.updated_at,
            COALESCE((SELECT SUM(quantity) FROM machines WHERE job_id=j.id), 0) AS machine_count,
-           COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'), 0) AS total_charges
+           COALESCE((SELECT SUM(charges * quantity) FROM machines WHERE job_id=j.id AND status != 'returned'), 0) + COALESCE(j.extra_charges, 0) AS total_charges,
+           (SELECT mi.url FROM machine_images mi WHERE mi.machine_id IN
+             (SELECT id FROM machines WHERE job_id=j.id LIMIT 1) LIMIT 1) AS thumb
     FROM jobs j`
   const conds: string[] = []
   const ps: any[] = []

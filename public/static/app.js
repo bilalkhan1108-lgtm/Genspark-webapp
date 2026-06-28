@@ -666,9 +666,24 @@ async function _fullOfflineSync() {
       // Save ALL to IDB for offline
       IDB.saveJobs('_sync_all', _allLoadedJobs);
       IDB.bulkSaveDetails(_allLoadedJobs);
+    } else if (!_fullSyncLastTs) {
+      // v52.3: First sync returned 0 jobs — means DB is empty or error.
+      // Don't mark as fully loaded in this case.
+    } else {
+      // Delta sync returned 0 new jobs — cache is current
+      _allJobsFullyLoaded = true;
     }
     _fullSyncLastTs = new Date().toISOString();
     localStorage.setItem('AES_SYNC_LAST', _fullSyncLastTs);
+    // v52.3: If a search is currently active, re-run it with the fresh cache
+    if ((S.searchJob || S.searchName) && _allJobsFullyLoaded) {
+      const freshResults = _clientSideFilter(_allLoadedJobs, S.searchJob, S.searchName);
+      if (freshResults !== null && freshResults.length > S.jobs.length) {
+        S.jobs = freshResults;
+        _jobsHasMore = false;
+        renderVList(false);
+      }
+    }
   } catch {}
   _fullSyncRunning = false;
 }
@@ -685,8 +700,12 @@ async function _warmupSearchCache() {
         if (idx !== undefined) _allLoadedJobs[idx] = j;
         else { _allLoadedJobs.push(j); idMap.set(j.id, _allLoadedJobs.length - 1); }
       }
-      // v45: If IDB has all jobs, mark as fully loaded for instant search
-      if (allCached.length >= 50) _allJobsFullyLoaded = true;
+      // v52.3 fix: Do NOT set _allJobsFullyLoaded=true from IDB warmup.
+      // The old heuristic (>=50 jobs → fully loaded) caused search failures:
+      // new jobs created after last sync were invisible because the client
+      // never called the server API when it believed it had "all" jobs.
+      // _allJobsFullyLoaded is ONLY set true by _fullOfflineSync() which
+      // actually fetches from the server and confirms completeness.
     }
   } catch {}
   // v47: Trigger full background sync after warmup
@@ -1898,15 +1917,18 @@ async function loadJobs(append = false) {
       if (clientResults !== null) {
         S.jobs = clientResults;
         renderVList(false);
-        // If master cache has ALL jobs, use client results only (no API needed)
-        if (_allJobsFullyLoaded) {
-          _jobsHasMore = false; // v52.2 fix: Prevent infinite "Loading more..." spinner
+        // v52.3 fix: Only skip API if cache is confirmed complete AND has results.
+        // If client-side returns 0 results, ALWAYS fall through to server API —
+        // the local cache might be stale/missing new jobs (e.g. T-582 created
+        // after last sync). This prevents "No jobs found" for existing jobs.
+        if (_allJobsFullyLoaded && clientResults.length > 0) {
+          _jobsHasMore = false;
           _jobsLoading = false;
-          renderVList(false); // Re-render without the loading spinner
+          renderVList(false);
           bindDashboardEvents();
           return;
         }
-        // Otherwise still fire API in background for server-accurate results
+        // Otherwise fire API for server-accurate results (cache incomplete or 0 results)
       }
     }
     // IDB cache fallback for non-search loads (filter views)
@@ -1975,7 +1997,9 @@ async function loadJobs(append = false) {
         IDB.bulkSaveDetails(S.jobs);
       }
       // v41: Build master cache for instant client-side search
-      if (!isSearching && !S.search) {
+      // v52.3 fix: Also add search results to master cache so subsequent
+      // searches can find them client-side (prevents repeated "not found")
+      {
         const idSet = new Set(_allLoadedJobs.map(x => x.id));
         for (const j of newJobs) {
           if (idSet.has(j.id)) {
@@ -1986,7 +2010,8 @@ async function loadJobs(append = false) {
             idSet.add(j.id);
           }
         }
-        if (!_jobsHasMore) _allJobsFullyLoaded = true;
+        // Only mark fully loaded from non-search loads (search results are subset)
+        if (!isSearching && !S.search && !_jobsHasMore) _allJobsFullyLoaded = true;
       }
       // v43: Prefetch ALL loaded jobs — ensures instant detail loading for any job tapped
       if (!isSearching) _prefetchDetails(newJobs);
@@ -2210,6 +2235,10 @@ function bindDashboardEvents() {
         const instant = _clientSideFilter(_allLoadedJobs, S.searchJob, S.searchName);
         if (instant !== null) {
           S.jobs = instant;
+          // v52.3 fix: When showing client-side results, hide the "Loading more..." spinner.
+          // If cache is fully loaded, there's nothing more to load.
+          // If cache is NOT fully loaded, the debounced API call will fire and may change this.
+          if (_allJobsFullyLoaded) _jobsHasMore = false;
           renderVList(false);
           // v45: Show result count feedback
           const cc = document.getElementById('cc-count');
@@ -2225,8 +2254,10 @@ function bindDashboardEvents() {
   }
 
   // v45: Faster debounce (250ms) for API refinement
+  // v52.3 fix: Always allow API search when client-side found 0 results,
+  // even if _allJobsFullyLoaded is true (cache might be stale/incomplete)
   const _debouncedApiSearch = debounce(() => {
-    if (_allJobsFullyLoaded && (S.searchJob || S.searchName)) return;
+    if (_allJobsFullyLoaded && (S.searchJob || S.searchName) && S.jobs.length > 0) return;
     loadJobs();
   }, 250);
 
