@@ -712,6 +712,83 @@ async function _warmupSearchCache() {
   setTimeout(_fullOfflineSync, 2000);
 }
 
+// ── v52.3: RECENT SEARCHES — Google-style dropdown with time tags ──
+const _RECENT_SEARCH_KEY_JOB  = 'AES_RECENT_SEARCH_JOB';
+const _RECENT_SEARCH_KEY_NAME = 'AES_RECENT_SEARCH_NAME';
+const _RECENT_SEARCH_MAX = 10;
+
+function _getRecentSearches(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.slice(0, _RECENT_SEARCH_MAX) : [];
+  } catch { return []; }
+}
+
+function _saveRecentSearch(key, term) {
+  if (!term || !term.trim()) return;
+  const cleaned = term.trim();
+  let arr = _getRecentSearches(key);
+  // Remove duplicate (case-insensitive)
+  arr = arr.filter(e => e.text.toLowerCase() !== cleaned.toLowerCase());
+  // Add to front with timestamp
+  arr.unshift({ text: cleaned, ts: Date.now() });
+  // Keep max 10
+  if (arr.length > _RECENT_SEARCH_MAX) arr.length = _RECENT_SEARCH_MAX;
+  try { localStorage.setItem(key, JSON.stringify(arr)); } catch {}
+}
+
+function _removeRecentSearch(key, text) {
+  let arr = _getRecentSearches(key);
+  arr = arr.filter(e => e.text !== text);
+  try { localStorage.setItem(key, JSON.stringify(arr)); } catch {}
+}
+
+function _formatRecentTime(ts) {
+  const now = Date.now();
+  const diff = now - ts;
+  if (diff < 60000) return 'Just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  const d = new Date(ts);
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) {
+    return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+  }
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) {
+    return 'Yesterday ' + d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+  }
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) + ' ' +
+    d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+}
+
+function _renderRecentDropdown(containerId, key, inputId) {
+  let container = document.getElementById(containerId);
+  if (!container) return;
+  const items = _getRecentSearches(key);
+  if (!items.length) {
+    container.innerHTML = `<div style="padding:12px 16px;color:#aaa;font-size:12px;text-align:center">No recent searches</div>`;
+    container.style.display = 'block';
+    return;
+  }
+  container.innerHTML = `<div style="display:flex;align-items:center;padding:6px 14px 4px;border-bottom:1px solid #f0f0f0">
+      <span style="font-size:11px;font-weight:700;color:#888;flex:1"><i class="fas fa-history" style="margin-right:4px"></i>Recent Searches</span>
+      <button id="${containerId}-clear" style="font-size:10px;color:#E53935;background:none;border:none;font-weight:700;cursor:pointer;padding:2px 6px">CLEAR ALL</button>
+    </div>` +
+    items.map((item, i) => `<div class="recent-search-item" data-rs-text="${esc(item.text)}" data-rs-input="${inputId}" data-rs-key="${key}"
+      style="display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;transition:background .1s;border-bottom:1px solid #f5f5f5">
+      <i class="fas fa-clock" style="color:#bbb;font-size:12px;flex-shrink:0"></i>
+      <span style="flex:1;font-size:13px;font-weight:600;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(item.text)}</span>
+      <span style="font-size:10px;color:#aaa;flex-shrink:0;white-space:nowrap">${_formatRecentTime(item.ts)}</span>
+      <button class="rs-remove-btn" data-rs-remove="${esc(item.text)}" data-rs-key="${key}" data-rs-container="${containerId}"
+        style="background:none;border:none;color:#ccc;font-size:14px;cursor:pointer;padding:2px 4px;flex-shrink:0;line-height:1">&times;</button>
+    </div>`).join('');
+  container.style.display = 'block';
+}
+
 // Toast
 function toast(msg, type = 'info', duration = 3200) {
   document.querySelectorAll('.aes-toast').forEach(t => t.remove());
@@ -1719,20 +1796,22 @@ function dashboardHTML() {
       <button class="btn-staff-tab ${S.staffStatusTab==='repaired'?'btn-tab-active':''}" data-staff-tab="repaired" style="--tab-color:#2E7D32">✅ Repaired</button>
       <button class="btn-staff-tab ${S.staffStatusTab==='all'?'btn-tab-active':''}" data-staff-tab="all" style="--tab-color:#1565C0">📋 All</button>
     </div>` : ''}` : ''}
-    <div style="display:flex;gap:6px;padding:4px 10px;flex-shrink:0">
-      <div style="flex:1;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;overflow:hidden;transition:border-color .15s">
-        <i class="fas fa-hashtag" style="position:absolute;left:12px;color:#1565C0;font-size:14px;pointer-events:none"></i>
+    <div style="display:flex;gap:6px;padding:4px 10px;flex-shrink:0;position:relative;z-index:50">
+      <div style="flex:1;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;transition:border-color .15s">
+        <i class="fas fa-hashtag" style="position:absolute;left:12px;color:#1565C0;font-size:14px;pointer-events:none;z-index:1"></i>
         <input id="dash-search-job" type="search" class="search-input"
                placeholder="Job No." value="${esc(S.searchJob || '')}"
                autocomplete="off" autocorrect="off" spellcheck="false"
-               style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none">
+               style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none;position:relative;z-index:1">
+        <div id="rs-dropdown-job" class="rs-dropdown" style="display:none;position:absolute;top:100%;left:-1px;right:-1px;margin-top:4px;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);border:1px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:999;-webkit-overflow-scrolling:touch"></div>
       </div>
-      <div style="flex:1.5;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;overflow:hidden;transition:border-color .15s">
-        <i class="fas fa-search" style="position:absolute;left:12px;color:#888;font-size:14px;pointer-events:none"></i>
+      <div style="flex:1.5;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;transition:border-color .15s">
+        <i class="fas fa-search" style="position:absolute;left:12px;color:#888;font-size:14px;pointer-events:none;z-index:1"></i>
         <input id="dash-search-name" type="search" class="search-input"
                placeholder="Name or Mobile\u2026" value="${esc(S.searchName || '')}"
                autocomplete="off" autocorrect="off" spellcheck="false"
-               style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none">
+               style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none;position:relative;z-index:1">
+        <div id="rs-dropdown-name" class="rs-dropdown" style="display:none;position:absolute;top:100%;left:-1px;right:-1px;margin-top:4px;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);border:1px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:999;-webkit-overflow-scrolling:touch"></div>
       </div>
     </div>
     ${S._delTileFilter ? `<div id="del-filter-banner" style="display:flex;align-items:center;gap:6px;padding:6px 12px;background:linear-gradient(90deg,#E3F2FD,#F3E5F5);border-radius:8px;margin:4px 0;font-size:12px;font-weight:700;color:#333">
@@ -2263,6 +2342,8 @@ function bindDashboardEvents() {
 
   document.addEventListener('input', e => {
     if (e.target.id === 'dash-search-job' || e.target.id === 'dash-search-name') {
+      // v52.3: Hide recent dropdown as soon as user starts typing
+      _hideAllRecentDropdowns();
       _instantSearchFilter();
       if (S.searchJob || S.searchName) _debouncedApiSearch();
     }
@@ -2272,6 +2353,97 @@ function bindDashboardEvents() {
       _instantSearchFilter();
     }
   });
+
+  // ── v52.3: RECENT SEARCHES — focus/blur/click wiring ──
+
+  // Save search term when user finishes typing (debounced — 1.5s after last keystroke)
+  const _saveJobSearchDebounced = debounce(() => {
+    if (S.searchJob && S.searchJob.trim()) _saveRecentSearch(_RECENT_SEARCH_KEY_JOB, S.searchJob);
+  }, 1500);
+  const _saveNameSearchDebounced = debounce(() => {
+    if (S.searchName && S.searchName.trim()) _saveRecentSearch(_RECENT_SEARCH_KEY_NAME, S.searchName);
+  }, 1500);
+
+  document.addEventListener('input', e => {
+    if (e.target.id === 'dash-search-job' && S.searchJob) _saveJobSearchDebounced();
+    if (e.target.id === 'dash-search-name' && S.searchName) _saveNameSearchDebounced();
+  });
+
+  // Show recent dropdown on focus (only when input is empty)
+  document.addEventListener('focusin', e => {
+    if (e.target.id === 'dash-search-job') {
+      if (!e.target.value.trim()) {
+        _hideAllRecentDropdowns();
+        _renderRecentDropdown('rs-dropdown-job', _RECENT_SEARCH_KEY_JOB, 'dash-search-job');
+      }
+    } else if (e.target.id === 'dash-search-name') {
+      if (!e.target.value.trim()) {
+        _hideAllRecentDropdowns();
+        _renderRecentDropdown('rs-dropdown-name', _RECENT_SEARCH_KEY_NAME, 'dash-search-name');
+      }
+    }
+  });
+
+  // Click handler for recent search items (using event delegation on document)
+  document.addEventListener('click', e => {
+    // Tap on a recent search item → fill input and trigger search
+    const rsItem = e.target.closest('.recent-search-item');
+    if (rsItem) {
+      e.preventDefault();
+      e.stopPropagation();
+      const text = rsItem.dataset.rsText;
+      const inputId = rsItem.dataset.rsInput;
+      const key = rsItem.dataset.rsKey;
+      const input = document.getElementById(inputId);
+      if (input && text) {
+        input.value = text;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        _hideAllRecentDropdowns();
+        // Re-save to bump it to top with fresh timestamp
+        _saveRecentSearch(key, text);
+      }
+      return;
+    }
+    // Remove button on a recent search item
+    const rmBtn = e.target.closest('.rs-remove-btn');
+    if (rmBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const text = rmBtn.dataset.rsRemove;
+      const key = rmBtn.dataset.rsKey;
+      const containerId = rmBtn.dataset.rsContainer;
+      if (text && key) {
+        _removeRecentSearch(key, text);
+        // Find the input ID from container ID
+        const inputId = containerId === 'rs-dropdown-job' ? 'dash-search-job' : 'dash-search-name';
+        _renderRecentDropdown(containerId, key, inputId);
+      }
+      return;
+    }
+    // Clear all button
+    const clearBtn = e.target.closest('[id$="-clear"]');
+    if (clearBtn && clearBtn.id.startsWith('rs-dropdown')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const containerId = clearBtn.id.replace('-clear', '');
+      const key = containerId === 'rs-dropdown-job' ? _RECENT_SEARCH_KEY_JOB : _RECENT_SEARCH_KEY_NAME;
+      try { localStorage.removeItem(key); } catch {}
+      const inputId = containerId === 'rs-dropdown-job' ? 'dash-search-job' : 'dash-search-name';
+      _renderRecentDropdown(containerId, key, inputId);
+      return;
+    }
+    // Click outside → hide all dropdowns
+    if (!e.target.closest('.rs-dropdown') && !e.target.closest('#dash-search-job') && !e.target.closest('#dash-search-name')) {
+      _hideAllRecentDropdowns();
+    }
+  });
+
+  // Also save when navigating to job detail (user confirmed a search result)
+  // This is handled in the _instantSearchFilter and loadJobs flow above.
+}
+
+function _hideAllRecentDropdowns() {
+  document.querySelectorAll('.rs-dropdown').forEach(d => d.style.display = 'none');
 }
 
 function renderVList(append = false) {
@@ -2321,6 +2493,9 @@ function renderVList(append = false) {
     wrap.addEventListener('click', e => {
       const row = e.target.closest('.job-row');
       if (row?.dataset.id) {
+        // v52.3: Save search terms to recent history when user confirms by tapping a result
+        if (S.searchJob) _saveRecentSearch(_RECENT_SEARCH_KEY_JOB, S.searchJob);
+        if (S.searchName) _saveRecentSearch(_RECENT_SEARCH_KEY_NAME, S.searchName);
         _priorityPrefetch(row.dataset.id); // v43: start fetching detail immediately
         navigate('detail', { jobId: row.dataset.id });
       }
