@@ -1169,3 +1169,27 @@ button, a, label, select, input[type="file"] + label, [role="button"] {
   -webkit-tap-highlight-color: transparent;
 }
 .fp-quick:active { background: #f0f0f0; transform: scale(0.96); }
+
+/* ── v52.4: Performance optimizations ──────────────────────────────────────── */
+/* GPU-composited scroll container for smooth 120Hz scrolling */
+.vlist-wrap {
+  contain: layout style;
+  will-change: scroll-position;
+}
+/* Prevent layout thrash on job row cards during scroll */
+.job-row {
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}
+/* Dropdown animation performance */
+.rs-dropdown {
+  contain: layout style paint;
+  will-change: opacity, transform;
+}
+/* Thumb images: reserve space to prevent layout shift */
+.job-row-thumb {
+  contain: strict;
+  content-visibility: auto;
+  contain-intrinsic-size: 52px 52px;
+}

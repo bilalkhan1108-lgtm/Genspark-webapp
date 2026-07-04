@@ -781,7 +781,7 @@ function _renderRecentDropdown(containerId, key, inputId) {
     items.map((item, i) => `<div class="recent-search-item" data-rs-text="${esc(item.text)}" data-rs-input="${inputId}" data-rs-key="${key}"
       style="display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;transition:background .1s;border-bottom:1px solid #f5f5f5">
       <i class="fas fa-clock" style="color:#bbb;font-size:12px;flex-shrink:0"></i>
-      <span style="flex:1;font-size:13px;font-weight:600;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(item.text)}</span>
+      <span style="flex:1;font-size:13px;font-weight:600;color:#333;word-break:break-word;line-height:1.3">${esc(item.text)}</span>
       <span style="font-size:10px;color:#aaa;flex-shrink:0;white-space:nowrap">${_formatRecentTime(item.ts)}</span>
       <button class="rs-remove-btn" data-rs-remove="${esc(item.text)}" data-rs-key="${key}" data-rs-container="${containerId}"
         style="background:none;border:none;color:#ccc;font-size:14px;cursor:pointer;padding:2px 4px;flex-shrink:0;line-height:1">&times;</button>
@@ -1797,22 +1797,22 @@ function dashboardHTML() {
       <button class="btn-staff-tab ${S.staffStatusTab==='all'?'btn-tab-active':''}" data-staff-tab="all" style="--tab-color:#1565C0">📋 All</button>
     </div>` : ''}` : ''}
     <div style="display:flex;gap:6px;padding:4px 10px;flex-shrink:0;position:relative;z-index:50">
-      <div style="flex:1;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;transition:border-color .15s">
+      <div style="flex:1;min-width:0;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;transition:border-color .15s">
         <i class="fas fa-hashtag" style="position:absolute;left:12px;color:#1565C0;font-size:14px;pointer-events:none;z-index:1"></i>
         <input id="dash-search-job" type="search" class="search-input"
                placeholder="Job No." value="${esc(S.searchJob || '')}"
                autocomplete="off" autocorrect="off" spellcheck="false"
                style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none;position:relative;z-index:1">
-        <div id="rs-dropdown-job" class="rs-dropdown" style="display:none;position:absolute;top:100%;left:-1px;right:-1px;margin-top:4px;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);border:1px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:999;-webkit-overflow-scrolling:touch"></div>
       </div>
-      <div style="flex:1.5;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;transition:border-color .15s">
+      <div style="flex:1.5;min-width:0;position:relative;display:flex;align-items:center;background:#f0f2f5;border-radius:12px;border:1.5px solid #e0e0e0;transition:border-color .15s">
         <i class="fas fa-search" style="position:absolute;left:12px;color:#888;font-size:14px;pointer-events:none;z-index:1"></i>
         <input id="dash-search-name" type="search" class="search-input"
                placeholder="Name or Mobile\u2026" value="${esc(S.searchName || '')}"
                autocomplete="off" autocorrect="off" spellcheck="false"
                style="padding-left:34px;border:none;background:transparent;width:100%;min-height:40px;font-size:14px;font-weight:600;outline:none;position:relative;z-index:1">
-        <div id="rs-dropdown-name" class="rs-dropdown" style="display:none;position:absolute;top:100%;left:-1px;right:-1px;margin-top:4px;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);border:1px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:999;-webkit-overflow-scrolling:touch"></div>
       </div>
+      <div id="rs-dropdown-job" class="rs-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;margin-top:2px;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);border:1px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:999;-webkit-overflow-scrolling:touch"></div>
+      <div id="rs-dropdown-name" class="rs-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;margin-top:2px;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.18);border:1px solid #e0e0e0;max-height:340px;overflow-y:auto;z-index:999;-webkit-overflow-scrolling:touch"></div>
     </div>
     ${S._delTileFilter ? `<div id="del-filter-banner" style="display:flex;align-items:center;gap:6px;padding:6px 12px;background:linear-gradient(90deg,#E3F2FD,#F3E5F5);border-radius:8px;margin:4px 0;font-size:12px;font-weight:700;color:#333">
       <span>🔍 Showing: <b style="color:#1565C0">${({delivered:'All Delivered',in_person:'In-Person Delivered',courier:'Courier Delivered',cash:'Cash Payments',online:'Online Payments'})[S._delTileFilter]||S._delTileFilter}</b> ${S._delFrom && S._delTo ? '('+S._delFrom+' → '+S._delTo+')' : S._delDate ? '('+S._delDate+')' : S._delMonth ? '('+S._delMonth+')' : '(Today)'}</span>
@@ -2502,14 +2502,14 @@ function renderVList(append = false) {
     }, { passive: true });
   }
 
-  // v35: RAF-throttled scroll handler — max 1 paint per frame, prevents jank
+  // v52.4: RAF-throttled scroll handler — paint on every frame, images only when settled
   if (wrap._scrollHandler) wrap.removeEventListener('scroll', wrap._scrollHandler);
+  let _imgDebounce = 0;
   const onScroll = () => {
     if (!_rafPending) {
       _rafPending = true;
       requestAnimationFrame(() => {
         paint();
-        applyAuthImages(wrap);
         _rafPending = false;
         // Infinite scroll: load more when near bottom
         if (_jobsHasMore && !_jobsLoading) {
@@ -2518,6 +2518,9 @@ function renderVList(append = false) {
         }
       });
     }
+    // v52.4: Debounce image loading — only when scroll settles (150ms idle)
+    clearTimeout(_imgDebounce);
+    _imgDebounce = setTimeout(() => applyAuthImages(wrap), 150);
   };
   wrap._scrollHandler = onScroll;
   wrap.addEventListener('scroll', onScroll, { passive: true });
@@ -5879,8 +5882,16 @@ function blobToBase64(blob) {
 async function generateAndShareJobCard(j, shareMode) {
   toast('Generating premium job card…', 'info');
   try {
+    // v52.4: Clean up any leftover html2canvas containers from previous captures
+    // This prevents memory leaks and stale DOM interference on repeated captures
+    document.querySelectorAll('[data-html2canvas-container], .html2canvas-container').forEach(c => c.remove());
+
     const el = document.getElementById('job-card-print');
     if (!el) { toast('Card element missing', 'error'); return; }
+
+    // v52.4: Force re-render the job card HTML to ensure fresh state
+    // This prevents stale data from previous job's card lingering
+    el.innerHTML = jobCardPrintHTML(j);
 
     el.style.left = '-99999px'; el.style.top = '0';
 
@@ -6013,7 +6024,7 @@ async function generateAndShareJobCard(j, shareMode) {
       logging: false,
       imageTimeout: 30000,
       letterRendering: true,
-      removeContainer: false,
+      removeContainer: true, // v52.4: MUST be true to clean up clone container after each capture
     });
 
     // ── Step 5: Output SINGLE page high-quality JPG ──────────────────────────
@@ -6038,20 +6049,34 @@ async function generateAndShareJobCard(j, shareMode) {
     const waUrl   = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
     // ── Auto-download: programmatic <a> click ───────────────────────────────
-    // v52.2 fix: Increased revoke timeout to 30s (mobile downloads are slow)
+    // v52.4: Completely rewritten download function for reliable multi-session downloads
+    // Issues fixed:
+    // - Blob URLs could get garbage-collected before download completes on mobile
+    // - Multiple rapid downloads in same session silently dropped by Android Chrome
+    // - Old <a> elements piling up in DOM causing memory pressure
     function autoDownloadBlob(blobData, fileName) {
       try {
+        // v52.4: Remove any lingering download links from previous shares
+        document.querySelectorAll('a[data-aes-download]').forEach(old => {
+          try { document.body.removeChild(old); } catch(_) {}
+        });
         const bUrl = URL.createObjectURL(blobData);
         const a = document.createElement('a');
         a.href = bUrl;
         a.download = fileName;
         a.style.display = 'none';
+        a.setAttribute('data-aes-download', 'true');
         document.body.appendChild(a);
-        a.click();
+        // v52.4: Use click() in a microtask to ensure DOM is flushed
+        setTimeout(() => a.click(), 50);
+        // v52.4: Extended to 60s and split cleanup — don't revoke URL until very late
+        // This prevents Android Chrome from losing the blob during slow saves
         setTimeout(() => {
           try { document.body.removeChild(a); } catch (_) {}
+        }, 5000); // Remove <a> after 5s (it's already triggered)
+        setTimeout(() => {
           URL.revokeObjectURL(bUrl);
-        }, 30000); // 30s — give mobile browser plenty of time to save file
+        }, 60000); // Revoke blob URL after 60s (plenty of time for mobile to finish saving)
         return true;
       } catch (e) {
         console.error('[AES] Auto-download failed:', e);
@@ -6060,25 +6085,20 @@ async function generateAndShareJobCard(j, shareMode) {
     }
 
     if (shareMode) {
-      // ── v52.2 fix: Download file FIRST, then open customer's WhatsApp chat ──
+      // ── v52.4: RELIABLE SHARE — Download file, then open WhatsApp ──
       // Strategy: Save file to device gallery, then redirect to wa.me/{phone}
       // which opens the specific customer's chat with pre-filled message.
-      // User can attach the downloaded image from gallery.
       //
-      // Previous issues fixed:
-      // - v52.2a used navigator.share() which opened GENERIC share sheet (user
-      //   had to manually find WhatsApp + contact — terrible UX)
-      // - Original code redirected to wa.me 150ms after download start, which
-      //   killed the in-progress download on Android Chrome
-      //
-      // Current approach: Download via hidden <a>, wait for browser to register
-      // the download, THEN open WhatsApp in a NEW TAB (window.open) so the
-      // current page stays alive and the download continues.
+      // v52.4 changes:
+      // - Download uses setTimeout(click, 50ms) microtask for DOM flush
+      // - Increased WhatsApp open delay to 2.5s (was 1.5s) for reliable file save
+      // - Blob URL revocation extended to 60s (was 30s)
+      // - Canvas cleanup after each capture (removeContainer: true)
 
       autoDownloadBlob(blob, jobFileName);
       toast(`📥 Saving ${jobFileName}…`, 'success');
 
-      // Wait 1.5s for download to register, then open WhatsApp in new tab
+      // Wait 2.5s for download to fully register on device, then open WhatsApp
       setTimeout(() => {
         toast('Opening WhatsApp… 📎 Attach image from gallery', 'info', 4000);
         // window.open keeps current page alive (download continues)
@@ -6087,7 +6107,7 @@ async function generateAndShareJobCard(j, shareMode) {
         } else {
           window.open(waUrl, '_blank');
         }
-      }, 1500);
+      }, 2500);
 
       API.post(`/api/jobs/${j.id}/history`, {
         action: 'Job Card Shared',
@@ -6112,6 +6132,12 @@ async function generateAndShareJobCard(j, shareMode) {
   } catch (e) {
     console.error('[AES] Job card generation error:', e);
     toast('Failed to generate card — try again', 'error');
+  } finally {
+    // v52.4: Aggressively free canvas memory to prevent OOM on repeated captures
+    // Mobile devices have limited GPU/canvas memory — release ASAP
+    try {
+      document.querySelectorAll('[data-html2canvas-container], .html2canvas-container').forEach(c => c.remove());
+    } catch(_) {}
   }
 }
 
@@ -6215,7 +6241,7 @@ async function sendJobCardViaBot(j) {
     const canvas = await html2canvas(el, {
       scale: SCALE, useCORS: true, allowTaint: true,
       width: CARD_WIDTH, height: actualH, backgroundColor: '#ffffff',
-      logging: false, imageTimeout: 30000, letterRendering: true, removeContainer: false,
+      logging: false, imageTimeout: 30000, letterRendering: true, removeContainer: true,
     });
 
     const blob = await new Promise(resolve => canvas.toBlob(b => resolve(b), 'image/jpeg', 0.95));
