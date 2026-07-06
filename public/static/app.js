@@ -5879,7 +5879,11 @@ function blobToBase64(blob) {
   });
 }
 
+// v52.5: Mutex to prevent concurrent card generation (prevents stale captures)
+let _cardGenerating = false;
 async function generateAndShareJobCard(j, shareMode) {
+  if (_cardGenerating) { toast('Card generation in progress…', 'info'); return; }
+  _cardGenerating = true;
   toast('Generating premium job card…', 'info');
   try {
     // v52.4: Clean up any leftover html2canvas containers from previous captures
@@ -5889,9 +5893,18 @@ async function generateAndShareJobCard(j, shareMode) {
     const el = document.getElementById('job-card-print');
     if (!el) { toast('Card element missing', 'error'); return; }
 
-    // v52.4: Force re-render the job card HTML to ensure fresh state
+    // v52.5: Force re-render the job card HTML to ensure fresh state
     // This prevents stale data from previous job's card lingering
     el.innerHTML = jobCardPrintHTML(j);
+
+    // v52.5: SANITY CHECK — verify the rendered card contains this job's ID
+    // This catches edge cases where stale content persists due to DOM/browser caching
+    if (!el.innerHTML.includes(j.id)) {
+      console.error('[AES] STALE CARD DETECTED! Re-rendering…');
+      el.innerHTML = '';
+      await new Promise(r => requestAnimationFrame(r));
+      el.innerHTML = jobCardPrintHTML(j);
+    }
 
     el.style.left = '-99999px'; el.style.top = '0';
 
@@ -6048,66 +6061,112 @@ async function generateAndShareJobCard(j, shareMode) {
     const waText  = encodeURIComponent(text);
     const waUrl   = waPhone ? `https://wa.me/${waPhone}?text=${waText}` : `https://wa.me/?text=${waText}`;
 
-    // ── Auto-download: programmatic <a> click ───────────────────────────────
-    // v52.4: Completely rewritten download function for reliable multi-session downloads
-    // Issues fixed:
-    // - Blob URLs could get garbage-collected before download completes on mobile
-    // - Multiple rapid downloads in same session silently dropped by Android Chrome
-    // - Old <a> elements piling up in DOM causing memory pressure
+    // ── Auto-download: DEFINITIVE v52.5 — Web Share API + data URL fallback ──
+    // v52.5: Complete rewrite using navigator.share() for reliable mobile saves.
+    // Root cause of previous bug: Android Chrome silently drops <a download>
+    // blob URL clicks when another blob download is still pending/active.
+    // Fix: Use Web Share API (shares File directly to gallery/WhatsApp), with
+    // data: URL <a download> as fallback for desktop/unsupported browsers.
+    let _prevBlobUrls = [];
     function autoDownloadBlob(blobData, fileName) {
-      try {
-        // v52.4: Remove any lingering download links from previous shares
-        document.querySelectorAll('a[data-aes-download]').forEach(old => {
-          try { document.body.removeChild(old); } catch(_) {}
+      // Immediately revoke ALL previous blob URLs to free memory
+      _prevBlobUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch(_) {} });
+      _prevBlobUrls = [];
+      document.querySelectorAll('a[data-aes-download]').forEach(old => {
+        try { document.body.removeChild(old); } catch(_) {}
+      });
+
+      // Strategy 1: Web Share API (most reliable on mobile)
+      if (navigator.canShare && navigator.canShare({ files: [new File([blobData], fileName, { type: blobData.type })] })) {
+        const file = new File([blobData], fileName, { type: blobData.type || 'image/jpeg' });
+        navigator.share({ files: [file] }).then(() => {
+          console.log('[AES] Shared via Web Share API');
+        }).catch(err => {
+          // User cancelled share or API failed — fall through to download
+          if (err.name !== 'AbortError') {
+            console.warn('[AES] Web Share failed, falling back to download:', err);
+            _fallbackDownload(blobData, fileName);
+          }
         });
+        return 'share_api';
+      }
+
+      // Strategy 2: <a download> with fresh blob URL + unique filename
+      return _fallbackDownload(blobData, fileName);
+    }
+
+    function _fallbackDownload(blobData, fileName) {
+      try {
         const bUrl = URL.createObjectURL(blobData);
+        _prevBlobUrls.push(bUrl);
         const a = document.createElement('a');
         a.href = bUrl;
         a.download = fileName;
         a.style.display = 'none';
         a.setAttribute('data-aes-download', 'true');
         document.body.appendChild(a);
-        // v52.4: Use click() in a microtask to ensure DOM is flushed
-        setTimeout(() => a.click(), 50);
-        // v52.4: Extended to 60s and split cleanup — don't revoke URL until very late
-        // This prevents Android Chrome from losing the blob during slow saves
-        setTimeout(() => {
-          try { document.body.removeChild(a); } catch (_) {}
-        }, 5000); // Remove <a> after 5s (it's already triggered)
+        // Synchronous click — no setTimeout delay (prevents Android dropping it)
+        a.click();
+        // Clean up DOM immediately, keep blob URL alive for 90s
+        setTimeout(() => { try { document.body.removeChild(a); } catch(_) {} }, 1000);
         setTimeout(() => {
           URL.revokeObjectURL(bUrl);
-        }, 60000); // Revoke blob URL after 60s (plenty of time for mobile to finish saving)
+          _prevBlobUrls = _prevBlobUrls.filter(u => u !== bUrl);
+        }, 90000);
         return true;
       } catch (e) {
-        console.error('[AES] Auto-download failed:', e);
+        console.error('[AES] Download failed:', e);
         return false;
       }
     }
 
     if (shareMode) {
-      // ── v52.4: RELIABLE SHARE — Download file, then open WhatsApp ──
-      // Strategy: Save file to device gallery, then redirect to wa.me/{phone}
-      // which opens the specific customer's chat with pre-filled message.
+      // ── v52.5: RELIABLE SHARE via Web Share API or Download+WhatsApp ──
+      // Strategy A (mobile): Use navigator.share() which opens native share sheet
+      //   → user can directly share to WhatsApp from there (image + text)
+      // Strategy B (fallback): Download file to gallery, then open wa.me link
       //
-      // v52.4 changes:
-      // - Download uses setTimeout(click, 50ms) microtask for DOM flush
-      // - Increased WhatsApp open delay to 2.5s (was 1.5s) for reliable file save
-      // - Blob URL revocation extended to 60s (was 30s)
-      // - Canvas cleanup after each capture (removeContainer: true)
+      // v52.5 changes:
+      // - Primary: Web Share API with File object (most reliable on Android)
+      // - Fallback: Synchronous a.click() without setTimeout (prevents dropped downloads)
+      // - Immediate revocation of ALL previous blob URLs before creating new one
 
-      autoDownloadBlob(blob, jobFileName);
-      toast(`📥 Saving ${jobFileName}…`, 'success');
+      const shareFile = new File([blob], jobFileName, { type: 'image/jpeg' });
+      const canNativeShare = navigator.canShare && navigator.canShare({ files: [shareFile] });
 
-      // Wait 2.5s for download to fully register on device, then open WhatsApp
-      setTimeout(() => {
-        toast('Opening WhatsApp… 📎 Attach image from gallery', 'info', 4000);
-        // window.open keeps current page alive (download continues)
-        if (waPhone) {
-          window.open(`https://wa.me/${waPhone}?text=${waText}`, '_blank');
-        } else {
-          window.open(waUrl, '_blank');
+      if (canNativeShare) {
+        // Native share — send image + text directly via share sheet
+        toast('Opening share menu…', 'info');
+        try {
+          await navigator.share({
+            files: [shareFile],
+            title: `Job Card ${j.id}`,
+            text: text
+          });
+          toast('Shared successfully ✅', 'success');
+        } catch (err) {
+          if (err.name === 'AbortError') {
+            toast('Share cancelled', 'info');
+          } else {
+            // Share API failed — fall through to download+WhatsApp
+            console.warn('[AES] Native share failed:', err);
+            autoDownloadBlob(blob, jobFileName);
+            toast(`📥 Saving ${jobFileName}…`, 'success');
+            setTimeout(() => {
+              toast('Opening WhatsApp… 📎 Attach image from gallery', 'info', 4000);
+              window.open(waPhone ? `https://wa.me/${waPhone}?text=${waText}` : waUrl, '_blank');
+            }, 2000);
+          }
         }
-      }, 2500);
+      } else {
+        // Desktop/unsupported: download then open WhatsApp link
+        autoDownloadBlob(blob, jobFileName);
+        toast(`📥 Saving ${jobFileName}…`, 'success');
+        setTimeout(() => {
+          toast('Opening WhatsApp… 📎 Attach image from gallery', 'info', 4000);
+          window.open(waPhone ? `https://wa.me/${waPhone}?text=${waText}` : waUrl, '_blank');
+        }, 2000);
+      }
 
       API.post(`/api/jobs/${j.id}/history`, {
         action: 'Job Card Shared',
@@ -6118,7 +6177,10 @@ async function generateAndShareJobCard(j, shareMode) {
 
     // ── Download-only mode ───────────────────────────────────────────────────
     const downloaded = autoDownloadBlob(blob, jobFileName);
-    if (downloaded) {
+    if (downloaded === 'share_api') {
+      // Web Share API handled it — toast will be shown by share completion
+      toast(`Sharing ${jobFileName} (${outW}x${outH}px, ${(blob.size/1024).toFixed(0)}KB)…`, 'success');
+    } else if (downloaded) {
       toast(`Job card saved: ${jobFileName} (${outW}x${outH}px, ${(blob.size/1024).toFixed(0)}KB)`, 'success');
     } else {
       toast('Download failed — please try again', 'error');
@@ -6133,6 +6195,7 @@ async function generateAndShareJobCard(j, shareMode) {
     console.error('[AES] Job card generation error:', e);
     toast('Failed to generate card — try again', 'error');
   } finally {
+    _cardGenerating = false;
     // v52.4: Aggressively free canvas memory to prevent OOM on repeated captures
     // Mobile devices have limited GPU/canvas memory — release ASAP
     try {
