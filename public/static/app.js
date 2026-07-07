@@ -6121,52 +6121,32 @@ async function generateAndShareJobCard(j, shareMode) {
     }
 
     if (shareMode) {
-      // ── v52.5: RELIABLE SHARE via Web Share API or Download+WhatsApp ──
-      // Strategy A (mobile): Use navigator.share() which opens native share sheet
-      //   → user can directly share to WhatsApp from there (image + text)
-      // Strategy B (fallback): Download file to gallery, then open wa.me link
+      // ── v52.5b: DIRECT WHATSAPP SHARE — Download + wa.me/{phone} ──
+      // Flow:
+      // 1. Download job card image to device gallery (via <a download>)
+      // 2. Open wa.me/{phone}?text=... which opens WhatsApp DIRECTLY to the
+      //    customer's chat (even if number is NOT saved in contacts!)
+      // 3. User just attaches the job card from gallery and hits Send
       //
-      // v52.5 changes:
-      // - Primary: Web Share API with File object (most reliable on Android)
-      // - Fallback: Synchronous a.click() without setTimeout (prevents dropped downloads)
-      // - Immediate revocation of ALL previous blob URLs before creating new one
+      // WHY NOT navigator.share(): Opens generic Android share sheet requiring
+      // manual WhatsApp selection + manual contact search. Useless for walk-in
+      // customers whose numbers aren't saved in the phone.
+      //
+      // WHY wa.me works for unsaved contacts: WhatsApp's wa.me API opens chat
+      // directly by phone number — no contact book lookup needed.
 
-      const shareFile = new File([blob], jobFileName, { type: 'image/jpeg' });
-      const canNativeShare = navigator.canShare && navigator.canShare({ files: [shareFile] });
+      _fallbackDownload(blob, jobFileName);
+      toast(`📥 Saving ${jobFileName} to gallery…`, 'success');
 
-      if (canNativeShare) {
-        // Native share — send image + text directly via share sheet
-        toast('Opening share menu…', 'info');
-        try {
-          await navigator.share({
-            files: [shareFile],
-            title: `Job Card ${j.id}`,
-            text: text
-          });
-          toast('Shared successfully ✅', 'success');
-        } catch (err) {
-          if (err.name === 'AbortError') {
-            toast('Share cancelled', 'info');
-          } else {
-            // Share API failed — fall through to download+WhatsApp
-            console.warn('[AES] Native share failed:', err);
-            autoDownloadBlob(blob, jobFileName);
-            toast(`📥 Saving ${jobFileName}…`, 'success');
-            setTimeout(() => {
-              toast('Opening WhatsApp… 📎 Attach image from gallery', 'info', 4000);
-              window.open(waPhone ? `https://wa.me/${waPhone}?text=${waText}` : waUrl, '_blank');
-            }, 2000);
-          }
-        }
-      } else {
-        // Desktop/unsupported: download then open WhatsApp link
-        autoDownloadBlob(blob, jobFileName);
-        toast(`📥 Saving ${jobFileName}…`, 'success');
-        setTimeout(() => {
-          toast('Opening WhatsApp… 📎 Attach image from gallery', 'info', 4000);
-          window.open(waPhone ? `https://wa.me/${waPhone}?text=${waText}` : waUrl, '_blank');
-        }, 2000);
-      }
+      // Wait 2s for download to register in gallery, then open WhatsApp directly
+      setTimeout(() => {
+        toast('Opening WhatsApp… 📎 Attach job card from gallery & send', 'info', 5000);
+        // wa.me opens customer's chat directly — even for unsaved numbers
+        const waLink = waPhone
+          ? `https://wa.me/${waPhone}?text=${waText}`
+          : `https://wa.me/?text=${waText}`;
+        window.open(waLink, '_blank');
+      }, 2000);
 
       API.post(`/api/jobs/${j.id}/history`, {
         action: 'Job Card Shared',
@@ -6176,11 +6156,8 @@ async function generateAndShareJobCard(j, shareMode) {
     }
 
     // ── Download-only mode ───────────────────────────────────────────────────
-    const downloaded = autoDownloadBlob(blob, jobFileName);
-    if (downloaded === 'share_api') {
-      // Web Share API handled it — toast will be shown by share completion
-      toast(`Sharing ${jobFileName} (${outW}x${outH}px, ${(blob.size/1024).toFixed(0)}KB)…`, 'success');
-    } else if (downloaded) {
+    const downloaded = _fallbackDownload(blob, jobFileName);
+    if (downloaded) {
       toast(`Job card saved: ${jobFileName} (${outW}x${outH}px, ${(blob.size/1024).toFixed(0)}KB)`, 'success');
     } else {
       toast('Download failed — please try again', 'error');
