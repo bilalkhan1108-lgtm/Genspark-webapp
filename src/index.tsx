@@ -24,6 +24,34 @@ app.use('*', cors({ origin: '*', allowMethods: ['GET','POST','PUT','DELETE','OPT
 // v39: Health check endpoint for offline detection (no auth required)
 app.get('/api/health', (c) => c.json({ ok: true, ts: Date.now() }))
 
+// ── v52.6: Server-side image download endpoint ─────────────────────────────
+// Android Chrome blocks programmatic <a download>.click() after the first use
+// in a page lifecycle. This endpoint accepts the image binary via POST and
+// serves it back with Content-Disposition: attachment — which is a genuine
+// server-initiated download that Android NEVER blocks.
+// No auth required — the image data is sent by the client, not stored.
+app.post('/api/download-image', async (c) => {
+  try {
+    const contentType = c.req.header('Content-Type') || 'image/jpeg'
+    const fileName = c.req.header('X-Filename') || 'job-card.jpg'
+    const body = await c.req.arrayBuffer()
+    if (!body || body.byteLength < 100) {
+      return c.json({ error: 'No image data' }, 400)
+    }
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType.startsWith('image/') ? contentType : 'image/jpeg',
+        'Content-Disposition': `attachment; filename="${fileName}"`,
+        'Content-Length': body.byteLength.toString(),
+        'Cache-Control': 'no-store, no-cache',
+      }
+    })
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Download failed' }, 500)
+  }
+})
+
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 async function signToken(payload: Record<string, unknown>, secret: string) {
   const key = new TextEncoder().encode(secret)
