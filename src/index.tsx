@@ -1405,6 +1405,12 @@ app.get('/api/my-requests', authMiddleware, async (c) => {
 // Staff: get recent assignment notifications (approved/denied in last 7 days)
 app.get('/api/my-notifications', authMiddleware, async (c) => {
   try {
+    // v52.7: Ensure staff_read_at column exists (lazy migration)
+    await c.env.DB.prepare(
+      `ALTER TABLE assignment_requests ADD COLUMN staff_read_at TEXT`
+    ).run().catch(() => {}) // Ignore if column already exists
+
+    // v52.7: Only return UNREAD notifications (staff_read_at IS NULL)
     const { results } = await c.env.DB.prepare(`
       SELECT r.id, r.status, r.created_at, r.resolved_at, r.job_id,
              m.product_name
@@ -1412,12 +1418,45 @@ app.get('/api/my-notifications', authMiddleware, async (c) => {
       JOIN machines m ON r.machine_id = m.id
       WHERE r.staff_id=? AND r.status IN ('approved','denied')
         AND r.resolved_at >= datetime('now','-7 days')
+        AND r.staff_read_at IS NULL
       ORDER BY r.resolved_at DESC
       LIMIT 10
     `).bind(c.get('userId')).all<any>()
     return c.json(results || [])
   } catch (_) {
     return c.json([])
+  }
+})
+
+// v52.7: Dismiss/mark staff notifications as read — prevents re-appearing on refresh
+app.post('/api/my-notifications/dismiss', authMiddleware, async (c) => {
+  try {
+    const userId = c.get('userId')
+    const body = await c.req.json<{ ids?: number[] }>()
+
+    // Ensure column exists
+    await c.env.DB.prepare(
+      `ALTER TABLE assignment_requests ADD COLUMN staff_read_at TEXT`
+    ).run().catch(() => {})
+
+    if (body.ids && body.ids.length > 0) {
+      // Dismiss specific notifications by ID
+      const placeholders = body.ids.map(() => '?').join(',')
+      await c.env.DB.prepare(
+        `UPDATE assignment_requests SET staff_read_at=datetime('now')
+         WHERE id IN (${placeholders}) AND staff_id=?`
+      ).bind(...body.ids, userId).run()
+    } else {
+      // Dismiss ALL unread notifications for this staff
+      await c.env.DB.prepare(
+        `UPDATE assignment_requests SET staff_read_at=datetime('now')
+         WHERE staff_id=? AND status IN ('approved','denied')
+           AND staff_read_at IS NULL`
+      ).bind(userId).run()
+    }
+    return c.json({ ok: true })
+  } catch (e: any) {
+    return c.json({ error: e.message }, 500)
   }
 })
 
@@ -1730,11 +1769,12 @@ app.get('/api/reports/my-jobs', authMiddleware, async (c) => {
   const from   = c.req.query('from') || ''
   const to     = c.req.query('to')   || ''
   const userId = c.get('userId')
+  // v52.7: Staff report does NOT include charges — financial data is admin-only
   let q = `
     SELECT j.id AS job_id, j.snap_name AS customer_name, j.snap_mobile AS phone,
            m.product_name AS machine_type, m.product_complaint AS problem_description,
            m.status AS job_status, u.name AS assigned_staff,
-           m.charges, DATE(j.created_at) AS created_date
+           DATE(j.created_at) AS created_date
     FROM machines m
     JOIN jobs j ON m.job_id=j.id
     LEFT JOIN users u ON m.assigned_staff_id=u.id

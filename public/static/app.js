@@ -1661,13 +1661,15 @@ function bindView() {
     }).catch(() => {});
   }
 
-  // Staff: show notification bar for recent request updates (approved/denied)
+  // v52.7: Staff — show notification bar for recent request updates (approved/denied)
+  // Notifications marked as read are excluded server-side (staff_read_at IS NULL filter)
   if (!isAdmin() && S.view === 'dashboard') {
     API.get('/api/my-notifications').then(r => {
       const notes = r.data || [];
       if (!notes.length) return;
       const bar = document.getElementById('staff-notif-bar');
       if (!bar) return;
+      // Build notification items — each carries its DB id for server-side dismiss
       bar.innerHTML = notes.slice(0, 5).map((n, idx) => {
         const icon   = n.status === 'approved' ? '✅' : '❌';
         const color  = n.status === 'approved' ? '#E8F5E9' : '#FFEBEE';
@@ -1676,20 +1678,51 @@ function bindView() {
         const ts     = n.resolved_at || n.created_at;
         const tsStr  = ts ? new Date(_utcFix(ts)).toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', hour12:true }) : '';
         const msg    = `${icon} <b>${action}</b> — Job <b>#${esc(n.job_id)}</b> · <i>${esc(n.product_name)}</i>`;
-        return `<div class="staff-notif-item" data-nidx="${idx}" style="position:relative;background:${color};border-left:4px solid ${border};border-radius:8px;padding:10px 32px 10px 14px;margin-bottom:6px;font-size:13px;line-height:1.5">
+        return `<div class="staff-notif-item" data-nid="${n.id}" style="position:relative;background:${color};border-left:4px solid ${border};border-radius:8px;padding:10px 32px 10px 14px;margin-bottom:6px;font-size:13px;line-height:1.5">
           ${msg}
           <div style="color:#999;font-size:11px;margin-top:3px">${tsStr}</div>
-          <button class="notif-dismiss-btn" data-nidx="${idx}" style="position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;font-size:14px;color:#999;padding:2px 5px;line-height:1;border-radius:4px" title="Dismiss">✕</button>
+          <button class="notif-dismiss-btn" data-nid="${n.id}" style="position:absolute;top:6px;right:6px;background:none;border:none;cursor:pointer;font-size:14px;color:#999;padding:2px 5px;line-height:1;border-radius:4px" title="Dismiss">✕</button>
         </div>`;
       }).join('');
+      // Add "Dismiss All" link if more than 1 notification
+      if (notes.length > 1) {
+        bar.innerHTML += `<div style="text-align:right;padding:0 4px 4px">
+          <button id="notif-dismiss-all" style="background:none;border:none;color:#888;font-size:12px;cursor:pointer;text-decoration:underline;padding:2px 4px">Dismiss All</button>
+        </div>`;
+      }
       bar.style.display = 'block';
-      // Bind dismiss buttons — click small cross to hide individual notification
+
+      // v52.7: Dismiss individual notification — calls server to mark as read permanently
       bar.querySelectorAll('.notif-dismiss-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
+          const nid = parseInt(btn.dataset.nid);
           const item = btn.closest('.staff-notif-item');
-          if (item) { item.style.transition = 'opacity .2s,height .2s,margin .2s,padding .2s'; item.style.opacity = '0'; item.style.height = '0'; item.style.marginBottom = '0'; item.style.paddingTop = '0'; item.style.paddingBottom = '0'; item.style.overflow = 'hidden'; setTimeout(() => item.remove(), 250); }
+          if (item) {
+            item.style.transition = 'opacity .2s,height .2s,margin .2s,padding .2s';
+            item.style.opacity = '0'; item.style.height = '0';
+            item.style.marginBottom = '0'; item.style.paddingTop = '0';
+            item.style.paddingBottom = '0'; item.style.overflow = 'hidden';
+            setTimeout(() => item.remove(), 250);
+          }
+          // Mark as read on server — won't reappear on refresh
+          if (nid) API.post('/api/my-notifications/dismiss', { ids: [nid] }).catch(() => {});
         });
+      });
+
+      // v52.7: Dismiss All button — marks ALL shown notifications as read
+      document.getElementById('notif-dismiss-all')?.addEventListener('click', () => {
+        const allIds = notes.map(n => n.id).filter(Boolean);
+        // Animate out all items
+        bar.querySelectorAll('.staff-notif-item').forEach(item => {
+          item.style.transition = 'opacity .2s,height .2s,margin .2s,padding .2s';
+          item.style.opacity = '0'; item.style.height = '0';
+          item.style.marginBottom = '0'; item.style.paddingTop = '0';
+          item.style.paddingBottom = '0'; item.style.overflow = 'hidden';
+        });
+        setTimeout(() => { bar.innerHTML = ''; bar.style.display = 'none'; }, 300);
+        // Mark all as read on server
+        if (allIds.length) API.post('/api/my-notifications/dismiss', { ids: allIds }).catch(() => {});
       });
     }).catch(() => {});
   }

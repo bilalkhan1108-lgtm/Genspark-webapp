@@ -1,9 +1,9 @@
 // Service Worker — ADITION ELECTRIC SOLUTION v49
 // Strategy: Cache-first for static UI · Network-first w/ cache fallback for API
 // v49: Critical crash fix, global error guard, all v48 features
-const CACHE_VER   = 'aes-v52-7';
-const API_CACHE   = 'aes-api-v52-7';
-const IMG_CACHE   = 'aes-img-v52-7';
+const CACHE_VER   = 'aes-v52-8';
+const API_CACHE   = 'aes-api-v52-8';
+const IMG_CACHE   = 'aes-img-v52-8';
 
 const STATIC_URLS = [
   '/',
