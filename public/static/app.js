@@ -8244,53 +8244,66 @@ async function printAddressLabel(j) {
 }
 
 // Canvas text wrap helper
+// v52.8: Honors \n newlines — splits by newline first, then wraps each line by word
 function wrapText(ctx, text, maxWidth) {
-  const words = text.split(' ');
-  const lines = [];
-  let line = '';
-  for (const word of words) {
-    const test = line ? line + ' ' + word : word;
-    if (ctx.measureText(test).width > maxWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = test;
+  const result = [];
+  // Split by explicit newlines first (preserves user-entered line breaks)
+  const paragraphs = text.split(/\r?\n/);
+  for (const para of paragraphs) {
+    const words = para.split(' ');
+    let line = '';
+    for (const word of words) {
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(test).width > maxWidth && line) {
+        result.push(line);
+        line = word;
+      } else {
+        line = test;
+      }
     }
+    if (line) result.push(line);
+    // If paragraph was empty (consecutive \n), add empty string to preserve blank line
+    if (!para.trim() && result.length > 0 && result[result.length - 1] !== '') result.push('');
   }
-  if (line) lines.push(line);
-  return lines;
+  return result;
 }
 
 // Smart text wrap that handles long words (e.g. "Himmatnagar") by breaking them
+// v52.8: Honors \n newlines — splits by newline first, then wraps each line
 function wrapTextSmart(ctx, text, maxWidth) {
-  const words = text.split(' ');
-  const lines = [];
-  let line = '';
-  for (const word of words) {
-    const test = line ? line + ' ' + word : word;
-    if (ctx.measureText(test).width > maxWidth) {
-      if (line) lines.push(line);
-      // If single word is too wide, break it character by character
-      if (ctx.measureText(word).width > maxWidth) {
-        let part = '';
-        for (const ch of word) {
-          if (ctx.measureText(part + ch).width > maxWidth && part) {
-            lines.push(part);
-            part = ch;
-          } else {
-            part += ch;
+  const result = [];
+  // Split by explicit newlines first (preserves user-entered line breaks)
+  const paragraphs = text.split(/\r?\n/);
+  for (const para of paragraphs) {
+    const words = para.split(' ');
+    let line = '';
+    for (const word of words) {
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(test).width > maxWidth) {
+        if (line) result.push(line);
+        // If single word is too wide, break it character by character
+        if (ctx.measureText(word).width > maxWidth) {
+          let part = '';
+          for (const ch of word) {
+            if (ctx.measureText(part + ch).width > maxWidth && part) {
+              result.push(part);
+              part = ch;
+            } else {
+              part += ch;
+            }
           }
+          line = part;
+        } else {
+          line = word;
         }
-        line = part;
       } else {
-        line = word;
+        line = test;
       }
-    } else {
-      line = test;
     }
+    if (line) result.push(line);
+    if (!para.trim() && result.length > 0 && result[result.length - 1] !== '') result.push('');
   }
-  if (line) lines.push(line);
-  return lines;
+  return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
