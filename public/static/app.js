@@ -6875,9 +6875,25 @@ function categoryOptionsHTML(selected) {
 // ─────────────────────────────────────────────────────────────────────────────
 function reportsHTML() {
   if (!isAdmin()) {
-    // Staff: only export their own jobs
+    // Staff: only export their own jobs + daily repairs view
+    const _today = new Date().toISOString().slice(0, 10);
     return `
     <div class="view-pad">
+      <div class="report-card" style="border-left:4px solid #7B1FA2">
+        <div class="report-title"><i class="fas fa-tools" style="color:#7B1FA2"></i> Daily Repair Report</div>
+        <div class="report-desc">View machines you repaired on a specific date</div>
+        <div class="form-group" style="margin-top:10px">
+          <label class="form-label">Select Date</label>
+          <input id="dr-date-staff" type="date" class="form-input" value="${_today}">
+        </div>
+        <button id="btn-dr-staff" class="btn-sm" style="margin-top:6px;background:#7B1FA2;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer">
+          <i class="fas fa-eye"></i> View Repairs
+        </button>
+        <div id="dr-results-staff" style="display:none;margin-top:12px">
+          <div id="dr-summary-staff" style="padding:10px 12px;background:#F3E5F5;border-radius:8px;font-size:14px;font-weight:700;margin-bottom:8px"></div>
+          <div id="dr-list-staff" style="max-height:400px;overflow-y:auto"></div>
+        </div>
+      </div>
       <div class="report-card">
         <div class="report-title"><i class="fas fa-file-excel" style="color:#43A047"></i> My Jobs Export</div>
         <div class="report-desc">Export your assigned jobs to Excel (.xlsx)</div>
@@ -6893,8 +6909,35 @@ function reportsHTML() {
       </div>
     </div>`;
   }
+  const _todayA = new Date().toISOString().slice(0, 10);
   return `
   <div class="view-pad">
+    <!-- v52.10: DAILY REPAIR REPORT — admin view with staff dropdown -->
+    <div class="report-card" style="border-left:4px solid #7B1FA2">
+      <div class="report-title"><i class="fas fa-tools" style="color:#7B1FA2"></i> Daily Repair Report</div>
+      <div class="report-desc">View machines repaired on a specific date by any staff</div>
+      <div class="form-row-2" style="margin-top:10px">
+        <div class="form-group">
+          <label class="form-label">Select Date</label>
+          <input id="dr-date-admin" type="date" class="form-input" value="${_todayA}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Select Staff</label>
+          <select id="dr-staff-admin" class="form-input">
+            <option value="">All Staff</option>
+            ${(S.staff || []).map(st => `<option value="${st.id}">${esc(st.name)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <button id="btn-dr-admin" class="btn-sm" style="margin-top:6px;background:#7B1FA2;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer">
+        <i class="fas fa-eye"></i> View Repairs
+      </button>
+      <div id="dr-results-admin" style="display:none;margin-top:12px">
+        <div id="dr-summary-admin" style="padding:10px 12px;background:#F3E5F5;border-radius:8px;font-size:14px;font-weight:700;margin-bottom:8px"></div>
+        <div id="dr-list-admin" style="max-height:400px;overflow-y:auto"></div>
+      </div>
+    </div>
+
     <!-- v47: WARRANTY BRAND REPORT — filter by brand + date range, download xlsx -->
     <div class="report-card" id="warranty-brand-card" style="border-left:4px solid #1565C0">
       <div class="report-title"><i class="fas fa-shield-alt" style="color:#1565C0"></i> Warranty Brand Report</div>
@@ -7031,9 +7074,64 @@ function reportsHTML() {
     </div>
   </div>`;
 }
+// v52.10: Shared helper — render daily repair results into a container
+function _renderDailyRepairs(data, summaryEl, listEl, wrapEl, showStaff) {
+  if (!summaryEl || !listEl || !wrapEl) return;
+  wrapEl.style.display = 'block';
+  if (!data.length) {
+    summaryEl.innerHTML = '<span style="color:#888"><i class="fas fa-info-circle"></i> No repaired machines found for this date</span>';
+    listEl.innerHTML = '';
+    return;
+  }
+  summaryEl.innerHTML = `<i class="fas fa-check-circle" style="color:#7B1FA2"></i> Total Repaired: <span style="color:#7B1FA2">${data.length}</span> machine${data.length !== 1 ? 's' : ''}`;
+  const cards = data.map((m, i) => {
+    const staffTag = showStaff && m.staff_name
+      ? `<span style="background:#E8EAF6;color:#3949AB;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;margin-left:6px"><i class="fas fa-user"></i> ${esc(m.staff_name)}</span>`
+      : '';
+    return `<div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:8px;border:1px solid #e8e8e8;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <span style="font-weight:700;color:#1a1a2e;font-size:14px;cursor:pointer;text-decoration:underline" onclick="closeModal();navigate('detail',{jobId:'${esc(m.job_id)}'})">${esc(m.job_id)}</span>
+        <span style="background:#E8F5E9;color:#43A047;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700"><i class="fas fa-check"></i> Repaired</span>
+      </div>
+      <div style="font-size:13px;color:#444;margin-bottom:4px">
+        <i class="fas fa-user" style="color:#888;width:16px"></i> ${esc(m.customer_name)} &nbsp;
+        <a href="tel:${esc(m.phone)}" style="color:#1E88E5;text-decoration:none;font-size:12px"><i class="fas fa-phone"></i> ${esc(m.phone)}</a>
+        ${staffTag}
+      </div>
+      <div style="font-size:13px;color:#555;margin-bottom:3px">
+        <i class="fas fa-mobile-alt" style="color:#888;width:16px"></i> <b>${esc(m.product_name)}</b>
+      </div>
+      <div style="font-size:12px;color:#888">
+        <i class="fas fa-wrench" style="width:16px"></i> ${esc(m.product_complaint || 'N/A')}${m.work_done ? ' — <span style="color:#43A047">' + esc(m.work_done) + '</span>' : ''}
+      </div>
+    </div>`;
+  }).join('');
+  listEl.innerHTML = cards;
+}
+
 function bindReports() {
-  // Staff: my jobs export
+  // Staff: my jobs export + daily repairs
   if (!isAdmin()) {
+    // v52.10: Staff daily repair report
+    document.getElementById('btn-dr-staff')?.addEventListener('click', async () => {
+      const date = document.getElementById('dr-date-staff')?.value;
+      if (!date) { toast('Please select a date', 'error'); return; }
+      const btn = document.getElementById('btn-dr-staff');
+      try {
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading…'; }
+        const r = await API.get('/api/reports/daily-repairs?date=' + encodeURIComponent(date));
+        _renderDailyRepairs(
+          r.data?.data || [],
+          document.getElementById('dr-summary-staff'),
+          document.getElementById('dr-list-staff'),
+          document.getElementById('dr-results-staff'),
+          false
+        );
+        toast(`Found ${r.data?.count || 0} repaired machines`, 'success');
+      } catch (_) { toast('Failed to load daily repairs', 'error'); }
+      finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-eye"></i> View Repairs'; } }
+    });
+
     document.getElementById('btn-mj')?.addEventListener('click', async () => {
       const from = document.getElementById('mj-from')?.value;
       const to   = document.getElementById('mj-to')?.value;
@@ -7053,6 +7151,29 @@ function bindReports() {
     });
     return;
   }
+
+  // v52.10: Admin daily repair report
+  document.getElementById('btn-dr-admin')?.addEventListener('click', async () => {
+    const date    = document.getElementById('dr-date-admin')?.value;
+    const staffId = document.getElementById('dr-staff-admin')?.value;
+    if (!date) { toast('Please select a date', 'error'); return; }
+    const btn = document.getElementById('btn-dr-admin');
+    const p = new URLSearchParams({ date });
+    if (staffId) p.set('staff_id', staffId);
+    try {
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading…'; }
+      const r = await API.get('/api/reports/daily-repairs?' + p);
+      _renderDailyRepairs(
+        r.data?.data || [],
+        document.getElementById('dr-summary-admin'),
+        document.getElementById('dr-list-admin'),
+        document.getElementById('dr-results-admin'),
+        true
+      );
+      toast(`Found ${r.data?.count || 0} repaired machines`, 'success');
+    } catch (_) { toast('Failed to load daily repairs', 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-eye"></i> View Repairs'; } }
+  });
   document.getElementById('btn-export')?.addEventListener('click', async () => {
     try {
       toast('Preparing backup…', 'info');

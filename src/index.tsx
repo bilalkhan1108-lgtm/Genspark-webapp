@@ -1796,6 +1796,43 @@ app.get('/api/reports/my-jobs', authMiddleware, async (c) => {
   })
 })
 
+// v52.10: Daily Repair Report — view machines repaired on a specific date
+// Staff: sees only their own repairs. Admin: can filter by staff or see all.
+app.get('/api/reports/daily-repairs', authMiddleware, async (c) => {
+  const date    = c.req.query('date') || new Date().toISOString().slice(0, 10)
+  const staffId = c.req.query('staff_id') || ''
+  const userId  = c.get('userId')
+  const role    = c.get('userRole')
+  const isAdm   = role === 'admin' || role === 'director' || role === 'manager'
+
+  let q = `
+    SELECT m.id AS machine_id, m.product_name, m.product_complaint,
+           m.status, m.charges, m.quantity, m.work_done,
+           j.id AS job_id, j.snap_name AS customer_name, j.snap_mobile AS phone,
+           u.name AS staff_name, m.updated_at
+    FROM machines m
+    JOIN jobs j ON m.job_id = j.id
+    LEFT JOIN users u ON m.assigned_staff_id = u.id
+    WHERE m.status = 'repaired'
+      AND DATE(m.updated_at) = ?`
+  const ps: any[] = [date]
+
+  if (!isAdm) {
+    // Staff: force filter to own machines only
+    q += ' AND m.assigned_staff_id = ?'
+    ps.push(userId)
+  } else if (staffId) {
+    // Admin with staff filter
+    q += ' AND m.assigned_staff_id = ?'
+    ps.push(staffId)
+  }
+
+  q += ' ORDER BY m.updated_at DESC'
+
+  const { results } = await c.env.DB.prepare(q).bind(...ps).all<any>()
+  return c.json({ ok: true, date, count: results.length, data: results })
+})
+
 app.get('/api/reports/jobs', authMiddleware, adminOnly, async (c) => {
   const from = c.req.query('from') || ''
   const to   = c.req.query('to')   || ''
