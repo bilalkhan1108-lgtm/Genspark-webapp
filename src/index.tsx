@@ -794,9 +794,14 @@ app.get('/api/jobs/:id', authMiddleware, async (c) => {
   const role2 = c.get('userRole')
   const isAdmin = roleLevel(role2) >= 2
 
-  // Staff can't fetch delivered job details
-  if (!isAdmin && job.status === 'delivered')
-    return c.json({ error: 'Forbidden' }, 403)
+  // v52.11: Staff CAN view delivered jobs if they have assigned machines
+  // (Previously blocked all delivered job views for staff, causing "Failed to load job"
+  //  when staff clicked repaired machines from Daily Repair Report)
+  if (!isAdmin && job.status === 'delivered') {
+    const userId = c.get('userId')
+    const hasAssigned = machines.some((m: any) => String(m.assigned_staff_id) === String(userId))
+    if (!hasAssigned) return c.json({ error: 'Forbidden' }, 403)
+  }
 
   const enriched = machines.map((m: any) => ({
     ...m,
@@ -2281,25 +2286,29 @@ app.post('/api/ai/analyze-invoice', authMiddleware, async (c) => {
       if (invoiceNos.length) invoiceCtx += `\nRecent invoice numbers: ${invoiceNos.slice(0,10).join(', ')}`
     }
     const model = await pickModel(geminiKey)
+    // v52.11: Improved invoice AI prompt — prioritize reading the ACTUAL image
+    // Previously the DB context biased Gemini to return known sellers instead of reading the image
     const result = await callGemini(geminiKey, model, [{
       parts: [
         { inlineData: { mimeType, data: base64 } },
-        { text: `Extract information from this purchase invoice/bill image:
-1. purchased_from: The shop/dealer/seller name (look for company name, letterhead, stamp, logo text)
-2. invoice_no: The invoice/bill/receipt number (look for "Invoice No", "Bill No", "Receipt No" etc.)
-3. purchase_date: The date of purchase (convert to YYYY-MM-DD format)
+        { text: `You are analyzing a purchase invoice/bill photo. Extract ONLY what you can see in THIS image.
 
-IMPORTANT: 
-- Look carefully at ALL text in the image, even faint or small text.
-- If you see a stamp, extract the company name from it.
-- Check header, footer, and margins for invoice numbers and dates.
-- If the seller matches a known dealer below, use the exact spelling.
-${invoiceCtx}
+TASK: Read the text visible in this invoice image and extract:
+1. purchased_from: The seller/shop/dealer name visible on THIS invoice (company name, letterhead, stamp, logo)
+2. invoice_no: The bill/invoice/receipt number visible on THIS invoice
+3. purchase_date: The purchase date visible on THIS invoice (convert to YYYY-MM-DD format)
+
+CRITICAL RULES:
+- Extract data ONLY from text visible in THIS specific image. Do NOT guess or use any other source.
+- Read ALL text carefully: headers, footers, stamps, handwritten text, margins, watermarks.
+- If a field is not clearly visible in the image, return an empty string for that field.
+- Do NOT copy data from the reference list below — only use it for SPELLING CORRECTION if the image text closely matches a known name.
+${invoiceCtx ? '\nReference for spelling correction only (DO NOT use these unless the image text matches):' + invoiceCtx : ''}
 
 Return ONLY a JSON object: {"purchased_from":"...","invoice_no":"...","purchase_date":"...","confidence":0.0-1.0}
-- Fields you cannot read: empty strings. 
+- Empty string for fields you cannot clearly read in the image.
 - Date must be YYYY-MM-DD format.
-- Set confidence to at least 0.6 if you can read any field.
+- confidence: How confident you are that the data comes from THIS image (0.0-1.0).
 Return ONLY valid JSON, no markdown, no code fences.` }
       ]
     }], undefined, allKeys)

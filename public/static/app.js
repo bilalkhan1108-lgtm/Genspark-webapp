@@ -1191,8 +1191,9 @@ async function aiAnalyzeInvoice(file, purchasedFromId, invoiceNoId, purchaseDate
   indicator.placeholder = '🤖 AI reading invoice…';
   indicator.style.borderColor = '#7C4DFF';
   try {
-    // v50.3: Higher quality for invoice text extraction + 45s timeout
-    const compressed = await compressImage(file, 1400, 0.88);
+    // v52.11: Higher resolution for invoice text extraction (supports 2-3MB images)
+    // Increased from 1400→1800px max and 0.88→0.90 quality for better OCR accuracy
+    const compressed = await compressImage(file, 1800, 0.90);
     const fd = new FormData();
     fd.append('image', compressed);
     const r = await API.post('/api/ai/analyze-invoice', fd, { timeout: 45000 });
@@ -2749,7 +2750,7 @@ function newJobHTML() {
               <input id="nj-invoice-img" type="file" accept="image/*" style="display:none">
             </label>
             <div id="nj-invoice-preview" style="display:none;align-items:center;gap:4px">
-              <img id="nj-invoice-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100">
+              <img id="nj-invoice-thumb" style="width:60px;height:60px;object-fit:contain;border-radius:8px;border:2px solid #E65100;background:#FFF3E0">
               <button id="nj-invoice-clear" style="margin-left:4px;background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
             </div>
           </div>
@@ -3135,6 +3136,17 @@ function bindNewJob() {
   const invoiceInput = document.getElementById('nj-invoice-img');
   invoiceInput?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
+    // v52.11: Clear previous AI-filled fields before new analysis
+    // Prevents stale data from previous invoice persisting if AI fails on retry
+    const pfEl = document.getElementById('nj-purchased-from');
+    const inEl = document.getElementById('nj-invoice-no');
+    const pdEl = document.getElementById('nj-purchase-date');
+    if (pfEl) pfEl.value = '';
+    if (inEl) inEl.value = '';
+    if (pdEl) pdEl.value = '';
+    // Remove any existing warranty warning
+    document.getElementById('warranty-warn-nj-purchase-date')?.remove();
+    document.getElementById('warranty-warn-nj-purchased-from')?.remove();
     const blobUrl = URL.createObjectURL(file);
     document.getElementById('nj-invoice-thumb').src = blobUrl;
     document.getElementById('nj-invoice-preview').style.display = 'flex';
@@ -3144,6 +3156,15 @@ function bindNewJob() {
   document.getElementById('nj-invoice-clear')?.addEventListener('click', () => {
     if (invoiceInput) invoiceInput.value = '';
     document.getElementById('nj-invoice-preview').style.display = 'none';
+    // v52.11: Clear AI-filled fields when invoice is removed
+    const pfEl = document.getElementById('nj-purchased-from');
+    const inEl = document.getElementById('nj-invoice-no');
+    const pdEl = document.getElementById('nj-purchase-date');
+    if (pfEl) pfEl.value = '';
+    if (inEl) inEl.value = '';
+    if (pdEl) pdEl.value = '';
+    document.getElementById('warranty-warn-nj-purchase-date')?.remove();
+    document.getElementById('warranty-warn-nj-purchased-from')?.remove();
   });
 
   // Voice Note recorder for first machine
@@ -4839,7 +4860,7 @@ function showAddMachineModal(jobId) {
             <input id="am-invoice-img" type="file" accept="image/*" style="display:none">
           </label>
           <div id="am-invoice-preview" style="display:none;align-items:center;gap:4px">
-            <img id="am-invoice-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100">
+            <img id="am-invoice-thumb" style="width:60px;height:60px;object-fit:contain;border-radius:8px;border:2px solid #E65100;background:#FFF3E0">
             <button id="am-invoice-clear" style="margin-left:4px;background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
           </div>
         </div>
@@ -5016,6 +5037,15 @@ function showAddMachineModal(jobId) {
   const amInvoiceInput = document.getElementById('am-invoice-img');
   amInvoiceInput?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
+    // v52.11: Clear previous AI-filled fields before new analysis
+    const pfEl = document.getElementById('am-purchased-from');
+    const inEl = document.getElementById('am-invoice-no');
+    const pdEl = document.getElementById('am-purchase-date');
+    if (pfEl) pfEl.value = '';
+    if (inEl) inEl.value = '';
+    if (pdEl) pdEl.value = '';
+    document.getElementById('warranty-warn-am-purchase-date')?.remove();
+    document.getElementById('warranty-warn-am-purchased-from')?.remove();
     document.getElementById('am-invoice-thumb').src = URL.createObjectURL(file);
     document.getElementById('am-invoice-preview').style.display = 'flex';
     // v49.5: AI auto-read invoice fields
@@ -5024,6 +5054,15 @@ function showAddMachineModal(jobId) {
   document.getElementById('am-invoice-clear')?.addEventListener('click', () => {
     if (amInvoiceInput) amInvoiceInput.value = '';
     document.getElementById('am-invoice-preview').style.display = 'none';
+    // v52.11: Clear AI-filled fields when invoice is removed
+    const pfEl = document.getElementById('am-purchased-from');
+    const inEl = document.getElementById('am-invoice-no');
+    const pdEl = document.getElementById('am-purchase-date');
+    if (pfEl) pfEl.value = '';
+    if (inEl) inEl.value = '';
+    if (pdEl) pdEl.value = '';
+    document.getElementById('warranty-warn-am-purchase-date')?.remove();
+    document.getElementById('warranty-warn-am-purchased-from')?.remove();
   });
 
   // Smart product name input — filter suggestions + update complaint/amount tiles as user types
@@ -5241,7 +5280,7 @@ function showEditMachineModal(m) {
             <input id="em-invoice-img" type="file" accept="image/*" style="display:none">
           </label>
           <div id="em-invoice-preview" style="display:${hasExistingInvoice ? 'flex' : 'none'};align-items:center;gap:4px">
-            ${hasExistingInvoice ? `<img id="em-invoice-thumb" data-auth-src="${m.invoice_image_url}" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100;cursor:pointer" onclick="openImageViewer('${m.invoice_image_url}')">` : `<img id="em-invoice-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:8px;border:2px solid #E65100">`}
+            ${hasExistingInvoice ? `<img id="em-invoice-thumb" data-auth-src="${m.invoice_image_url}" style="width:60px;height:60px;object-fit:contain;border-radius:8px;border:2px solid #E65100;background:#FFF3E0;cursor:pointer" onclick="openImageViewer('${m.invoice_image_url}')">` : `<img id="em-invoice-thumb" style="width:60px;height:60px;object-fit:contain;border-radius:8px;border:2px solid #E65100;background:#FFF3E0">`}
             <button id="em-invoice-clear" style="background:#E53935;color:#fff;border:none;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px"><i class="fas fa-times"></i></button>
           </div>
         </div>
@@ -5342,6 +5381,15 @@ function showEditMachineModal(m) {
   emInvoiceInput?.addEventListener('change', e => {
     const file = e.target.files[0]; if (!file) return;
     emInvoiceNewFile = file;
+    // v52.11: Clear previous AI-filled fields before new analysis
+    const pfEl = document.getElementById('em-purchased-from');
+    const inEl = document.getElementById('em-invoice-no');
+    const pdEl = document.getElementById('em-purchase-date');
+    if (pfEl) pfEl.value = '';
+    if (inEl) inEl.value = '';
+    if (pdEl) pdEl.value = '';
+    document.getElementById('warranty-warn-em-purchase-date')?.remove();
+    document.getElementById('warranty-warn-em-purchased-from')?.remove();
     const thumb = document.getElementById('em-invoice-thumb');
     if (thumb) { thumb.src = URL.createObjectURL(file); thumb.removeAttribute('data-auth-src'); thumb.onclick = null; }
     document.getElementById('em-invoice-preview').style.display = 'flex';
@@ -5353,6 +5401,15 @@ function showEditMachineModal(m) {
     emInvoiceNewFile = null;
     emInvoiceDeleted = true;
     document.getElementById('em-invoice-preview').style.display = 'none';
+    // v52.11: Clear AI-filled fields when invoice is removed
+    const pfEl = document.getElementById('em-purchased-from');
+    const inEl = document.getElementById('em-invoice-no');
+    const pdEl = document.getElementById('em-purchase-date');
+    if (pfEl) pfEl.value = '';
+    if (inEl) inEl.value = '';
+    if (pdEl) pdEl.value = '';
+    document.getElementById('warranty-warn-em-purchase-date')?.remove();
+    document.getElementById('warranty-warn-em-purchased-from')?.remove();
   });
 
   // Load existing invoice thumbnail if present
@@ -7090,7 +7147,7 @@ function _renderDailyRepairs(data, summaryEl, listEl, wrapEl, showStaff) {
       : '';
     return `<div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:8px;border:1px solid #e8e8e8;box-shadow:0 1px 3px rgba(0,0,0,.04)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <span style="font-weight:700;color:#1a1a2e;font-size:14px;cursor:pointer;text-decoration:underline" onclick="closeModal();navigate('detail',{jobId:'${esc(m.job_id)}'})">${esc(m.job_id)}</span>
+        <span style="font-weight:700;color:#1a1a2e;font-size:14px;cursor:pointer;text-decoration:underline" onclick="navigate('detail',{jobId:'${esc(m.job_id)}'})">${esc(m.job_id)}</span>
         <span style="background:#E8F5E9;color:#43A047;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700"><i class="fas fa-check"></i> Repaired</span>
       </div>
       <div style="font-size:13px;color:#444;margin-bottom:4px">
