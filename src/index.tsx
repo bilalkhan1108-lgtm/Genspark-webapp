@@ -1775,8 +1775,9 @@ app.get('/api/reports/my-jobs', authMiddleware, async (c) => {
   const to     = c.req.query('to')   || ''
   const userId = c.get('userId')
   // v52.7: Staff report does NOT include charges — financial data is admin-only
+  // v52.12: Staff report does NOT include phone — customer contact is admin-only
   let q = `
-    SELECT j.id AS job_id, j.snap_name AS customer_name, j.snap_mobile AS phone,
+    SELECT j.id AS job_id, j.snap_name AS customer_name,
            m.product_name AS machine_type, m.product_complaint AS problem_description,
            m.status AS job_status, u.name AS assigned_staff,
            DATE(j.created_at) AS created_date
@@ -1835,7 +1836,15 @@ app.get('/api/reports/daily-repairs', authMiddleware, async (c) => {
   q += ' ORDER BY m.updated_at DESC'
 
   const { results } = await c.env.DB.prepare(q).bind(...ps).all<any>()
-  return c.json({ ok: true, date, count: results.length, data: results })
+
+  // v52.12: Staff cannot see customer phone numbers or financial data
+  const data = isAdm ? results : results.map((r: any) => ({
+    ...r,
+    phone: undefined,
+    charges: undefined
+  }))
+
+  return c.json({ ok: true, date, count: results.length, data })
 })
 
 app.get('/api/reports/jobs', authMiddleware, adminOnly, async (c) => {

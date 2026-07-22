@@ -3418,7 +3418,7 @@ function renderDetail() {
       <div class="info-row">
         <i class="fas fa-user info-icon" style="color:${color}"></i>
         <span class="info-val fw-bold">${esc(j.snap_name)}</span>
-        <button id="btn-save-contact" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:#1E88E5;border-radius:50%;color:#fff;border:none;cursor:pointer;font-size:12px;margin-left:6px;flex-shrink:0;box-shadow:0 2px 6px rgba(30,136,229,.4)" title="Save to Contacts"><i class="fas fa-address-book"></i></button>
+        ${isAdmin() ? `<button id="btn-save-contact" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;background:#1E88E5;border-radius:50%;color:#fff;border:none;cursor:pointer;font-size:12px;margin-left:6px;flex-shrink:0;box-shadow:0 2px 6px rgba(30,136,229,.4)" title="Save to Contacts"><i class="fas fa-address-book"></i></button>` : ''}
         ${j.snap_category ? `<span style="background:#E8EAF6;color:#3949AB;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;margin-left:4px">${esc(j.snap_category)}</span>` : ''}
       </div>
       ${hasSuperRight('view_jobs') ? `
@@ -7141,9 +7141,14 @@ function _renderDailyRepairs(data, summaryEl, listEl, wrapEl, showStaff) {
     return;
   }
   summaryEl.innerHTML = `<i class="fas fa-check-circle" style="color:#7B1FA2"></i> Total Repaired: <span style="color:#7B1FA2">${data.length}</span> machine${data.length !== 1 ? 's' : ''}`;
+  const _canSeePhone = isAdmin(); // v52.12: Only admin can see customer phone numbers
   const cards = data.map((m, i) => {
     const staffTag = showStaff && m.staff_name
       ? `<span style="background:#E8EAF6;color:#3949AB;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;margin-left:6px"><i class="fas fa-user"></i> ${esc(m.staff_name)}</span>`
+      : '';
+    // v52.12: Phone number only shown to admin users
+    const phoneHtml = _canSeePhone && m.phone
+      ? ` <a href="tel:${esc(m.phone)}" style="color:#1E88E5;text-decoration:none;font-size:12px"><i class="fas fa-phone"></i> ${esc(m.phone)}</a>`
       : '';
     return `<div style="background:#fff;border-radius:10px;padding:12px 14px;margin-bottom:8px;border:1px solid #e8e8e8;box-shadow:0 1px 3px rgba(0,0,0,.04)">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
@@ -7151,8 +7156,7 @@ function _renderDailyRepairs(data, summaryEl, listEl, wrapEl, showStaff) {
         <span style="background:#E8F5E9;color:#43A047;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700"><i class="fas fa-check"></i> Repaired</span>
       </div>
       <div style="font-size:13px;color:#444;margin-bottom:4px">
-        <i class="fas fa-user" style="color:#888;width:16px"></i> ${esc(m.customer_name)} &nbsp;
-        <a href="tel:${esc(m.phone)}" style="color:#1E88E5;text-decoration:none;font-size:12px"><i class="fas fa-phone"></i> ${esc(m.phone)}</a>
+        <i class="fas fa-user" style="color:#888;width:16px"></i> ${esc(m.customer_name)}${phoneHtml}
         ${staffTag}
       </div>
       <div style="font-size:13px;color:#555;margin-bottom:3px">
